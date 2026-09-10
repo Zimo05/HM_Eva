@@ -1,0 +1,12 @@
+{
+  "job_key": "a",
+  "dataset": "dws",
+  "model": "HM",
+  "condition": "full",
+  "seed": 1,
+  "variant": "13",
+  "rank": null,
+  "task_start": null,
+  "task_end": null,
+  "inputs": []
+}

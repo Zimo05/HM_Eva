@@ -1,0 +1,11 @@
+{
+  "wall_seconds": 58.59508149999601,
+  "gpu_hours": 0.0,
+  "result_bytes": 21937540,
+  "checkpoint_bytes": 7391199,
+  "host": "NATALIE",
+  "pid": 5812,
+  "checkpoint_inspection_warning": "No module named 'MemoryResiduals'",
+  "peak_gpu_memory_bytes": null,
+  "gpu_measurement_note": "Child-process peak allocation unavailable; use the per-model native log or an external GPU monitor."
+}

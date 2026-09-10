@@ -1,0 +1,2 @@
+﻿bank_capacity,bank_size,bank_utilization,depth,frontier_exposure,is_leaf,left,mean_age,mean_residual_norm,mean_usage,mean_write_quality,node_id,owner_count,parent,right
+128,1,0.0078125,0,400,True,,0.0,0.03733203560113907,0.0,0.45258626341819763,root,400,,

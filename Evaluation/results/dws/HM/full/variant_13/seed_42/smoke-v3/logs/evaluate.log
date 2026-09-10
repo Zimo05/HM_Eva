@@ -1,0 +1,18 @@
+[Preflight] validating checkpoint on source sequence 1
+[Preflight] passed
+[Evaluate] full_frozen: 2 sequences
+[Evaluate] full_frozen 1/2 elapsed=4.0s eta=4.0s
+[Evaluate] full_frozen 2/2 elapsed=8.0s eta=0.0s
+[Evaluate] no_episodic: 2 sequences
+[Evaluate] no_episodic 1/2 elapsed=3.3s eta=3.3s
+[Evaluate] no_episodic 2/2 elapsed=6.8s eta=0.0s
+[Evaluate] no_working: 2 sequences
+[Evaluate] no_working 1/2 elapsed=3.3s eta=3.3s
+[Evaluate] no_working 2/2 elapsed=6.7s eta=0.0s
+[Evaluate] semantic_only: 2 sequences
+[Evaluate] semantic_only 1/2 elapsed=2.7s eta=2.7s
+[Evaluate] semantic_only 2/2 elapsed=5.5s eta=0.0s
+[Evaluate] full_online: 2 sequences
+[Evaluate] full_online 1/2 elapsed=4.6s eta=4.6s
+[Evaluate] full_online 2/2 elapsed=9.3s eta=0.0s
+[Done] report: /home/xinye/HawkesMemory_wfy_TEST/Evaluation/results/dws/HM/full/variant_13/seed_42/smoke-v3/native/report.md

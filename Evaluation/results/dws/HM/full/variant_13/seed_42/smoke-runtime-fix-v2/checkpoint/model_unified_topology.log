@@ -1,0 +1,8 @@
+Epoch: 1
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=9.60568 E_bank_struct=9.60568 N_persistent=16 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=1 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=1 N_shadow=0 N_replay=1 A_probe=+0 route_KL=0.0516455 route_acc=1 N_eff=1 N_L_eff=1 N_R_eff=0 S_structural=1 G_struct=+0.499745 G_pred=+0.499745 G_sigma=0 G_raw=+0.499745 G_conservative=+0.499745 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 1
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=9.60568 E_bank_struct=9.60568 N_persistent=16 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=1 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=1 N_shadow=0 N_replay=1 A_probe=+0 route_KL=0.0516455 route_acc=1 N_eff=1 N_L_eff=1 N_R_eff=0 S_structural=1 G_struct=+0.499745 G_pred=+0.499745 G_sigma=0 G_raw=+0.499745 G_conservative=+0.499745 split=rejected eligible=False ready=False reason=h1_undefined
+

@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/xinye/HawkesMemory_wfy_TEST/Models/HawkesMemory/Memory/Evaluate.py", line 2085, in <module>
+    main()
+  File "/home/xinye/HawkesMemory_wfy_TEST/Models/HawkesMemory/Memory/Evaluate.py", line 1689, in main
+    preflight_checkpoint(
+  File "/home/xinye/HawkesMemory_wfy_TEST/Models/HawkesMemory/Memory/Evaluate.py", line 846, in preflight_checkpoint
+    inference = _configure_evaluation_frontier(inference)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+NameError: name '_configure_evaluation_frontier' is not defined
+[Preflight] validating checkpoint on source sequence 1

@@ -1,0 +1,11 @@
+{
+  "wall_seconds": 53.73300505802035,
+  "gpu_hours": 0.014925834738338988,
+  "result_bytes": 21455303,
+  "checkpoint_bytes": 6910726,
+  "host": "shuang-Super-Server",
+  "pid": 252784,
+  "checkpoint_inspection_warning": "No module named 'MemoryResiduals'",
+  "peak_gpu_memory_bytes": 0,
+  "gpu_name": "NVIDIA GeForce RTX 3090"
+}

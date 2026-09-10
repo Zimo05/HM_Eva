@@ -1,0 +1,5 @@
+{
+  "state": "failed",
+  "error": "command failed with exit code 1; see /home/xinye/HawkesMemory_wfy_TEST/Evaluation/results/dws/HM/full/variant_13/seed_42/smoke/logs/evaluate.log\nTraceback (most recent call last):\n  File \"/home/xinye/HawkesMemory_wfy_TEST/Evaluation/core/runner.py\", line 43, in run_stationary_job\n    evaluate_hm(spec, args, target, env)\n  File \"/home/xinye/HawkesMemory_wfy_TEST/Evaluation/core/adapters.py\", line 179, in evaluate_hm\n    run_command(command, memory, env, result_dir / \"logs\" / \"evaluate.log\")\n  File \"/home/xinye/HawkesMemory_wfy_TEST/Evaluation/core/adapters.py\", line 107, in run_command\n    raise RuntimeError(f\"command failed with exit code {process.returncode}; see {log_path}\")\nRuntimeError: command failed with exit code 1; see /home/xinye/HawkesMemory_wfy_TEST/Evaluation/results/dws/HM/full/variant_13/seed_42/smoke/logs/evaluate.log\n",
+  "updated_at": "2026-09-09T06:58:32.728881+00:00"
+}

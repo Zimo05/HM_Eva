@@ -1,0 +1,10 @@
+{
+  "semantic_label_experiment": {
+    "status": "not_available",
+    "reason": "No audited semantic event-name mapping is present in the reorganized datasets."
+  },
+  "LAMP": {
+    "status": "excluded_from_main_registry",
+    "reason": "Requires external causal-event generation and a separate ranking model."
+  }
+}

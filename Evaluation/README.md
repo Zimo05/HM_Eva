@@ -510,5 +510,3 @@ python validate_result.py --result-dir <正式结果目录>
 ```
 
 如果正式任务失败，请保留结果目录和日志，修复环境后使用相同命令加 `--resume`。完成后将整个正式结果目录交给汇总负责人。
-# HM_Eva
-# HM_Eva

@@ -185,6 +185,9 @@ def prepare_continual_baseline_dataset(
     eval_csv: Path | None = None,
     replay_csvs: list[Path] | None = None,
     protocol: CLProtocol | None = None,
+    train_csvs: list[Path] | None = None,
+    current_task: int | None = None,
+    validation_csv: Path | None = None,
 ) -> Path:
     """Create private task data in each baseline's native on-disk schema."""
     if protocol is None:
@@ -192,20 +195,29 @@ def prepare_continual_baseline_dataset(
     event_dim = protocol.event_dim
     output.mkdir(parents=True, exist_ok=True)
     train = []
-    for task in train_tasks:
-        train.extend(_read_continual_csv(
-            _continual_split_path(
-                data_root, task, "train", protocol
-            ),
-            event_dim,
-        ))
+    if train_csvs is None:
+        if not train_tasks:
+            raise ValueError("train_tasks cannot be empty when train_csvs is omitted")
+        train_paths = [
+            _continual_split_path(data_root, task, "train", protocol)
+            for task in train_tasks
+        ]
+    else:
+        train_paths = [Path(path).expanduser().resolve() for path in train_csvs]
+        if not train_paths:
+            raise ValueError("train_csvs cannot be empty")
+    for train_path in train_paths:
+        train.extend(_read_continual_csv(train_path, event_dim))
     for replay_path in replay_csvs or []:
         train.extend(_read_continual_csv(replay_path, event_dim))
-    current = train_tasks[-1]
+    if current_task is None:
+        if not train_tasks:
+            raise ValueError("current_task is required when train_tasks is empty")
+        current = train_tasks[-1]
+    else:
+        current = int(current_task)
     dev = _read_continual_csv(
-        _continual_split_path(
-            data_root, current, "val", protocol
-        ),
+        validation_csv or _continual_split_path(data_root, current, "val", protocol),
         event_dim,
     )
     test = _read_continual_csv(

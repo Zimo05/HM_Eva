@@ -401,7 +401,11 @@ class TrainingConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     grad_clip: float = 5.0
+    # ``auto`` tries CUDA fused AdamW, then foreach, then the standard path;
+    # explicit values are useful for reproducibility and CPU compatibility.
+    optimizer_impl: str = "auto"
     sleep_every: int = 1
+    evaluation_ablation: str = "full"
     seed: int = 0
     checkpoint_path: str = "checkpoints/memory_tree.pt"
     best_checkpoint_path: Optional[str] = None
@@ -424,18 +428,6 @@ class TrainingConfig:
     controller_train_heads: tuple[str, ...] = ("adapt", "retrieve", "write")
     controller_write_ranking: bool = False
     frozen_state_sha256: Optional[str] = None
-    # Named paper ablation. Stored in checkpoints so evaluation cannot confuse
-    # an ablated run with the full model.
-    evaluation_ablation: str = "full"
-    # Continual-learning protocol provenance.  These fields are appended so
-    # older positional construction of TrainingConfig remains valid.
-    cl_config_path: Optional[str] = None
-    cl_config_sha256: Optional[str] = None
-    benchmark_manifest_path: Optional[str] = None
-    benchmark_manifest_sha256: Optional[str] = None
-    cl_task_id: Optional[int] = None
-    cl_previous_checkpoint: Optional[str] = None
-    cl_config_override: bool = False
 
 
 def _differentiable_merge_settings(
@@ -742,21 +734,88 @@ def clip_grad_norm_finite(
         raise ValueError("max_norm must be positive")
 
     gradients: list[tuple[str, Tensor]] = []
-    maxima: list[Tensor] = []
+    parameter_grads: list[Tensor] = []
+    grouped: dict[tuple[torch.device, torch.dtype], list[Tensor]] = {}
     for name, parameter in named_parameters.items():
         if parameter.grad is None:
             continue
+        parameter_grads.append(parameter.grad)
         grad = parameter.grad.detach()
         if grad.is_sparse:
             grad = grad.coalesce().values()
         gradients.append((name, grad))
-        maxima.append(grad.abs().max())
+        grouped.setdefault((grad.device, grad.dtype), []).append(grad)
 
     if not gradients:
         return 0.0
 
+    maxima: list[Tensor] = []
+    for group in grouped.values():
+        try:
+            maxima.extend(torch._foreach_norm(group, float("inf")))
+        except (AttributeError, RuntimeError, TypeError):
+            maxima.extend(grad.abs().max() for grad in group)
     global_max = torch.stack(maxima).max()
-    if not bool(torch.isfinite(global_max)):
+    # Keep finite/zero handling on the device.  A non-finite gradient gets a
+    # unit scale so it is not allowed to contaminate finite neighbours before
+    # the single status transfer below reports the original parameter name.
+    finite_global = torch.isfinite(global_max)
+    safe_max = torch.where(
+        finite_global & (global_max > 0.0),
+        global_max,
+        torch.ones_like(global_max),
+    )
+
+    # Accumulate in float64 as well as recovering the final norm there.  The
+    # division bounds each element by one, while the double accumulator keeps
+    # a large parameter count from overflowing a float32 reduction.
+    safe_max_double = safe_max.double()
+    scaled_square_sum = torch.zeros(
+        (), device=safe_max.device, dtype=torch.float64
+    )
+    for _, grad in gradients:
+        scaled = grad.double() / safe_max_double
+        scaled_square_sum.add_(scaled.square().sum())
+    total_norm = safe_max_double * scaled_square_sum.sqrt()
+
+    clip_scale = torch.clamp(
+        total_norm.new_tensor(max_norm) / total_norm.clamp_min(1e-300),
+        max=1.0,
+    )
+    clip_scale = torch.where(
+        finite_global & torch.isfinite(total_norm),
+        clip_scale,
+        torch.ones_like(clip_scale),
+    )
+    grad_groups: dict[tuple[torch.device, torch.dtype], list[Tensor]] = {}
+    for grad in parameter_grads:
+        if grad.is_sparse:
+            # Foreach kernels do not support every sparse layout; the scalar
+            # fallback still applies the exact same device-side scale.
+            grad.mul_(
+                clip_scale.to(device=grad.device, dtype=grad.dtype)
+            )
+            continue
+        grad_groups.setdefault((grad.device, grad.dtype), []).append(grad)
+    for (device, dtype), group in grad_groups.items():
+        scale = clip_scale.to(device=device, dtype=dtype)
+        try:
+            torch._foreach_mul_(group, scale)
+        except (AttributeError, RuntimeError, TypeError):
+            for grad in group:
+                grad.mul_(scale)
+
+    # One small status transfer is retained for the existing fail-fast
+    # contract and the scalar return value.  The normal path has no per-
+    # parameter .item()/bool() synchronizations anymore.
+    status_payload = torch.stack((
+        global_max.to(dtype=total_norm.dtype),
+        total_norm,
+        torch.isfinite(global_max).to(dtype=total_norm.dtype),
+        torch.isfinite(total_norm).to(dtype=total_norm.dtype),
+    )).cpu().tolist()
+    finite_status = status_payload[2:]
+    if not all(bool(value) for value in finite_status):
         invalid = []
         for name, grad in gradients:
             finite = torch.isfinite(grad)
@@ -765,41 +824,16 @@ def clip_grad_norm_finite(
                     f"{name}(nan={int(torch.isnan(grad).sum().item())},"
                     f" inf={int(torch.isinf(grad).sum().item())})"
                 )
-        raise FloatingPointError(
-            f"{context}: non-finite gradient values in "
-            + ", ".join(invalid[:12])
-        )
-
-    if float(global_max) == 0.0:
-        return 0.0
-
-    scaled_square_sum = global_max.new_zeros(())
-    for _, grad in gradients:
-        scaled = grad / global_max
-        scaled_square_sum.add_(scaled.square().sum())
-    total_norm = (
-        global_max.double() * scaled_square_sum.double().sqrt()
-    )
-    if not bool(torch.isfinite(total_norm)):
+        if invalid:
+            raise FloatingPointError(
+                f"{context}: non-finite gradient values in "
+                + ", ".join(invalid[:12])
+            )
         raise FloatingPointError(
             f"{context}: finite gradients produced an unrepresentable "
             "float64 global norm"
         )
-
-    clip_scale = torch.clamp(
-        total_norm.new_tensor(max_norm) / total_norm.clamp_min(1e-300),
-        max=1.0,
-    )
-    if float(clip_scale) < 1.0:
-        for parameter in named_parameters.values():
-            if parameter.grad is not None:
-                parameter.grad.mul_(
-                    clip_scale.to(
-                        device=parameter.grad.device,
-                        dtype=parameter.grad.dtype,
-                    )
-                )
-    return float(total_norm.cpu())
+    return float(status_payload[1])
 
 
 def normalize_cuda_rng_states(
@@ -894,6 +928,10 @@ class CausalPrefixEncoder(nn.Module):
             nn.Tanh(),
         )
         self.empty_prefix = nn.Parameter(torch.zeros(z_dim))
+        # A small amount of padding is cheaper than packing/sorting.  This is
+        # a host-side policy constant; it does not affect the model state or
+        # the sequence/batch ordering contract.
+        self.padded_gru_padding_threshold = 0.20
 
     def forward(
         self,
@@ -997,6 +1035,7 @@ class CausalPrefixEncoder(nn.Module):
         valid_mask: Tensor,
         *,
         time_features: Optional[Tensor] = None,
+        lengths_cpu: Optional[Sequence[int]] = None,
     ) -> tuple[Tensor, Tensor]:
         """Encode a padded minibatch of strict prefixes in one GRU pass.
 
@@ -1014,7 +1053,18 @@ class CausalPrefixEncoder(nn.Module):
                 "times/types/valid_mask must align as padded [B, T]"
             )
         lengths = valid_mask.sum(dim=-1)
-        if bool((lengths <= 0).any()):
+        if lengths_cpu is None:
+            # The compatibility path may still receive an arbitrary mask.
+            # Keep the host lengths explicitly so pack_padded_sequence does
+            # not trigger an implicit CUDA->CPU copy later in the call.
+            lengths_cpu = [
+                int(value) for value in lengths.detach().cpu().tolist()
+            ]
+        else:
+            lengths_cpu = [int(value) for value in lengths_cpu]
+            if len(lengths_cpu) != times.size(0):
+                raise ValueError("lengths_cpu must align with batch rows")
+        if any(length <= 0 for length in lengths_cpu):
             raise ValueError("padded prefix batches cannot contain empty rows")
         if time_features is None:
             previous = torch.cat(
@@ -1039,18 +1089,61 @@ class CausalPrefixEncoder(nn.Module):
             ],
             dim=-1,
         )
-        packed = nn.utils.rnn.pack_padded_sequence(
-            inputs,
-            lengths.cpu(),
-            batch_first=True,
-            enforce_sorted=False,
+        max_length = times.size(1)
+        padding_ratio = 1.0 - (
+            sum(lengths_cpu) / max(float(times.size(0) * max_length), 1.0)
         )
-        encoded, _ = self.gru(packed)
-        encoded, _ = nn.utils.rnn.pad_packed_sequence(
-            encoded,
-            batch_first=True,
-            total_length=times.size(1),
-        )
+        if padding_ratio <= self.padded_gru_padding_threshold:
+            # When most rows reach Tmax, a dense GRU avoids pack/unpack and
+            # the associated sorting kernels. Future padding is masked out
+            # after the recurrent pass and cannot affect earlier prefixes.
+            encoded, _ = self.gru(inputs)
+        else:
+            # Sort only inside this already selected batch.  The explicit
+            # stable order removes the implicit ``enforce_sorted=False`` sort
+            # and its hidden permutation, while ``inverse_pos`` restores the
+            # original batch row/event order before flattening.
+            sorted_pos = sorted(
+                range(len(lengths_cpu)),
+                key=lambda index: (-lengths_cpu[index], index),
+            )
+            sorted_lengths_cpu = [lengths_cpu[index] for index in sorted_pos]
+            if sorted_pos == list(range(len(lengths_cpu))):
+                sorted_inputs = inputs
+                inverse_pos_gpu = None
+            else:
+                sorted_pos_gpu = torch.as_tensor(
+                    sorted_pos,
+                    dtype=torch.long,
+                    device=inputs.device,
+                )
+                sorted_inputs = inputs.index_select(0, sorted_pos_gpu)
+                inverse_pos = [0] * len(sorted_pos)
+                for sorted_index, original_index in enumerate(sorted_pos):
+                    inverse_pos[original_index] = sorted_index
+                inverse_pos_gpu = torch.as_tensor(
+                    inverse_pos,
+                    dtype=torch.long,
+                    device=inputs.device,
+                )
+            packed = nn.utils.rnn.pack_padded_sequence(
+                sorted_inputs,
+                torch.as_tensor(
+                    sorted_lengths_cpu,
+                    dtype=torch.long,
+                    device="cpu",
+                ),
+                batch_first=True,
+                enforce_sorted=True,
+            )
+            encoded, _ = self.gru(packed)
+            encoded, _ = nn.utils.rnn.pad_packed_sequence(
+                encoded,
+                batch_first=True,
+                total_length=max_length,
+            )
+            if inverse_pos_gpu is not None:
+                encoded = encoded.index_select(0, inverse_pos_gpu)
         projected = self.output(encoded)
         strict = torch.cat(
             [

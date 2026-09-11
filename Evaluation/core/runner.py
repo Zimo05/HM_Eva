@@ -18,6 +18,7 @@ from .data import (
     continual_protocol,
     dataset_inputs,
     prepare_continual_baseline_dataset,
+    prepare_continual_hm_dataset,
     prepare_hm_dataset,
 )
 from .io import sha256, write_csv, write_json
@@ -37,7 +38,8 @@ from .specs import JobSpec
 def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full", script: str = "") -> Path:
     spec = JobSpec(dataset=dataset, model=model, condition=condition, script=script)
     target = result_dir(spec, args)
-    command, cwd, env = stationary_command(spec, args, target)
+    prepared = target / "prepared" if dataset == "dws" or model == "HM" else None
+    command, cwd, env = stationary_command(spec, args, target, prepared=prepared)
     inputs = dataset_inputs(dataset, getattr(args, "variant", None))
     if args.checkpoint is not None:
         inputs.append(args.checkpoint)
@@ -51,11 +53,11 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
         return target
     started = time.perf_counter()
     try:
-        if model == "HM":
+        if prepared is not None:
             prepare_hm_dataset(
                 spec.dataset,
                 args.seed,
-                target / "prepared",
+                prepared,
                 getattr(args, "variant", None),
             )
         run_command(command, cwd, env, target / "logs" / "train.log")
@@ -97,37 +99,30 @@ def _continual_hm_command(
     memory = MODELS_ROOT / "HawkesMemory" / "Memory"
     last_checkpoint = target / "checkpoint" / f"task_{task:02d}_last.pt"
     best_checkpoint = target / "checkpoint" / f"task_{task:02d}_best.pt"
-    train_path = protocol.train_path(task)
-    validation_path = protocol.val_path(task)
-    if train_path.name != "train.csv":
-        raise ValueError(
-            f"continual protocol train split must be train.csv: {train_path}"
-        )
-    if validation_path.name not in {"val.csv", "validation.csv"}:
-        raise ValueError(
-            "continual protocol validation split must be val.csv or "
-            f"validation.csv: {validation_path}"
-        )
+    prepared = target / "prepared" / f"hm_task_{task:02d}"
+    data_path, split_manifest = prepare_continual_hm_dataset(
+        data_root,
+        prepared,
+        task,
+        protocol,
+    )
     cold_start_epochs = 0 if previous is not None else (1 if args.smoke else 5)
+    initial_checkpoint = target / "checkpoint" / f"initial_seed{args.seed}.pt"
     topology_events_path = target / "topology_events.jsonl"
     command = [
         args.python_executable or sys.executable,
         "-m",
         "Train.Train",
         "--data-path",
-        str(train_path),
-        "--validation-data-path",
-        str(validation_path),
+        str(data_path),
+        "--split-manifest",
+        str(split_manifest),
+        "--split",
+        "train",
         "--checkpoint",
         str(last_checkpoint),
         "--best-checkpoint",
         str(best_checkpoint),
-        "--cl-config",
-        str(target / "cl_config.json"),
-        "--benchmark-manifest",
-        str(protocol.manifest_path),
-        "--cl-task-id",
-        str(task),
         "--tree-init-depth",
         "0",
         "--seed",
@@ -142,19 +137,21 @@ def _continual_hm_command(
         str(topology_events_path),
     ]
     if previous is None:
-        command += [
-            "--initial-checkpoint-output",
-            str(target / "checkpoint" / f"initial_seed{args.seed}.pt"),
-        ]
-    if strategy in {"no_working", "no_episodic", "fixed_topology", "no_sleep", "heuristic_controller", "no_merge_prune"}:
-        command += ["--evaluation-ablation", strategy]
+        command += ["--initial-checkpoint-output", str(initial_checkpoint)]
     if previous is not None:
         command += [
             "--resume",
             str(previous),
-            "--cl-previous-checkpoint",
-            str(previous),
         ]
+    if strategy in {
+        "no_working",
+        "no_episodic",
+        "fixed_topology",
+        "no_sleep",
+        "heuristic_controller",
+        "no_merge_prune",
+    }:
+        command += ["--evaluation-ablation", strategy]
     if args.smoke:
         command += ["--max-sequences", "2", "--max-events-per-sequence", "12", "--no-training-plots"]
     env = os.environ.copy()
@@ -1096,17 +1093,18 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
             if existing_resource.exists():
                 resource_manifest = json.loads(existing_resource.read_text(encoding="utf-8"))
             for task in task_ids:
+                is_initial_task = previous is None
                 command, cwd, env = _continual_hm_command(
                     args, target, data_root, task, previous, strategy,
                     protocol=protocol,
                 )
                 commands.append(command)
                 run_command(command, cwd, env, target / "logs" / f"task_{task:02d}.log")
-                if previous is None:
+                if is_initial_task:
                     initial_checkpoint = target / "checkpoint" / f"initial_seed{args.seed}.pt"
                     if not initial_checkpoint.is_file():
                         raise FileNotFoundError(
-                            f"fresh CL stage did not produce its initial scratch checkpoint: "
+                            "task 0 did not produce the pre-update FWT checkpoint: "
                             f"{initial_checkpoint}"
                         )
                 last_checkpoint = target / "checkpoint" / f"task_{task:02d}_last.pt"
@@ -1156,6 +1154,12 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
                 }
                 write_json(existing_resource, resource_manifest)
             eval_command = [args.python_executable or __import__("sys").executable, "-m", "EvaluateCL", "--data-root", str(data_root), "--checkpoint-dir", str(target / "checkpoint"), "--output-dir", str(target / "native"), "--task-start", str(args.task_start), "--task-end", str(args.task_end), "--device", resolved_device(args.device), "--resume", "--save-event-predictions"]
+            if strategy == "no_working":
+                eval_command += ["--variants", "frozen/full"]
+            elif strategy == "no_episodic":
+                eval_command += [
+                    "--variants", "frozen/full", "frozen/no_episodic"
+                ]
             initial_checkpoint = target / "checkpoint" / f"initial_seed{args.seed}.pt"
             if initial_checkpoint.is_file():
                 eval_command += [

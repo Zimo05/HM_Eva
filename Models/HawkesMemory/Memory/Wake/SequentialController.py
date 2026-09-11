@@ -500,8 +500,12 @@ class Controller(nn.Module):
                 raw_probabilities[action_index],
                 raw_probabilities[action_index] * 0.0,
             )
-        if not bool(self.split_enabled):
-            probabilities[3] = raw_probabilities[3] * 0.0
+        # Keep the enable flag device-side.  Converting a CUDA bool buffer to
+        # a Python bool inserts a synchronization point and can also obscure
+        # the source of an earlier asynchronous kernel failure.
+        probabilities[3] = raw_probabilities[3] * self.split_enabled.to(
+            raw_probabilities
+        )
         gates = ControllerOutput(*probabilities.unbind(dim=-1))
         return {
             "normalized_surprise": normalized_surprise,
@@ -581,8 +585,11 @@ class Controller(nn.Module):
                 raw_probabilities[..., action_index],
                 raw_probabilities[..., action_index] * 0.0,
             )
-        if not bool(self.split_enabled):
-            probabilities[..., 3] = raw_probabilities[..., 3] * 0.0
+        # ``split_enabled`` is a device buffer; multiplying by it avoids a
+        # CUDA-to-host scalar read on every batched controller invocation.
+        probabilities[..., 3] = raw_probabilities[..., 3] * self.split_enabled.to(
+            raw_probabilities
+        )
         return {
             "normalized_surprise": normalized,
             "features": features,

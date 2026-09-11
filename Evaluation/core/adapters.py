@@ -40,7 +40,12 @@ def resolved_device(device: str) -> str:
         return "cpu"
 
 
-def stationary_command(spec, args, result_dir: Path) -> tuple[list[str], Path, dict[str, str]]:
+def stationary_command(
+    spec,
+    args,
+    result_dir: Path,
+    prepared: Path | None = None,
+) -> tuple[list[str], Path, dict[str, str]]:
     native = result_dir / "native"
     python = python_for(args)
     epochs = args.epochs or (1 if args.smoke else None)
@@ -53,6 +58,8 @@ def stationary_command(spec, args, result_dir: Path) -> tuple[list[str], Path, d
         command = [python, str(script), "--dataset", spec.dataset, "--seed", str(args.seed), "--output-dir", str(native), "--archive", str(result_dir / "native.tar.gz"), "--overwrite", "--gpu", device_index(args.device)]
         if spec.dataset == "dws":
             command += ["--variant", args.variant]
+        if prepared is not None:
+            command += ["--prepared-data-dir", str(prepared)]
         if epochs:
             command += ["--epochs", str(epochs)]
         if batch:
@@ -62,6 +69,8 @@ def stationary_command(spec, args, result_dir: Path) -> tuple[list[str], Path, d
         script = MODELS_ROOT / "THP" / "run_experiment.py"
         dataset = f"dws_{args.variant}" if spec.dataset == "dws" else spec.dataset
         command = [python, str(script), "--dataset", dataset, "--seed", str(args.seed), "--device", device, "--output-dir", str(native), "--archive", str(result_dir / "native.tar.gz"), "--overwrite"]
+        if prepared is not None:
+            command += ["--prepared-data-dir", str(prepared)]
         if epochs:
             command += ["--epochs", str(epochs)]
         if batch:
@@ -69,8 +78,10 @@ def stationary_command(spec, args, result_dir: Path) -> tuple[list[str], Path, d
         return command, MODELS_ROOT / "THP", env
     if spec.model == "TPP_LLM":
         script = MODELS_ROOT / "TPP-LLM" / "scripts" / "train_tpp_llm.py"
-        data_dir = result_dir / "prepared" / "tpp_llm"
+        data_dir = prepared or (result_dir / "prepared" / "tpp_llm")
         command = [python, str(script), "--evaluation_dataset", spec.dataset, "--evaluation_output", str(native), "--data_path", str(data_dir), "--device", device, "--seed", str(args.seed), "--peft_type", "lora", "--lora_rank", "16", "--anonymous_labels"]
+        if prepared is not None:
+            command += ["--prepared_data"]
         if spec.dataset == "dws":
             command += ["--evaluation_variant", args.variant]
         if epochs:
@@ -79,7 +90,7 @@ def stationary_command(spec, args, result_dir: Path) -> tuple[list[str], Path, d
             command += ["--train_batch_size", str(batch), "--eval_batch_size", str(batch)]
         return command, MODELS_ROOT / "TPP-LLM", env
     if spec.model == "HM":
-        prepared = result_dir / "prepared"
+        prepared = prepared or (result_dir / "prepared")
         # Dataset preparation belongs to the runner, after the result manifest
         # has been accepted.  Keeping command construction side-effect free is
         # important for --dry-run and for clean failure reporting.
@@ -89,7 +100,14 @@ def stationary_command(spec, args, result_dir: Path) -> tuple[list[str], Path, d
         checkpoint = result_dir / "checkpoint" / "model.pt"
         best = result_dir / "checkpoint" / "best.pt"
         command = [python, "-m", "Train.Train", "--data-path", str(data_path), "--split-manifest", str(split_manifest), "--split", "train", "--tree-init-depth", "0", "--checkpoint", str(checkpoint), "--best-checkpoint", str(best), "--seed", str(args.seed), "--device", device]
-        if spec.condition in {"no_working", "no_episodic", "fixed_topology", "no_sleep", "heuristic_controller", "no_merge_prune"}:
+        if spec.condition in {
+            "no_working",
+            "no_episodic",
+            "fixed_topology",
+            "no_sleep",
+            "heuristic_controller",
+            "no_merge_prune",
+        }:
             command += ["--evaluation-ablation", spec.condition]
         if getattr(args, "rank", None) is not None:
             rank = "8" if args.rank == "D" else args.rank

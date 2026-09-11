@@ -5,6 +5,128 @@ from __future__ import annotations
 from Train.TrainingComponents import *  # noqa: F403
 
 
+@dataclass
+class ResidentSequenceStore:
+    """Padded, device-resident view of the immutable training dataset.
+
+    The list-of-dictionaries representation remains the compatibility source
+    of metadata such as ``source_index``.  This store contains only the
+    tensors used by the Wake/Global hot path, so a batch can be gathered with
+    one index operation instead of repeatedly moving and padding individual
+    sequences.  ``lengths_cpu`` is deliberately retained because
+    ``pack_padded_sequence`` requires host lengths.
+    """
+
+    times: Tensor
+    types: Tensor
+    time_features: Tensor
+    history: Tensor
+    interval: Tensor
+    duration: Tensor
+    valid: Tensor
+    lengths_gpu: Tensor
+    lengths_cpu: list[int]
+
+    @classmethod
+    def from_sequences(
+        cls,
+        sequences: Sequence[Mapping[str, Tensor]],
+        device: torch.device,
+    ) -> "ResidentSequenceStore":
+        if not sequences:
+            raise ValueError("resident sequence store cannot be empty")
+
+        lengths_cpu = [
+            int(sequence["times"].numel()) for sequence in sequences
+        ]
+        if any(length <= 0 for length in lengths_cpu):
+            raise ValueError("resident sequence store cannot contain empties")
+
+        def padded(key: str, padding_value: float | int = 0) -> Tensor:
+            values = [sequence[key] for sequence in sequences]
+            return nn.utils.rnn.pad_sequence(
+                values,
+                batch_first=True,
+                padding_value=padding_value,
+            ).to(device=device)
+
+        times = padded("times")
+        types = padded("types", padding_value=0).long()
+        time_features = padded(EVENT_TIME_FEATURES_KEY)
+        history = padded(HAWKES_HISTORY_STATS_KEY)
+        interval = padded(HAWKES_INTERVAL_STATS_KEY)
+
+        duration_rows = []
+        for sequence in sequences:
+            event_times = sequence["times"]
+            previous = torch.cat(
+                [event_times.new_zeros(1), event_times[:-1]]
+            )
+            duration_rows.append(
+                (event_times - previous).clamp_min(0.0)
+            )
+        duration = nn.utils.rnn.pad_sequence(
+            duration_rows,
+            batch_first=True,
+            padding_value=0.0,
+        ).to(device=device)
+        valid = torch.arange(
+            times.size(1),
+            device=device,
+            dtype=torch.long,
+        )[None, :] < torch.as_tensor(
+            lengths_cpu,
+            device=device,
+            dtype=torch.long,
+        )[:, None]
+        lengths_gpu = torch.as_tensor(
+            lengths_cpu,
+            device=device,
+            dtype=torch.long,
+        )
+        return cls(
+            times=times,
+            types=types,
+            time_features=time_features,
+            history=history,
+            interval=interval,
+            duration=duration,
+            valid=valid,
+            lengths_gpu=lengths_gpu,
+            lengths_cpu=lengths_cpu,
+        )
+
+    def gather(
+        self,
+        sequence_indices: Sequence[int],
+    ) -> Dict[str, Any]:
+        if torch.is_tensor(sequence_indices):
+            index_list = [
+                int(value)
+                for value in sequence_indices.detach().to(device="cpu").tolist()
+            ]
+        else:
+            index_list = [int(value) for value in sequence_indices]
+        if any(index < 0 or index >= len(self.lengths_cpu) for index in index_list):
+            raise IndexError("resident sequence index is outside the dataset")
+        rows = torch.as_tensor(
+            index_list,
+            device=self.times.device,
+            dtype=torch.long,
+        )
+        return {
+            "times": self.times.index_select(0, rows),
+            "types": self.types.index_select(0, rows),
+            "time_features": self.time_features.index_select(0, rows),
+            "history": self.history.index_select(0, rows),
+            "interval": self.interval.index_select(0, rows),
+            "duration": self.duration.index_select(0, rows),
+            "valid": self.valid.index_select(0, rows),
+            "lengths_gpu": self.lengths_gpu.index_select(0, rows),
+            "lengths_cpu": [self.lengths_cpu[index] for index in index_list],
+        }
+
+
 class TrainingWakeSupportMixin:
     def _persistent_memory_stats(self) -> tuple[int, float]:
         """Return resident prototype count and evidence mass.
@@ -35,6 +157,30 @@ class TrainingWakeSupportMixin:
         row_indices: Optional[Tensor] = None,
     ):
         """Recompose Hawkes parameters while leaving routing weights untouched."""
+        # Global stores these two affine reductions once per batch.  Applying
+        # a controller gate is then only an elementwise operation in raw
+        # (unconstrained) Hawkes space; the legacy leaf-wise composition below
+        # remains available for Wake and compatibility callers.
+        reduced_semantic = memory_output.get("semantic_base")
+        reduced_episodic = memory_output.get("episodic_base")
+        if reduced_semantic is not None and reduced_episodic is not None:
+            if row_indices is not None:
+                reduced_semantic = reduced_semantic.index_select(
+                    0, row_indices
+                )
+                reduced_episodic = reduced_episodic.index_select(
+                    0, row_indices
+                )
+            gate = torch.as_tensor(retrieval_gate).to(reduced_episodic)
+            while gate.ndim < reduced_episodic.ndim:
+                gate = gate.unsqueeze(-1)
+            theta = (
+                reduced_semantic
+                + gate * reduced_episodic
+                + working_delta
+            )
+            return self._effective_parameters_from_theta(theta)
+
         semantic = memory_output["frontier_semantic_theta"]
         episodic = memory_output["frontier_episodic_delta"]
         routing = memory_output["r"]
@@ -112,6 +258,56 @@ class TrainingWakeSupportMixin:
             return dict(sequence)
 
         self._resident_cache_misses += 1
+        miss_reasons = getattr(self, "_resident_cache_miss_reasons", None)
+        if miss_reasons is not None:
+            tensor_fields_ready = all(
+                torch.is_tensor(value) for value in required_tensors
+            )
+            checks = {
+                "tensor_fields": tensor_fields_ready,
+                "device": (
+                    tensor_fields_ready
+                    and all(
+                        value.device == self.device
+                        for value in required_tensors
+                    )
+                ),
+                "signature": (
+                    sequence.get(HAWKES_CACHE_SIGNATURE_KEY)
+                    == self.hawkes.cache_signature
+                ),
+                "times_shape": (
+                    torch.is_tensor(times) and times.ndim == 1
+                ),
+                "types_shape_dtype": (
+                    torch.is_tensor(times)
+                    and torch.is_tensor(types)
+                    and types.shape == times.shape
+                    and types.dtype == torch.long
+                ),
+                "history_shape": (
+                    torch.is_tensor(history)
+                    and history.shape == expected_hawkes_shape
+                ),
+                "interval_shape": (
+                    torch.is_tensor(interval)
+                    and interval.shape == expected_hawkes_shape
+                ),
+                "time_features_shape": (
+                    torch.is_tensor(time_features)
+                    and time_features.shape == (event_count, 2)
+                ),
+                "T_device": (
+                    "T" not in sequence
+                    or (
+                        torch.is_tensor(sequence["T"])
+                        and sequence["T"].device == self.device
+                    )
+                ),
+            }
+            miss_reasons.update(
+                key for key, passed in checks.items() if not passed
+            )
         cached = self.hawkes.prepare_sequence_cache(sequence, inplace=True)
         result = {
             "times": cached["times"].to(self.device),
@@ -2466,7 +2662,9 @@ class TrainingWakeSupportMixin:
     def _encode_global_sequence_batch(
         self,
         sequences: Sequence[Mapping[str, Tensor]],
-    ) -> tuple[Tensor, Dict[str, Tensor]]:
+        *,
+        sequence_indices: Optional[Sequence[int]] = None,
+    ) -> tuple[Tensor, Dict[str, Any]]:
         """Encode and flatten a variable-length cross-sequence minibatch.
 
         Flattening follows padded row-major order, which is exactly the former
@@ -2476,13 +2674,72 @@ class TrainingWakeSupportMixin:
         """
         if not sequences:
             raise ValueError("global sequence batches cannot be empty")
-        lengths = torch.tensor(
-            [int(sequence["times"].numel()) for sequence in sequences],
+
+        resident_store = getattr(self, "_resident_sequence_store", None)
+        if resident_store is not None and sequence_indices is not None:
+            packed = resident_store.gather(sequence_indices)
+            lengths_cpu = packed["lengths_cpu"]
+            lengths = packed["lengths_gpu"]
+            times = packed["times"]
+            types = packed["types"]
+            time_features = packed["time_features"]
+            valid = packed["valid"]
+            if isinstance(self.encoder, CausalPrefixEncoder):
+                padded_z, _ = self.encoder.forward_padded_prefix(
+                    times,
+                    types,
+                    valid,
+                    time_features=time_features,
+                    lengths_cpu=lengths_cpu,
+                )
+                z_flat = padded_z[valid]
+            else:
+                # Non-recurrent compatibility encoders still use the legacy
+                # per-sequence adapter.  The resident store remains useful
+                # for the Hawkes tensors and metadata in that mode.
+                z_flat = torch.cat(
+                    [
+                        self._encode_memory_sequence(sequence)
+                        for sequence in sequences
+                    ],
+                    dim=0,
+                )
+            sequence_index = torch.repeat_interleave(
+                torch.arange(
+                    len(sequences),
+                    device=self.device,
+                    dtype=torch.long,
+                ),
+                lengths,
+            )
+            flat = {
+                "types": packed["types"][packed["valid"]],
+                "duration": packed["duration"][packed["valid"]],
+                HAWKES_HISTORY_STATS_KEY: packed["history"][packed["valid"]],
+                HAWKES_INTERVAL_STATS_KEY: packed["interval"][packed["valid"]],
+                "sequence_index": sequence_index,
+                "sequence_lengths": lengths,
+                # ``pack_padded_sequence`` already consumed these host
+                # lengths.  Keep the same list in the flat metadata so Wake
+                # bookkeeping does not perform another CUDA->CPU transfer.
+                "sequence_lengths_cpu": lengths_cpu,
+            }
+            if z_flat.size(0) != sequence_index.numel():
+                raise RuntimeError(
+                    "flattened Encoder rows do not align with sequence events"
+                )
+            return z_flat, flat
+
+        lengths_cpu = [
+            int(sequence["times"].numel()) for sequence in sequences
+        ]
+        if any(length <= 0 for length in lengths_cpu):
+            raise ValueError("global sequence batches cannot contain empties")
+        lengths = torch.as_tensor(
+            lengths_cpu,
             device=self.device,
             dtype=torch.long,
         )
-        if bool((lengths <= 0).any()):
-            raise ValueError("global sequence batches cannot contain empties")
 
         if isinstance(self.encoder, CausalPrefixEncoder):
             times = nn.utils.rnn.pad_sequence(
@@ -2509,6 +2766,7 @@ class TrainingWakeSupportMixin:
                 types,
                 valid,
                 time_features=time_features,
+                lengths_cpu=lengths_cpu,
             )
             z_flat = padded_z[valid]
         else:
@@ -2555,6 +2813,7 @@ class TrainingWakeSupportMixin:
             ),
             "sequence_index": sequence_index,
             "sequence_lengths": lengths,
+            "sequence_lengths_cpu": lengths_cpu,
         }
         if z_flat.size(0) != sequence_index.numel():
             raise RuntimeError(

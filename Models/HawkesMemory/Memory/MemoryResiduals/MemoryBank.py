@@ -763,6 +763,7 @@ class SmoothSparseRetriever(nn.Module):
         null_logit: Optional[float | Tensor] = None,
         row_bank_indices: Optional[Tensor] = None,  # [R] into shared B
         context_valid: Optional[Tensor] = None,  # [R, M, K_ctx]
+        keys_normalized: bool = False,
     ):
         """Retrieve from padded banks with one independently normalized row.
 
@@ -828,7 +829,8 @@ class SmoothSparseRetriever(nn.Module):
         lambda_age = self.positive(self.raw_lambda_age)
 
         query = F.normalize(query, dim=-1)
-        keys = F.normalize(keys, dim=-1)
+        if not keys_normalized:
+            keys = F.normalize(keys, dim=-1)
         if keys.ndim == 4:
             alias_sim = torch.einsum("rmkd,rd->rmk", keys, query)
             alias_any = context_valid.any(dim=-1)
@@ -908,30 +910,17 @@ class SmoothSparseRetriever(nn.Module):
                 "rm,rmp->rp", weighted_alpha, deltas
             )
         else:
-            # Frontier rows repeatedly visit the same small set of tree
-            # nodes.  Expanding shared [node, M, P] residual banks to
-            # [visit, M, P] can require several GiB.  Aggregate visits by
-            # source node instead, so the dominant residual tensor remains
-            # shared and peak temporary memory is independent of R * M * P.
-            delta_epi = deltas.new_zeros(
-                query.size(0), deltas.size(-1)
-            )
-            for bank_index in torch.unique(
-                row_bank_indices
-            ).detach().cpu().tolist():
-                rows = torch.nonzero(
-                    row_bank_indices == int(bank_index),
-                    as_tuple=False,
-                ).flatten()
-                # Chunk the output-side matmul as well: a heavily visited
-                # root should not create another full [R, P] temporary.
-                for start in range(0, int(rows.numel()), 1024):
-                    row_chunk = rows[start : start + 1024]
-                    node_delta = (
-                        weighted_alpha.index_select(0, row_chunk)
-                        @ deltas[int(bank_index)]
-                    )
-                    delta_epi.index_copy_(0, row_chunk, node_delta)
+            # ``read_packed`` already bounds R to a small chunk.  Gathering
+            # the shared bank rows and using one batched matmul removes the
+            # CUDA synchronisation and nested Python loops that previously
+            # grouped rows through ``unique().cpu().tolist()``.  The gather is
+            # deliberately chunk-local, so it does not recreate the former
+            # full [visit, capacity, param] allocation.
+            selected_deltas = deltas.index_select(0, row_bank_indices)
+            delta_epi = torch.bmm(
+                weighted_alpha.unsqueeze(1),
+                selected_deltas,
+            ).squeeze(1)
 
         info = {
             "sim": sim.detach(),

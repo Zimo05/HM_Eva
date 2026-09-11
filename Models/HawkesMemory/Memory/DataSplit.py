@@ -41,19 +41,20 @@ def create_stratified_manifest(
         groups[int(cluster)].append(int(source_index))
     required = train_per_cluster + validation_per_cluster + test_per_cluster
     splits = {"train": [], "validation": [], "test": []}
-    rng = random.Random(seed)
     for cluster in sorted(groups):
         values = list(groups[cluster])
         if len(values) != required:
             raise ValueError(
                 f"cluster {cluster} has {len(values)} rows; expected exactly {required}"
             )
-        rng.shuffle(values)
+        random.Random(int(seed) + int(cluster)).shuffle(values)
         splits["train"].extend(values[:train_per_cluster])
         splits["validation"].extend(
             values[train_per_cluster:train_per_cluster + validation_per_cluster]
         )
         splits["test"].extend(values[-test_per_cluster:])
+    for offset, split in enumerate(("train", "validation", "test")):
+        random.Random(int(seed) + 10000 + offset).shuffle(splits[split])
     for values in splits.values():
         values.sort()
     cluster_by_source = {int(i): int(c) for i, c in frame["cluster"].items()}

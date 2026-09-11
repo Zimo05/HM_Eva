@@ -90,10 +90,19 @@ if __name__ == '__main__':
             # semantic label mapping is supplied.
             labels = None
         if args.evaluation_dataset == 'dws':
-            adapter.dws(output_dir=target.parent, variants=[args.evaluation_variant], type_labels=labels)
+            adapter.dws(
+                output_dir=target.parent,
+                variants=[args.evaluation_variant],
+                type_labels=labels,
+                anonymous_labels=args.anonymous_labels,
+            )
             target = target.parent / f'dws_{args.evaluation_variant}'
         else:
-            getattr(adapter, args.evaluation_dataset)(output_dir=target, type_labels=labels)
+            getattr(adapter, args.evaluation_dataset)(
+                output_dir=target,
+                type_labels=labels,
+                anonymous_labels=args.anonymous_labels,
+            )
         args.data_path = str(target)
     if args.data_path is None:
         parser.error('--data_path is required unless --evaluation_dataset is used')
@@ -107,7 +116,11 @@ if __name__ == '__main__':
     print(f'args: {args}')
     transformers.set_seed(args.seed)
     base_dataset_name = os.path.basename(args.data_path).replace('_few_shot', '')
-    prompt = get_prompt(dataset_name=base_dataset_name, event_time_first=args.temporal_emb_first)
+    prompt = get_prompt(
+        dataset_name=base_dataset_name,
+        event_time_first=args.temporal_emb_first,
+        anonymous_labels=args.anonymous_labels,
+    )
     if args.no_prompt:
         prompt = ''
     print(f'prompt: {prompt}')

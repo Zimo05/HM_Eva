@@ -7,7 +7,10 @@ from LatentHawkesTree import HawkesTree
 from Routing_Retrieval_Investigation.routing_retrieval_investigation import (
     FrontierRoutingConfig,
 )
-from Train.RegionalProbe import counterfactual_energy_probe
+from Train.RegionalProbe import (
+    counterfactual_energy_probe,
+    counterfactual_energy_probe_batched,
+)
 from Train.Train import (
     CausalPrefixEncoder,
     MemoryTreeTrainer,
@@ -57,6 +60,66 @@ class RegionalProbeTests(unittest.TestCase):
         self.assertGreater(float(probe.observed_gain), 0.0)
         self.assertFalse(probe.teacher.requires_grad)
 
+    def test_batched_counterfactual_probe_matches_independent_regions(self):
+        torch.manual_seed(809)
+        sequence_count, region_count, max_leaves = 4, 2, 3
+        coarse = torch.rand(sequence_count, region_count) + 0.5
+        leaves = torch.rand(sequence_count, region_count, max_leaves) + 0.1
+        weight = torch.rand(sequence_count, region_count) + 0.2
+        mask = torch.tensor([[True, True, False], [True, True, True]])
+        prior = torch.tensor([[0.4, 0.6, 0.0], [0.2, 0.3, 0.5]])
+        batched = counterfactual_energy_probe_batched(
+            coarse,
+            leaves,
+            weight,
+            prior,
+            mask,
+            teacher_temperature=0.3,
+            gain_temperature=0.4,
+            leaf_smoothing=0.05,
+        )
+        for region, leaf_count in enumerate((2, 3)):
+            reference = counterfactual_energy_probe(
+                coarse[:, region],
+                leaves[:, region, :leaf_count],
+                weight[:, region],
+                prior[region, :leaf_count],
+                teacher_temperature=0.3,
+                gain_temperature=0.4,
+                leaf_smoothing=0.05,
+            )
+            torch.testing.assert_close(
+                batched.teacher[:, region, :leaf_count + 1],
+                reference.teacher,
+            )
+            for field in (
+                "conditional_leaf_credit",
+                "smoothed_leaf_credit",
+            ):
+                torch.testing.assert_close(
+                    getattr(batched, field)[:, region, :leaf_count],
+                    getattr(reference, field),
+                )
+            for field in (
+                "expand_target", "assignment_confidence", "fine_energy",
+            ):
+                torch.testing.assert_close(
+                    getattr(batched, field)[:, region],
+                    getattr(reference, field),
+                )
+            torch.testing.assert_close(
+                batched.observed_gain[region], reference.observed_gain
+            )
+
+    def test_regional_topology_cache_rebuilds_after_split(self):
+        trainer = self._trainer(depth=2)
+        first = trainer._regional_probe_topology()
+        self.assertIs(first, trainer._regional_probe_topology())
+        trainer.tree.split_leaf(trainer.tree.leaf_ids[0])
+        refreshed = trainer._regional_probe_topology()
+        self.assertIsNot(first, refreshed)
+        self.assertNotEqual(first["signature"], refreshed["signature"])
+
     def test_probe_covers_leaves_and_only_calibrates_selected_local_offsets(self):
         torch.manual_seed(811)
         trainer = self._trainer(depth=3)
@@ -86,6 +149,14 @@ class RegionalProbeTests(unittest.TestCase):
             materialize_diagnostics=False,
         )
         frontier_before = output["frontier_node_indices"].clone()
+        energy_calls = []
+        original_probe_energy = trainer._probe_sequence_energy
+
+        def counted_probe_energy(*args, **kwargs):
+            energy_calls.append(1)
+            return original_probe_energy(*args, **kwargs)
+
+        trainer._probe_sequence_energy = counted_probe_energy
         probe = trainer._regional_probe_objective(
             output,
             output["frontier_mass"].detach(),
@@ -96,6 +167,7 @@ class RegionalProbeTests(unittest.TestCase):
         )
         self.assertEqual(int(probe["regions"]), 2)
         self.assertEqual(int(probe["probe_leaves"]), 4)
+        self.assertEqual(len(energy_calls), 1)
         first_selected = {
             leaf_id
             for leaf_id, visits in tree.frontier_routing.probe_leaf_visits.items()

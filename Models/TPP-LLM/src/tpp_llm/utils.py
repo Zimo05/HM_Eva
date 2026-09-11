@@ -3,12 +3,23 @@ Utility Functions
 """
 
 
-def get_prompt(dataset_name: str, event_time_first: bool) -> str:
+GENERIC_ANONYMOUS_PROMPT = (
+    "Given an anonymous temporal event sequence, predict the next event type "
+    "and time."
+)
+
+
+def get_prompt(
+    dataset_name: str,
+    event_time_first: bool,
+    anonymous_labels: bool = False,
+) -> str:
     """
     Get the prompt for the TPP-LLM
 
     :param dataset_name: dataset name
     :param event_time_first: event time first (before the event type) for each event
+    :param anonymous_labels: suppress dataset-specific semantic priors
     :return: prompt
     """
     sequence_descriptions = {
@@ -47,8 +58,8 @@ def get_prompt(dataset_name: str, event_time_first: bool) -> str:
         "event_time_first": "Based on this sequence, predict the next event time and the corresponding type."
     }
 
-    if dataset_name not in sequence_descriptions:
-        return "Dataset not recognized."
+    if anonymous_labels or dataset_name not in sequence_descriptions:
+        return GENERIC_ANONYMOUS_PROMPT
 
     sequence_description = sequence_descriptions[dataset_name]
     if event_time_first:

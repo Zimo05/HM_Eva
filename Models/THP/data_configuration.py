@@ -439,7 +439,7 @@ class DataConfiguration:
         outputs = {}
         for split, records in splits.items():
             streams = []
-            clusters = []
+            source_indices = []
             for record in records:
                 default_mask = [True] * len(record["type_event"])
                 event_loss_mask = record.get("event_loss_mask", default_mask)
@@ -471,11 +471,12 @@ class DataConfiguration:
                         time_loss_mask,
                     )
                 ])
-                clusters.append(record.get("cluster"))
+                source_indices.append(
+                    int(record.get("source_index", record.get("seq_idx", len(source_indices))))
+                )
             payload = {"dim_process": int(dim_process), split: streams}
+            payload["source_index_by_seq"] = source_indices
             if metadata:
                 payload["metadata"] = dict(metadata)
-            if any(value is not None for value in clusters):
-                payload["cluster_by_seq"] = clusters
             outputs[split] = write_pickle(target / "{}.pkl".format(split), payload)
         return outputs

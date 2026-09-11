@@ -12,6 +12,7 @@ from pathlib import Path
 
 STANDARD_DATASETS = ("retweet", "taxi", "stackoverflow", "taobao", "amazon")
 CL_TASK_PATTERN = re.compile(r"^task_(\d+)$")
+DWS_SPLIT_RATIOS = {"train": 0.70, "dev": 0.10, "test": 0.20}
 
 
 def infer_dataset_root(model_file):
@@ -135,10 +136,11 @@ def load_cl_task_splits(
         dataset_root=None, task_id=0, epsilon=1e-8, num_event_types=None):
     """Load one CL task into the shared EasyTPP-style sequence schema.
 
-    The source contains absolute timestamps.  Each sequence is rebased to its
-    first event and converted to inter-event durations.  Equal timestamps, if
-    present in a replacement dataset, receive deterministic ``epsilon``
-    separation because the bundled THP implementation requires an order.
+    The source contains absolute timestamps.  Those timestamps are preserved;
+    the first inter-event duration is the waiting time from the observation
+    origin to the first event.  Equal timestamps, if present in a replacement
+    dataset, receive deterministic ``epsilon`` separation because the bundled
+    THP implementation requires an order.
     """
     if epsilon <= 0:
         raise ValueError("epsilon must be positive")
@@ -171,9 +173,8 @@ def load_cl_task_splits(
                     )
                 )
             ordered_times = _strictly_increasing(raw_times, epsilon)
-            origin = ordered_times[0]
-            times = [value - origin for value in ordered_times]
-            deltas = [0.0] + [
+            times = ordered_times
+            deltas = [times[0]] + [
                 right - left for left, right in zip(times, times[1:])
             ]
             records.append(validate_sequence({
@@ -197,7 +198,7 @@ def load_cl_task_splits(
         "dim_process": dim_process,
         "source_columns": ["event_times", "event_types"],
         "split_mapping": {"train": "train", "val": "dev", "test": "test"},
-        "time_transform": "subtract each sequence's first timestamp; derive inter-event durations",
+        "time_transform": "preserve source timestamps; first duration equals first timestamp",
         "timestamp_epsilon": float(epsilon),
         "counts": counts,
         "oracle_files_used": False,
@@ -321,10 +322,10 @@ def load_dws_file(path, epsilon=1e-6):
                 raise ValueError("{} row {} has mismatched arrays".format(path, seq_idx + 2))
             if not raw_times:
                 raise ValueError("{} row {} is empty".format(path, seq_idx + 2))
-            raw_times = _strictly_increasing(raw_times, epsilon)
-            origin = raw_times[0]
-            times = [value - origin for value in raw_times]
-            deltas = [0.0] + [right - left for left, right in zip(raw_times, raw_times[1:])]
+            times = _strictly_increasing(raw_times, epsilon)
+            deltas = [times[0]] + [
+                right - left for left, right in zip(times, times[1:])
+            ]
             record = {
                 "dim_process": max(event_types) + 1,
                 "seq_idx": seq_idx,
@@ -344,26 +345,66 @@ def load_dws_file(path, epsilon=1e-6):
     ]
 
 
-def stratified_dws_splits(records, seed=2024, train_ratio=0.8, dev_ratio=0.1):
+def dws_split_indices(
+        rows, seed=2024, train_ratio=None, dev_ratio=None):
+    """Build the canonical cluster-stratified DWS split by source row.
+
+    This is the only DWS partitioning rule used by the standalone adapters.
+    The returned IDs refer to rows in the immutable raw-data order, so every
+    model can consume the same source indices without consulting ``cluster``
+    at runtime.
+    """
+    train_ratio = DWS_SPLIT_RATIOS["train"] if train_ratio is None else float(train_ratio)
+    dev_ratio = DWS_SPLIT_RATIOS["dev"] if dev_ratio is None else float(dev_ratio)
     if train_ratio <= 0 or dev_ratio < 0 or train_ratio + dev_ratio >= 1:
-        raise ValueError("Ratios must satisfy train > 0, dev >= 0, and train + dev < 1")
+        raise ValueError(
+            "Ratios must satisfy train > 0, dev >= 0, and train + dev < 1"
+        )
+
     grouped = defaultdict(list)
-    for record in records:
-        grouped[int(record["cluster"])].append(record)
+    for source_index, row in enumerate(rows):
+        try:
+            cluster = int(row["cluster"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("DWS rows must contain an integer cluster") from exc
+        grouped[cluster].append(source_index)
 
     result = {"train": [], "dev": [], "test": []}
     for cluster in sorted(grouped):
         group = list(grouped[cluster])
-        random.Random(seed + cluster).shuffle(group)
-        train_end = int(len(group) * train_ratio)
-        dev_end = train_end + int(len(group) * dev_ratio)
+        random.Random(int(seed) + cluster).shuffle(group)
+        train_end = int(round(len(group) * train_ratio))
+        dev_end = train_end + int(round(len(group) * dev_ratio))
+        # The bundled DWS variants have 100 sequences per cluster.  Keep the
+        # helper useful for small fixtures too, while never inventing a row.
+        if len(group) >= 3:
+            train_end = min(max(train_end, 1), len(group) - 2)
+            dev_end = min(max(dev_end, train_end + 1), len(group) - 1)
         result["train"].extend(group[:train_end])
         result["dev"].extend(group[train_end:dev_end])
         result["test"].extend(group[dev_end:])
 
     for offset, split in enumerate(("train", "dev", "test")):
-        random.Random(seed + 10000 + offset).shuffle(result[split])
+        random.Random(int(seed) + 10000 + offset).shuffle(result[split])
+    return result
+
+
+def stratified_dws_splits(records, seed=2024, train_ratio=0.7, dev_ratio=0.1):
+    if train_ratio <= 0 or dev_ratio < 0 or train_ratio + dev_ratio >= 1:
+        raise ValueError("Ratios must satisfy train > 0, dev >= 0, and train + dev < 1")
+    indices = dws_split_indices(
+        records,
+        seed=seed,
+        train_ratio=train_ratio,
+        dev_ratio=dev_ratio,
+    )
+    result = {
+        split: [records[source_index] for source_index in source_indices]
+        for split, source_indices in indices.items()
+    }
+    for split in ("train", "dev", "test"):
         for seq_idx, record in enumerate(result[split]):
+            record["source_index"] = int(record.get("seq_idx", seq_idx))
             record["seq_idx"] = seq_idx
     return result
 
@@ -372,8 +413,13 @@ def load_all_dws(dataset_root, variants=None, seed=2024, epsilon=1e-6):
     dws_dir = Path(dataset_root) / "DWS"
     if variants is None:
         paths = sorted(dws_dir.glob("hawkes_dataset_*.csv"))
+        paths.extend(sorted(dws_dir.glob("tree_*/hawkes_dataset_*.csv")))
     else:
-        paths = [dws_dir / "hawkes_dataset_{}.csv".format(value) for value in variants]
+        paths = []
+        for value in variants:
+            nested = dws_dir / "tree_{}".format(value) / "hawkes_dataset_{}.csv".format(value)
+            legacy = dws_dir / "hawkes_dataset_{}.csv".format(value)
+            paths.append(nested if nested.exists() else legacy)
     if not paths:
         raise FileNotFoundError("No DWS CSV files found in {}".format(dws_dir))
 
@@ -383,7 +429,15 @@ def load_all_dws(dataset_root, variants=None, seed=2024, epsilon=1e-6):
             raise FileNotFoundError(str(path))
         variant = path.stem.rsplit("_", 1)[-1]
         dim_process, records = load_dws_file(path, epsilon=epsilon)
-        result[variant] = (dim_process, stratified_dws_splits(records, seed=seed))
+        result[variant] = (
+            dim_process,
+            stratified_dws_splits(
+                records,
+                seed=seed,
+                train_ratio=DWS_SPLIT_RATIOS["train"],
+                dev_ratio=DWS_SPLIT_RATIOS["dev"],
+            ),
+        )
     return result
 
 

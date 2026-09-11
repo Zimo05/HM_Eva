@@ -228,18 +228,30 @@ class DataConfiguration:
         ).items():
             if history_window is not None:
                 splits = {
-                    split: self._window_sequences(records, history_window)
+                    split: self._window_sequences(
+                        records, history_window, preserve_time_origin=True
+                    )
                     for split, records in splits.items()
                 }
             target = ensure_directory(base / "dws_{}".format(variant))
             outputs[variant] = {
-                split: write_json(target / "{}.json".format(split), records)
+                split: write_json(
+                    target / "{}.json".format(split),
+                    [
+                        {
+                            key: value
+                            for key, value in record.items()
+                            if key != "cluster"
+                        }
+                        for record in records
+                    ],
+                )
                 for split, records in splits.items()
             }
         return outputs
 
     @staticmethod
-    def _window_sequences(records, history_window):
+    def _window_sequences(records, history_window, preserve_time_origin=False):
         """Split sequences into one-event-overlap truncated-BPTT windows.
 
         A window with history_window=20 contains at most 21 events and therefore
@@ -258,17 +270,27 @@ class DataConfiguration:
             while start < sequence_length - 1:
                 end = min(sequence_length, start + history_window + 1)
                 absolute_times = record["time_since_start"][start:end]
-                origin = absolute_times[0]
+                if preserve_time_origin:
+                    times = list(absolute_times)
+                    deltas = list(
+                        record["time_since_last_event"][start:end]
+                    )
+                else:
+                    origin = absolute_times[0]
+                    times = [value - origin for value in absolute_times]
+                    deltas = [0.0] + record[
+                        "time_since_last_event"
+                    ][start + 1:end]
                 item = {
                     "dim_process": record["dim_process"],
                     "seq_idx": len(windowed),
                     "seq_len": end - start,
-                    "time_since_start": [value - origin for value in absolute_times],
-                    "time_since_last_event": [0.0] + record[
-                        "time_since_last_event"
-                    ][start + 1:end],
+                    "time_since_start": times,
+                    "time_since_last_event": deltas,
                     "type_event": record["type_event"][start:end],
-                    "cluster": record.get("cluster"),
+                    "source_index": record.get(
+                        "source_index", record.get("seq_idx")
+                    ),
                     "source_seq_idx": record.get("seq_idx"),
                     "window_idx": window_index,
                 }

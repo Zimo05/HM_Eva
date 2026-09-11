@@ -280,6 +280,14 @@ class TreeEpisodicMemory(nn.Module):
         self._packed_mirror = {
             "keys": keys,
             "context_keys": context_keys,
+            # Retrieval and novelty use the same cosine key.  Keeping the
+            # normalized view in the mirror removes a second normalization
+            # pass from every Global batch while preserving the raw keys for
+            # checkpoint/debug consumers.
+            "normalized_context_keys": F.normalize(
+                context_keys,
+                dim=-1,
+            ),
             "context_valid": context_valid,
             "context_support": context_support,
             "deltas": deltas,
@@ -684,7 +692,7 @@ class TreeEpisodicMemory(nn.Module):
             if null_logit is None:
                 raise ValueError("null_logit is required with keep_gate")
         keys = mirror["keys"]
-        context_keys = mirror["context_keys"]
+        context_keys = mirror["normalized_context_keys"]
         context_valid = mirror["context_valid"]
         deltas = mirror["deltas"]
         quality = mirror["quality"]
@@ -758,6 +766,7 @@ class TreeEpisodicMemory(nn.Module):
                 ),
                 null_logit=null_logit,
                 context_valid=active_context_valid[start:stop],
+                keys_normalized=True,
             )
             flat_delta = flat_delta.index_copy(0, row_chunk, retrieved)
             alpha.index_copy_(0, row_chunk, retrieval_info["alpha"])
@@ -791,14 +800,16 @@ class TreeEpisodicMemory(nn.Module):
             "valid_mask": gathered_valid.reshape(
                 *node_indices.shape, capacity
             ).detach(),
+            "context_valid": gathered_context_valid.reshape(
+                *node_indices.shape, capacity, -1
+            ).detach(),
         }
         return flat_delta.reshape(shape), info
 
-    def novelty_count_packed(
+    def novelty_from_similarity(
         self,
-        query: Tensor,
-        node_indices: Tensor,
-        node_ids: Sequence[str],
+        similarity: Tensor,
+        valid: Tensor,
         *,
         temperature: float,
         count_exponent: float,
@@ -808,28 +819,20 @@ class TreeEpisodicMemory(nn.Module):
         count_topk: Optional[int] = None,
         count_saturation: float = 3.0,
     ) -> Tuple[Tensor, Tensor, Tensor]:
-        """Vectorized novelty and local recurrence count for owner nodes."""
-        if query.ndim != 2 or query.size(-1) != self.key_dim:
-            raise ValueError("query must have shape [B, key_dim]")
-        if node_indices.shape != (query.size(0),):
-            raise ValueError("node_indices must have shape [B]")
+        """Compute novelty/count from a previously retrieved similarity row.
+
+        Global already computes owner-node similarities while reading the
+        packed frontier.  Keeping this reduction separate lets it reuse that
+        result instead of gathering and normalizing the same bank keys a
+        second time.
+        """
+        if similarity.ndim != 2 or valid.shape != similarity.shape:
+            raise ValueError("similarity and valid must have shape [B, capacity]")
+        if valid.dtype != torch.bool:
+            raise ValueError("valid must be boolean")
         if temperature <= 0.0 or count_exponent < 1.0 or eps <= 0.0:
             raise ValueError("invalid novelty/count hyperparameters")
 
-        mirror = self._packed_bank_mirror(node_ids, query)
-        keys = mirror["context_keys"].index_select(0, node_indices)
-        context_valid = mirror["context_valid"].index_select(0, node_indices)
-        valid = mirror["valid"].index_select(0, node_indices)
-        normalized_query = F.normalize(query, dim=-1)
-        normalized_keys = F.normalize(keys, dim=-1)
-        alias_similarity = torch.einsum(
-            "bckd,bd->bck",
-            normalized_keys,
-            normalized_query,
-        )
-        similarity = alias_similarity.masked_fill(
-            ~context_valid, -torch.inf
-        ).max(dim=-1).values
         similarity_clean = torch.where(
             valid, similarity, torch.zeros_like(similarity)
         )
@@ -867,6 +870,53 @@ class TreeEpisodicMemory(nn.Module):
             torch.zeros_like(normalized_count),
         )
         return novelty, normalized_count, weighted_similarity
+
+    def novelty_count_packed(
+        self,
+        query: Tensor,
+        node_indices: Tensor,
+        node_ids: Sequence[str],
+        *,
+        temperature: float,
+        count_exponent: float,
+        eps: float,
+        count_similarity_low: float = 0.35,
+        count_similarity_high: float = 0.65,
+        count_topk: Optional[int] = None,
+        count_saturation: float = 3.0,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """Vectorized novelty and local recurrence count for owner nodes."""
+        if query.ndim != 2 or query.size(-1) != self.key_dim:
+            raise ValueError("query must have shape [B, key_dim]")
+        if node_indices.shape != (query.size(0),):
+            raise ValueError("node_indices must have shape [B]")
+        if temperature <= 0.0 or count_exponent < 1.0 or eps <= 0.0:
+            raise ValueError("invalid novelty/count hyperparameters")
+
+        mirror = self._packed_bank_mirror(node_ids, query)
+        keys = mirror["normalized_context_keys"].index_select(0, node_indices)
+        context_valid = mirror["context_valid"].index_select(0, node_indices)
+        valid = mirror["valid"].index_select(0, node_indices)
+        normalized_query = F.normalize(query, dim=-1)
+        alias_similarity = torch.einsum(
+            "bckd,bd->bck",
+            keys,
+            normalized_query,
+        )
+        similarity = alias_similarity.masked_fill(
+            ~context_valid, -torch.inf
+        ).max(dim=-1).values
+        return self.novelty_from_similarity(
+            similarity,
+            valid,
+            temperature=temperature,
+            count_exponent=count_exponent,
+            eps=eps,
+            count_similarity_low=count_similarity_low,
+            count_similarity_high=count_similarity_high,
+            count_topk=count_topk,
+            count_saturation=count_saturation,
+        )
 
     def aggregate_path(
         self,

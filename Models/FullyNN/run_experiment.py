@@ -106,6 +106,15 @@ def parse_args():
         action="store_true",
         help="Replace an existing result directory/archive for this variant.",
     )
+    parser.add_argument(
+        "--prepared-data-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Use a benchmark-prepared train.json/dev.json/test.json view "
+            "instead of re-splitting/adapting the raw dataset."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -809,35 +818,41 @@ def main():
     logger.addHandler(file_handler)
     try:
         logger.info("Preparing %s with seed=%d", paths["run_name"], args.seed)
-        adapter = DataConfiguration(seed=args.seed)
-        private_root = paths["output"] / "prepared_data"
-        if args.dataset == "dws":
-            adapter.dws(output_dir=private_root, variants=[args.variant], history_window=args.history_window)
-            adapted_dir = private_root / paths["run_name"]
-        elif args.dataset == "amazon":
-            adapted_dir = private_root / "amazon"
-            adapter.amazon(output_dir=adapted_dir, history_window=args.history_window)
-        elif args.dataset == "mimic":
-            adapted_dir = private_root / "mimic"
-            adapter.mimic(output_dir=adapted_dir, history_window=args.history_window)
-        elif args.dataset == "taxi":
-            adapted_dir = private_root / "taxi"
-            adapter.taxi(output_dir=adapted_dir, history_window=args.history_window)
-        elif args.dataset == "taobao":
-            adapted_dir = private_root / "taobao"
-            adapter.taobao(output_dir=adapted_dir, history_window=args.history_window)
-        elif args.dataset == "retweet":
-            adapted_dir = private_root / "retweet"
-            adapter.retweet(output_dir=adapted_dir, history_window=args.history_window)
-        elif args.dataset == "mobike":
-            adapted_dir = private_root / "mobike"
-            adapter.mobike(output_dir=adapted_dir, history_window=args.history_window)
-        elif args.dataset == "stackoverflow":
-            adapted_dir = private_root / "stackoverflow"
-            adapter.stackoverflow(output_dir=adapted_dir, history_window=args.history_window)
+        if args.prepared_data_dir is not None:
+            adapted_dir = args.prepared_data_dir.expanduser().resolve()
+            for split in ("train", "dev", "test"):
+                if not (adapted_dir / f"{split}.json").is_file():
+                    raise FileNotFoundError(adapted_dir / f"{split}.json")
         else:
-            adapted_dir = private_root / "covid_policy_tracker"
-            adapter.covid_policy_tracker(output_dir=adapted_dir, history_window=args.history_window)
+            adapter = DataConfiguration(seed=args.seed)
+            private_root = paths["output"] / "prepared_data"
+            if args.dataset == "dws":
+                adapter.dws(output_dir=private_root, variants=[args.variant], history_window=args.history_window)
+                adapted_dir = private_root / paths["run_name"]
+            elif args.dataset == "amazon":
+                adapted_dir = private_root / "amazon"
+                adapter.amazon(output_dir=adapted_dir, history_window=args.history_window)
+            elif args.dataset == "mimic":
+                adapted_dir = private_root / "mimic"
+                adapter.mimic(output_dir=adapted_dir, history_window=args.history_window)
+            elif args.dataset == "taxi":
+                adapted_dir = private_root / "taxi"
+                adapter.taxi(output_dir=adapted_dir, history_window=args.history_window)
+            elif args.dataset == "taobao":
+                adapted_dir = private_root / "taobao"
+                adapter.taobao(output_dir=adapted_dir, history_window=args.history_window)
+            elif args.dataset == "retweet":
+                adapted_dir = private_root / "retweet"
+                adapter.retweet(output_dir=adapted_dir, history_window=args.history_window)
+            elif args.dataset == "mobike":
+                adapted_dir = private_root / "mobike"
+                adapter.mobike(output_dir=adapted_dir, history_window=args.history_window)
+            elif args.dataset == "stackoverflow":
+                adapted_dir = private_root / "stackoverflow"
+                adapter.stackoverflow(output_dir=adapted_dir, history_window=args.history_window)
+            else:
+                adapted_dir = private_root / "covid_policy_tracker"
+                adapter.covid_policy_tracker(output_dir=adapted_dir, history_window=args.history_window)
         num_event_types = read_num_event_types(adapted_dir / "train.json")
         training_stats = compute_training_stats(adapted_dir / "train.json")
         baselines = compute_baselines(adapted_dir, num_event_types)

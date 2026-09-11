@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$MODEL_ROOT/../.." && pwd)"
-cd "$MODEL_ROOT"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_PARENT="$(cd "$PROJECT_ROOT/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 MEMTREE_PYTHON="/Users/zimoshen/opt/miniconda3/envs/memTree/bin/python"
 if [[ -n "${PYTHON:-}" ]]; then
@@ -15,26 +15,25 @@ else
 fi
 DEVICE_IDS="${DEVICES:-0}"
 
-DATA_ROOT="${DATA_ROOT:-$PROJECT_ROOT/Datasets/Data/tree_10}"
-DATA_PATH="${DATA_PATH:-$DATA_ROOT/10Cluster/THP_10.json}"
+DATA_ROOT="${DATA_ROOT:-$PROJECT_PARENT/HawkesMemory_wfy/Data/tree_17}"
+DATA_PATH="${DATA_PATH:-$DATA_ROOT/17Cluster/THP_17.json}"
 SUMMARY_CSV="${SUMMARY_CSV:-$DATA_ROOT/sequence_summary.csv}"
 TREE_CSV="${TREE_CSV:-$DATA_ROOT/tree_node_sequences.csv}"
-HAWKES_DATA="${HAWKES_DATA:-$DATA_ROOT/hawkes_dataset_10.csv}"
+HAWKES_DATA="${HAWKES_DATA:-$DATA_ROOT/hawkes_dataset_17.csv}"
 
 THP_OUTPUT_DIR="$DATA_ROOT/thp_checkpoints"
 THP_CHECKPOINT="$THP_OUTPUT_DIR/checkpoint_best.pt"
 THP_TRAIN_LOG="$DATA_ROOT/thp_train.log"
-ENCODED_OUTPUT="$DATA_ROOT/10Cluster/thp_encoded_10.pt"
-ATTENTION_WEIGHTS="$DATA_ROOT/encoder_weights_10.pt"
+ENCODED_OUTPUT="$DATA_ROOT/17Cluster/thp_encoded_17.pt"
+ATTENTION_WEIGHTS="$DATA_ROOT/encoder_weights_17.pt"
 H_TREE_OUTPUT="${H_TREE_OUTPUT:-$DATA_ROOT/h_tree_one_circle.pt}"
 
-RUN_NAME="${RUN_NAME:-dws_10_09061415}"
+RUN_NAME="${RUN_NAME:-dws_17_08281630}"
 EPOCHS="${EPOCHS:-10}"
-# Merge retention penalties.  The dynamics penalty is exposed so DWS and CL
-# can use the same Hawkes-law distinction policy; 0.25 is the first tuned
-# value, while both controls remain environment-overridable.
-MERGE_STALE_WEIGHT="${MERGE_STALE_WEIGHT:-0.2}"
-MERGE_DYNAMICS_WEIGHT="${MERGE_DYNAMICS_WEIGHT:-0.10}"
+# Dense padded GRU is enabled only for Global first.  Wake keeps packed
+# execution until its wavefront memory/throughput trade-off is benchmarked.
+GLOBAL_PADDED_GRU_MODE="${GLOBAL_PADDED_GRU_MODE:-dense}"
+WAKE_PADDED_GRU_MODE="${WAKE_PADDED_GRU_MODE:-packed}"
 # Two-level effective-Hawkes-law matching.  Keep duplicate stricter than mode.
 # Cold-start similarity priors only. After enough accepted observations each
 # dynamics mode calibrates its own Q80 duplicate and Q95 local-variation radii.
@@ -44,23 +43,23 @@ PROTOTYPE_MODE_CAPACITY="${PROTOTYPE_MODE_CAPACITY:-12}"
 PROTOTYPE_CONTEXT_ALIAS_CAPACITY="${PROTOTYPE_CONTEXT_ALIAS_CAPACITY:-3}"
 SPLIT_SEED="${SPLIT_SEED:-42}"
 SPLIT_MANIFEST="${SPLIT_MANIFEST:-$DATA_ROOT/splits/memory_seed${SPLIT_SEED}.json}"
-BASE_CONTROLLER_CHECKPOINT="${BASE_CONTROLLER_CHECKPOINT:-$MODEL_ROOT/Memory/Checkpoints/dws_10_controller_v4_best.pt}"
+BASE_CONTROLLER_CHECKPOINT="${BASE_CONTROLLER_CHECKPOINT:-$PROJECT_ROOT/Memory/Checkpoints/dws_17_controller_v4_best.pt}"
 CONTROLLER_VERSION="${CONTROLLER_VERSION:-6}"
 CONTROLLER_HEADS="${CONTROLLER_HEADS:-adapt,retrieve,write}"
-MEMORY_CHECKPOINT="$MODEL_ROOT/Memory/Checkpoints/${RUN_NAME}_last.pt"
-MEMORY_BEST_CHECKPOINT="$MODEL_ROOT/Memory/Checkpoints/${RUN_NAME}_best.pt"
-VALIDATION_HISTORY="$MODEL_ROOT/Memory/Checkpoints/${RUN_NAME}_validation_history.json"
-CONTROLLER_DIAGNOSTICS="$MODEL_ROOT/Memory/Checkpoints/${RUN_NAME}_controller_diagnostics.json"
-RECALIBRATED_CHECKPOINT="$MODEL_ROOT/Memory/Checkpoints/${RUN_NAME}_recalibrated.pt"
-ROLLOUT_CALIBRATED_CHECKPOINT="$MODEL_ROOT/Memory/Checkpoints/${RUN_NAME}_rollout_calibrated.pt"
-QUICK_EVAL_DIR="$PROJECT_ROOT/Evaluation/results/legacy_dws/${RUN_NAME}/quick"
-FULL_EVAL_DIR="$PROJECT_ROOT/Evaluation/results/legacy_dws/${RUN_NAME}/full"
-MEMORY_LOG="$MODEL_ROOT/Memory/Logs/DWS/10/${RUN_NAME}.log"
-MEMORY_PID_FILE="$MODEL_ROOT/Memory/Logs/DWS/10/${RUN_NAME}.pid"
+MEMORY_CHECKPOINT="$PROJECT_ROOT/Memory/Checkpoints/${RUN_NAME}_last.pt"
+MEMORY_BEST_CHECKPOINT="$PROJECT_ROOT/Memory/Checkpoints/${RUN_NAME}_best.pt"
+VALIDATION_HISTORY="$PROJECT_ROOT/Memory/Checkpoints/${RUN_NAME}_validation_history.json"
+CONTROLLER_DIAGNOSTICS="$PROJECT_ROOT/Memory/Checkpoints/${RUN_NAME}_controller_diagnostics.json"
+RECALIBRATED_CHECKPOINT="$PROJECT_ROOT/Memory/Checkpoints/${RUN_NAME}_recalibrated.pt"
+ROLLOUT_CALIBRATED_CHECKPOINT="$PROJECT_ROOT/Memory/Checkpoints/${RUN_NAME}_rollout_calibrated.pt"
+QUICK_EVAL_DIR="$PROJECT_ROOT/Memory/Eval/${RUN_NAME}/quick"
+FULL_EVAL_DIR="$PROJECT_ROOT/Memory/Eval/${RUN_NAME}/full"
+MEMORY_LOG="$PROJECT_ROOT/Memory/Logs/DWS/17/${RUN_NAME}.log"
+MEMORY_PID_FILE="$PROJECT_ROOT/Memory/Logs/DWS/17/${RUN_NAME}.pid"
 # Put repository-level routing packages before the legacy Memory namespace;
 # otherwise Memory/Routing_Retrieval (a compatibility namespace) can shadow
 # the actual server/local implementation under the project root.
-MEMORY_PYTHONPATH="$MODEL_ROOT:$PROJECT_ROOT:$MODEL_ROOT/Memory"
+MEMORY_PYTHONPATH="$PROJECT_ROOT:$PROJECT_PARENT:$PROJECT_ROOT/Memory"
 
 mkdir -p \
   "$THP_OUTPUT_DIR" \
@@ -74,18 +73,18 @@ Usage:
   ./run_HM.sh train-thp        Train THP from scratch (foreground)
   ./run_HM.sh encode           Encode DWS sequences with trained THP (foreground)
   ./run_HM.sh train-attention  Train Attention Encoder (foreground)
-  ./run_HM.sh build-h-tree     Generate Data/tree_10/h_tree_10.pt (foreground)
+  ./run_HM.sh build-h-tree     Generate Data/tree_17/h_tree_17.pt (foreground)
   ./run_HM.sh build-strict-baseline Build leakage-free upstream artifacts in strict_seed${SPLIT_SEED}
   ./run_HM.sh memory           Start Memory Tree training with nohup (background)
-  ./run_HM.sh prepare-memory-split  Create the fixed DWS10 train/validation/test split
+  ./run_HM.sh prepare-memory-split  Create the fixed DWS17 train/validation/test split
   ./run_HM.sh memory-controller     Train Controller v4 with integrated Router/Sleep
   ./run_HM.sh controller-finetune   Warm-start strict Controller-only v5/v6 training
   ./run_HM.sh controller-write-rank-finetune  Run Write-only ranking fine-tuning
   ./run_HM.sh inspect-checkpoint    Show Controller/Router/Sleep checkpoint identity
   ./run_HM.sh recalibrate-controller  Jointly recalibrate Controller thresholds
   ./run_HM.sh calibrate-write-rollout Calibrate Write using validation rollouts
-  ./run_HM.sh evaluate-controller-quick Evaluate two test sequences per DWS10 cluster
-  ./run_HM.sh evaluate-controller-full  Evaluate the complete DWS10 test split
+  ./run_HM.sh evaluate-controller-quick Evaluate two test sequences per DWS17 cluster
+  ./run_HM.sh evaluate-controller-full  Evaluate the complete DWS17 test split
   ./run_HM.sh all              Run the first four stages, then start Memory in background
   ./run_HM.sh status           Show Memory background-process status
   ./run_HM.sh logs             Follow the Memory training log
@@ -93,7 +92,7 @@ Usage:
 
 Optional environment overrides:
   RUN_NAME=name EPOCHS=10 PYTHON=/path/to/python DEVICES=0 ./run_HM.sh <action>
-  MERGE_STALE_WEIGHT=0.2 MERGE_DYNAMICS_WEIGHT=0.25 ./run_HM.sh memory
+  GLOBAL_PADDED_GRU_MODE=dense WAKE_PADDED_GRU_MODE=packed ./run_HM.sh memory
   BASE_CONTROLLER_CHECKPOINT=/path/model.pt CONTROLLER_VERSION=6 ./run_HM.sh controller-finetune
   # Optional cold-start priors for adaptive two-radius matching:
   PROTOTYPE_DUP_THRESHOLD=0.98 PROTOTYPE_MODE_THRESHOLD=0.90 \
@@ -166,7 +165,7 @@ run_encoder_stage() {
     ATTENTION_WEIGHTS="$ATTENTION_WEIGHTS" \
     SPLIT_MANIFEST="$split_manifest_arg" \
     SPLIT_DATA_PATH="$split_data_arg" \
-    bash "$MODEL_ROOT/MultiAttentionEncoder/run.sh" "$action"
+    bash "$PROJECT_ROOT/MultiAttentionEncoder/run.sh" "$action"
 }
 
 build_strict_baseline() (
@@ -191,7 +190,7 @@ build_strict_baseline() (
 
 train_thp() {
   require_file "$DATA_PATH"
-  echo "[HM 1/5] Training THP on DWS 10-cluster data"
+  echo "[HM 1/5] Training THP on DWS 17-cluster data"
   run_encoder_stage train
   require_file "$THP_CHECKPOINT" "train-thp"
   echo "[Done] THP checkpoint: $THP_CHECKPOINT"
@@ -221,7 +220,7 @@ build_h_tree() {
   require_file "$SUMMARY_CSV"
   require_file "$THP_CHECKPOINT" "train-thp"
   require_file "$ATTENTION_WEIGHTS" "train-attention"
-  echo "[HM 4/5] Building 10-cluster H-tree"
+  echo "[HM 4/5] Building 17-cluster H-tree"
   run_encoder_stage final_encode
   require_file "$H_TREE_OUTPUT" "build-h-tree"
   echo "[Done] H-tree: $H_TREE_OUTPUT"
@@ -286,7 +285,7 @@ start_memory() {
     echo "[Hint] Sync Memory/Train/TrainingCLI.py to enable best-checkpoint and diagnostics artifacts." >&2
   fi
 
-  local training_epochs=60
+  local training_epochs=50
   local split_args=()
   local controller_args=()
   if [[ "$controller_mode" != "0" ]]; then
@@ -324,7 +323,7 @@ start_memory() {
       "${cli_output_args[@]}" \
       "${controller_args[@]}" \
       --epochs "$training_epochs" \
-      --cold-start-epochs 10 \
+      --cold-start-epochs 5 \
       --z-dim 50 \
       --node-dim 128 \
       --memory-key-dim 64 \
@@ -348,8 +347,6 @@ start_memory() {
       --alignment-grad-clip 5.0 \
       --prune-warmup-epochs 12 \
       --merge-min-replay 12 \
-      --merge-stale-weight "$MERGE_STALE_WEIGHT" \
-      --merge-dynamics-weight "$MERGE_DYNAMICS_WEIGHT" \
       --frontier-min-experts 2 \
       --frontier-budget 7 \
       --frontier-routing-temperature 1.10 \
@@ -372,6 +369,8 @@ start_memory() {
       --route-teacher-temperature 0.85 \
       --route-balance-batch-size 32 \
       --wake-wavefront-batch-size 64 \
+      --global-padded-gru-mode "$GLOBAL_PADDED_GRU_MODE" \
+      --wake-padded-gru-mode "$WAKE_PADDED_GRU_MODE" \
       --light-replay-budget 128 \
       --deep-min-interval 3 \
       --deep-computation-cost 0.05 \
@@ -456,12 +455,12 @@ show_status() {
     echo "[Running] Memory training PID=$pid"
     ps -fp "$pid"
     echo
-    tail -n 10 "$MEMORY_LOG" 2>/dev/null || true
+    tail -n 17 "$MEMORY_LOG" 2>/dev/null || true
   else
     echo "[Stopped] No live Memory training process was found."
     if [[ -s "$MEMORY_LOG" ]]; then
       echo "[Last log lines]"
-      tail -n 10 "$MEMORY_LOG"
+      tail -n 17 "$MEMORY_LOG"
     fi
     return 1
   fi

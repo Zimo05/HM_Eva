@@ -115,6 +115,57 @@ class ControllerUtilityReplayTests(unittest.TestCase):
         restored.load_state_dict(state)
         self.assertEqual(first.sign_counts(), restored.sign_counts())
 
+    def test_batched_retrieve_insert_matches_ordered_row_inserts(self):
+        capacities = (16, 16, 24, 8)
+        sequential = ControllerUtilityReplay(capacities, seed=19)
+        batched = ControllerUtilityReplay(capacities, seed=19)
+        rows = [
+            replay_row(1, (-1.0) ** index * (index + 1) / 10.0, 0.1 * index, index)
+            for index in range(12)
+        ]
+        for index, row in enumerate(rows):
+            row["source_index"] = 2**60 + index
+        for row in rows:
+            sequential.add(row, 1)
+
+        batched.add_retrieve_batch(
+            inputs=torch.stack([row["inputs"] for row in rows]),
+            utility=torch.stack([row["utility"] for row in rows]),
+            target=torch.stack([row["target"] for row in rows]),
+            label_mask=torch.stack([row["label_mask"] for row in rows]),
+            propensity=torch.stack([row["propensity"] for row in rows]),
+            gate=torch.stack([row["gate"] for row in rows]),
+            metadata=torch.tensor([
+                [
+                    row["cluster_id"],
+                    row["source_index"],
+                    row["event_index"],
+                    0,
+                ]
+                for row in rows
+            ]),
+            node_ids=("root",),
+        )
+
+        self.assertEqual(sequential.seen, batched.seen)
+        self.assertEqual(
+            sequential.rng.getstate(), batched.rng.getstate()
+        )
+        sequential_rows = sequential.rows(1)
+        batched_rows = batched.rows(1)
+        self.assertEqual(len(sequential_rows), len(batched_rows))
+        for expected, actual in zip(sequential_rows, batched_rows):
+            for key in (
+                "inputs", "utility", "target", "label_mask",
+                "propensity", "gate",
+            ):
+                self.assertTrue(torch.equal(expected[key], actual[key]))
+            for key in (
+                "cluster_id", "source_index", "event_index", "owner_id",
+                "hard_score",
+            ):
+                self.assertEqual(expected[key], actual[key])
+
 
 class ControllerEvaluationTests(unittest.TestCase):
     def test_gate_utility_metrics_follow_action_specific_ablations(self):

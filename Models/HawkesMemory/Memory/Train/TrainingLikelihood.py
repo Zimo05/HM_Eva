@@ -310,7 +310,7 @@ class TrainingLikelihoodMixin:
     ) -> Tensor:
         """Per-event NLL for a flattened variable-length sequence batch."""
         effective = memory_output["effective_params"]
-        types = flat["types"]
+        types = flat["types"].long()
         history = flat[HAWKES_HISTORY_STATS_KEY]
         interval = flat[HAWKES_INTERVAL_STATS_KEY]
         duration = flat["duration"]
@@ -326,6 +326,55 @@ class TrainingLikelihoodMixin:
         integral = (
             effective.mu.sum(dim=-1) * duration
             + torch.einsum("ndem,nem->n", effective.W, interval)
+        )
+        return log_term + integral
+
+    def _batched_sequence_event_nll_variants(
+        self,
+        flat: Mapping[str, Tensor],
+        raw_theta_variants: Tensor,
+    ) -> Tensor:
+        """Evaluate several raw-theta NLL variants in one tensor pass.
+
+        ``raw_theta_variants`` has shape ``[N, V, P]``.  This is used by
+        Global for the full-retrieval and no-retrieval controller targets; the
+        gated variant is evaluated after the controller gate is known.  The
+        event statistics are shared across V, so the expensive intensity and
+        integral contractions are launched once over a larger, contiguous
+        tensor instead of once per variant.
+        """
+        if raw_theta_variants.ndim != 3:
+            raise ValueError("raw_theta_variants must have shape [N, V, P]")
+        if raw_theta_variants.size(-1) != self.tree.param_dim:
+            raise ValueError("raw theta variants have the wrong parameter width")
+        types = flat["types"]
+        history = flat[HAWKES_HISTORY_STATS_KEY]
+        interval = flat[HAWKES_INTERVAL_STATS_KEY]
+        duration = flat["duration"]
+        if raw_theta_variants.size(0) != types.numel():
+            raise ValueError("raw theta variants must align with flat events")
+        D = self.hawkes.num_types
+        M = self.hawkes.num_basis
+        raw_mu = raw_theta_variants[..., :D]
+        raw_W = raw_theta_variants[..., D:].reshape(
+            raw_theta_variants.size(0),
+            raw_theta_variants.size(1),
+            D,
+            D,
+            M,
+        )
+        mu = F.softplus(raw_mu)
+        W = F.softplus(raw_W)
+        intensity = (
+            mu + torch.einsum("nvdem,nem->nvd", W, history)
+        ).clamp_min(1e-8)
+        log_term = -intensity.gather(
+            2,
+            types[:, None, None].expand(-1, raw_theta_variants.size(1), 1),
+        ).squeeze(2).log()
+        integral = (
+            mu.sum(dim=-1) * duration[:, None]
+            + torch.einsum("nvdem,nem->nv", W, interval)
         )
         return log_term + integral
 

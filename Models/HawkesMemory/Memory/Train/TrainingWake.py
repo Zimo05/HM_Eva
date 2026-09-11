@@ -868,10 +868,10 @@ class TrainingWakeMixin:
         batch_size = len(sequences)
         if batch_size == 0 or len(sequence_indices) != batch_size:
             raise ValueError("Wake wavefront batch metadata does not align")
-        lengths = [
-            int(value)
-            for value in flat["sequence_lengths"].detach().cpu().tolist()
-        ]
+        lengths_cpu = flat.get("sequence_lengths_cpu")
+        if lengths_cpu is None:
+            lengths_cpu = flat["sequence_lengths"].detach().cpu().tolist()
+        lengths = [int(value) for value in lengths_cpu]
         if len(lengths) != batch_size or any(length <= 0 for length in lengths):
             raise ValueError("Wake wavefront requires non-empty sequences")
         offsets = []

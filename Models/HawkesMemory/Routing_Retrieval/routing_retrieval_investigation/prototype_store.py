@@ -42,6 +42,40 @@ class NodePrototypeStore(nn.Module):
             "m2",
             torch.zeros(node_count, self.feature_dim, device=device),
         )
+        self.register_buffer(
+            "ancestor_matrix",
+            self._build_ancestor_matrix(self.node_ids, device=device),
+            persistent=False,
+        )
+
+    @staticmethod
+    def _build_ancestor_matrix(
+        node_ids: Sequence[str],
+        *,
+        device: torch.device | str | None,
+    ) -> Tensor:
+        """Build descendant-to-ancestor membership once per topology.
+
+        This is topology state, not batch state.  Keeping it as a device
+        buffer removes the nested Python loop from every Global update while
+        preserving the original string-prefix membership rule exactly.
+        """
+        node_ids = tuple(node_ids)
+        matrix = torch.zeros(
+            len(node_ids),
+            len(node_ids),
+            dtype=torch.bool,
+            device=device,
+        )
+        for descendant_index, descendant_id in enumerate(node_ids):
+            for ancestor_index, ancestor_id in enumerate(node_ids):
+                if (
+                    ancestor_id == "root"
+                    or descendant_id == ancestor_id
+                    or descendant_id.startswith(ancestor_id + "_")
+                ):
+                    matrix[descendant_index, ancestor_index] = True
+        return matrix
 
     @property
     def node_index(self) -> dict[str, int]:
@@ -71,6 +105,10 @@ class NodePrototypeStore(nn.Module):
         self.count = new_count
         self.mean = new_mean
         self.m2 = new_m2
+        self.ancestor_matrix = self._build_ancestor_matrix(
+            new_ids,
+            device=self.count.device,
+        )
 
     @torch.no_grad()
     def update_weighted(
@@ -90,14 +128,22 @@ class NodePrototypeStore(nn.Module):
             )
         if node_weights.shape != (z.size(0), len(self.node_ids)):
             raise ValueError("node_weights must have shape [B, N]")
-        if bool((node_weights < 0.0).any()):
+        # The normal training path constructs non-negative weights from
+        # masked responsibilities.  Keep the validation available for debug
+        # callers, but do not force a CUDA synchronization for every batch.
+        validate_inputs = getattr(
+            self,
+            "validate_update_inputs",
+            node_weights.device.type != "cuda",
+        )
+        if validate_inputs and bool(
+            (node_weights < 0.0).any()
+        ):
             raise ValueError("node_weights must be non-negative")
 
         weights = node_weights.to(device=z.device, dtype=z.dtype)
         batch_count = weights.sum(dim=0)
         active = batch_count > 0.0
-        if not bool(active.any()):
-            return
         batch_mean = torch.einsum("bn,bd->nd", weights, z)
         batch_mean = batch_mean / batch_count.clamp_min(1e-12).unsqueeze(-1)
         centered = z.unsqueeze(1) - batch_mean.unsqueeze(0)
@@ -183,7 +229,14 @@ class NodePrototypeStore(nn.Module):
             )
         if node_indices.dtype != torch.long or mask.dtype != torch.bool:
             raise ValueError("node_indices must be long and mask must be bool")
-        if bool((responsibility.masked_select(mask) < 0.0).any()):
+        validate_inputs = getattr(
+            self,
+            "validate_update_inputs",
+            responsibility.device.type != "cuda",
+        )
+        if validate_inputs and bool(
+            (responsibility.masked_select(mask) < 0.0).any()
+        ):
             raise ValueError("responsibility must be non-negative")
 
         node_count = len(self.node_ids)
@@ -194,23 +247,10 @@ class NodePrototypeStore(nn.Module):
             safe_indices,
             responsibility.masked_fill(~mask, 0.0),
         )
-        # The store has no tree dependency, so derive ancestor membership from
-        # hierarchical node ids (root, root_L, root_L_R, ...).
-        ancestor = torch.zeros(
-            node_count,
-            node_count,
-            dtype=torch.bool,
+        node_weights = direct @ self.ancestor_matrix.to(
             device=direct.device,
+            dtype=direct.dtype,
         )
-        for descendant_index, descendant_id in enumerate(self.node_ids):
-            for ancestor_index, ancestor_id in enumerate(self.node_ids):
-                if (
-                    ancestor_id == "root"
-                    or descendant_id == ancestor_id
-                    or descendant_id.startswith(ancestor_id + "_")
-                ):
-                    ancestor[descendant_index, ancestor_index] = True
-        node_weights = direct @ ancestor.to(dtype=direct.dtype)
         self.update_weighted(z, node_weights)
 
     def variance(self, node_id: str, epsilon: float = 1e-4) -> Tensor:
@@ -259,6 +299,10 @@ class NodePrototypeStore(nn.Module):
 
     def set_extra_state(self, state) -> None:
         self.node_ids = tuple(state.get("node_ids", ()))
+        self.ancestor_matrix = self._build_ancestor_matrix(
+            self.node_ids,
+            device=self.count.device,
+        )
 
     def _load_from_state_dict(
         self,

@@ -241,16 +241,23 @@ def load_dataset(path: Path) -> tuple[list[dict[str, Any]], dict[int, int]]:
         raise ValueError(f"dataset is missing columns: {sorted(missing)}")
     raw: list[dict[str, Any]] = []
     all_types: set[int] = set()
-    for source_index, row in frame.iterrows():
+    for row_index, row in frame.iterrows():
         times = _parse_list(row["event_times"], float)
         types = _parse_list(row["event_types"], int)
         if not times or len(times) != len(types):
             continue
         if times[0] < 0 or any(b < a for a, b in zip(times, times[1:])):
-            raise ValueError(f"invalid event times at source row {source_index}")
+            raise ValueError(f"invalid event times at source row {row_index}")
         all_types.update(types)
+        source_value = (
+            row["source_index"]
+            if "source_index" in frame.columns
+            else row_index
+        )
+        if pd.isna(source_value):
+            raise ValueError(f"missing source_index at source row {row_index}")
         item: dict[str, Any] = {
-            "source_index": int(source_index),
+            "source_index": int(source_value),
             "times": times,
             "types": types,
         }
@@ -789,6 +796,63 @@ def run_variant_compact(
     if settings["online"] or settings.get("writes", settings["online"]):
         raise ValueError(
             "compact evaluation is restricted to frozen read-only variants"
+        )
+
+    # The latest HM runtime intentionally keeps one canonical event-wise
+    # inference entry point.  Older benchmark revisions added a padded batch
+    # API here, so retain the compact evaluator's output contract by falling
+    # back to that canonical entry point when the optional batch API is absent.
+    if not hasattr(MemoryTreeInference, "prepare_sequence_batch") or not hasattr(
+        MemoryTreeInference, "run_sequence_batch_compact"
+    ):
+        rows, inference, elapsed = run_variant(
+            checkpoint,
+            sequences,
+            canonical,
+            device,
+            progress_dir=progress_dir,
+            prototype_duplicate_threshold=prototype_duplicate_threshold,
+            prototype_mode_threshold=prototype_mode_threshold,
+            prototype_context_alias_capacity=prototype_context_alias_capacity,
+            verbose=verbose,
+        )
+        accumulators: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            group_id = str(row.get("eval_set_id", "all"))
+            group = accumulators.setdefault(group_id, {
+                "events": 0,
+                "sequences": set(),
+                "nll_sum": 0.0,
+                "correct": 0,
+                "time_abs_sum": 0.0,
+            })
+            group["events"] += 1
+            group["sequences"].add(row.get("source_index"))
+            group["nll_sum"] += float(row["nll"])
+            group["correct"] += int(
+                int(row.get("predicted_type_at_event_time", -1))
+                == int(row.get("true_type", -2))
+            )
+            group["time_abs_sum"] += abs(
+                float(row.get("predicted_time", 0.0))
+                - float(row.get("true_time", 0.0))
+            )
+        metrics_by_group = {}
+        for group_id, group in accumulators.items():
+            events = int(group["events"])
+            denominator = max(events, 1)
+            metrics_by_group[group_id] = {
+                "events": events,
+                "sequences": len(group["sequences"]),
+                "nll_per_event": float(group["nll_sum"]) / denominator,
+                "accuracy": float(group["correct"]) / denominator,
+                "local_time_mae": float(group["time_abs_sum"]) / denominator,
+            }
+        return (
+            metrics_by_group,
+            rows if capture_event_predictions else [],
+            inference,
+            elapsed,
         )
 
     inference = MemoryTreeInference.from_checkpoint(

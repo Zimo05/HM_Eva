@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import inspect
-import json
 from collections import defaultdict
 
 from Train.TrainingComponents import *  # noqa: F403
+from Train.TrainingWakeSupport import ResidentSequenceStore
 
 
 class _LazyFrontierRows:
@@ -99,14 +99,7 @@ class TrainingLoopMixin:
             None,
         )
         if configured:
-            configured_path = Path(configured)
-            # The continual runner passes ``topology_events.jsonl`` as the
-            # structured transaction destination.  Keep the existing
-            # human-readable candidate log beside it instead of appending
-            # plain text to a JSONL stream.
-            if configured_path.suffix.lower() == ".jsonl":
-                return configured_path.with_suffix(".log")
-            return configured_path
+            return Path(configured)
         checkpoint = Path(self.training_config.checkpoint_path)
         return checkpoint.with_name(
             f"{checkpoint.stem}_unified_topology.log"
@@ -127,68 +120,6 @@ class TrainingLoopMixin:
             for line in lines:
                 stream.write(f"{line}\n")
             stream.write("\n")
-
-    def _topology_events_path(self) -> Path:
-        """Resolve the append-only JSONL stream of committed topology edits."""
-
-        configured = getattr(
-            self.training_config,
-            "unified_topology_log_path",
-            None,
-        )
-        if configured:
-            configured_path = Path(configured)
-            if configured_path.suffix.lower() == ".jsonl":
-                return configured_path
-            return configured_path.with_suffix(".jsonl")
-        checkpoint = Path(self.training_config.checkpoint_path)
-        return checkpoint.with_name("topology_events.jsonl")
-
-    def _write_topology_events(
-        self,
-        epoch: int,
-        transaction: Mapping[str, Any],
-    ) -> None:
-        """Persist committed Split/Merge/Prune actions as structured JSONL."""
-
-        actions = transaction.get("actions", ()) if transaction else ()
-        rows = []
-        for action in actions:
-            kind = str(action.get("action", ""))
-            if kind not in {"split", "merge", "topology_prune"}:
-                continue
-            if kind == "split":
-                source = action.get("node")
-                targets = action.get("children", ())
-            else:
-                source = action.get("parent")
-                targets = action.get("nodes", ())
-            row = {
-                "global_epoch": int(epoch),
-                "task_id": getattr(self.training_config, "cl_task_id", None),
-                "action": kind,
-                "source": None if source is None else str(source),
-                "targets": [str(value) for value in (targets or ())],
-                "committed": True,
-            }
-            for key in (
-                "action_id",
-                "conservative_gain",
-                "rebased_rows",
-                "overflow_rows",
-                "decision_reason",
-            ):
-                value = action.get(key)
-                if isinstance(value, (str, int, float, bool)) or value is None:
-                    row[key] = value
-            rows.append(row)
-        if not rows:
-            return
-        path = self._topology_events_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as stream:
-            for row in rows:
-                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _calibrate_controller_checkpoint(
         self,
@@ -664,7 +595,10 @@ class TrainingLoopMixin:
             chunk_indices = order[start : start + chunk_size]
             sequences = [dataset[index] for index in chunk_indices]
             with torch.no_grad():
-                z_flat, flat = self._encode_global_sequence_batch(sequences)
+                z_flat, flat = self._encode_global_sequence_batch(
+                    sequences,
+                    sequence_indices=chunk_indices,
+                )
                 projected_flat = self.tree.router_compat.project_z(z_flat)
                 query_flat = self.tree.episodic_memory.query_net(z_flat)
                 frontier_flat = self.tree.frontier_routing.route_packed(
@@ -685,7 +619,10 @@ class TrainingLoopMixin:
                 frontier_flat,
                 self.tree.all_node_ids,
             )
-            lengths = flat["sequence_lengths"].detach().cpu().tolist()
+            lengths_cpu = flat.get("sequence_lengths_cpu")
+            if lengths_cpu is None:
+                lengths_cpu = flat["sequence_lengths"].detach().cpu().tolist()
+            lengths = list(lengths_cpu)
             yield {
                 "sequences": sequences,
                 "sequence_indices": tuple(chunk_indices),
@@ -748,7 +685,10 @@ class TrainingLoopMixin:
                 )
                 for key, value in sequence.items()
             }
-            self.hawkes.prepare_sequence_cache(
+            # Keep the returned mapping explicitly.  The current cache
+            # mutates in place, but this also preserves the resident contract
+            # for future cache implementations that return a replacement.
+            resident_sequence = self.hawkes.prepare_sequence_cache(
                 resident_sequence,
                 inplace=True,
             )
@@ -760,6 +700,12 @@ class TrainingLoopMixin:
             )
         cache_progress.close()
         dataset = resident_dataset
+        # Keep the list-of-dicts for metadata/compatibility, and use this
+        # padded device-resident view for the Wake/Global tensor hot path.
+        self._resident_sequence_store = ResidentSequenceStore.from_sequences(
+            dataset,
+            self.device,
+        )
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         if verbose:
@@ -770,7 +716,6 @@ class TrainingLoopMixin:
                 f"time={time.perf_counter() - cache_started:.3f}s"
             )
         generator = torch.Generator(device="cpu")
-        stage_start_epoch = self.completed_epochs
         final_epoch = self.completed_epochs + self.training_config.epochs
 
         for epoch in range(self.completed_epochs + 1, final_epoch + 1):
@@ -785,6 +730,7 @@ class TrainingLoopMixin:
             wake_started = epoch_started
             self._resident_cache_hits = 0
             self._resident_cache_misses = 0
+            self._resident_cache_miss_reasons = Counter()
             wake_prediction = 0.0
             wake_wm = 0.0
             writes = 0
@@ -1081,7 +1027,6 @@ class TrainingLoopMixin:
                 )
                 self.sleep_state["accepted_writes_since_sleep"] = 0
                 transaction = sleep_result.get("transaction") or {}
-                self._write_topology_events(epoch, transaction)
                 split_nodes = {
                     action.get("node")
                     for action in transaction.get("actions", [])
@@ -1172,9 +1117,6 @@ class TrainingLoopMixin:
             )
             epoch_result = {
                 "epoch": epoch,
-                "global_epoch": epoch,
-                "stage_id": self.training_config.cl_task_id,
-                "local_epoch": epoch - stage_start_epoch,
                 "wake_loss_per_event": wake_loss,
                 "wake_prediction_nll_per_event": wake_prediction / max(event_count, 1),
                 "writes": writes,
@@ -1304,6 +1246,9 @@ class TrainingLoopMixin:
                 },
                 "resident_cache_hits": self._resident_cache_hits,
                 "resident_cache_misses": self._resident_cache_misses,
+                "resident_cache_miss_reasons": dict(
+                    self._resident_cache_miss_reasons
+                ),
                 "cuda_peak_memory_mb": cuda_peak_memory_mb,
                 "full_objective": (
                     wake_loss
@@ -1651,6 +1596,8 @@ class TrainingLoopMixin:
                     f"cache="
                     f"{self._resident_cache_hits}/"
                     f"{self._resident_cache_misses} "
+                    f"cache_miss_reasons="
+                    f"{dict(self._resident_cache_miss_reasons)} "
                     f"cuda_peak={cuda_peak_memory_mb:.0f}MiB "
                     f"sleep_actions={sleep_actions}"
                 )

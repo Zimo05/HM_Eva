@@ -109,6 +109,10 @@ CL_PROTOCOL_VARIANTS = (
     "fast_adapt/full",
     "online_write/full",
 )
+CL_MEMORY_ABLATION_VARIANTS = (
+    "frozen/no_episodic",
+    "frozen/semantic_only",
+)
 LEGACY_CL_VARIANT_MAP = {
     # The historical name was misleading: its implementation enabled
     # sequence-local Working Memory adaptation.  Preserve that behavior under
@@ -116,12 +120,14 @@ LEGACY_CL_VARIANT_MAP = {
     "full_frozen": "fast_adapt/full",
     "full_online": "online_write/full",
     "no_working": "frozen/full",
+    "no_episodic": "frozen/no_episodic",
+    "semantic_only": "frozen/semantic_only",
 }
 
 
 def _canonical_variant(variant: str) -> str:
     canonical = LEGACY_CL_VARIANT_MAP.get(variant, variant)
-    if canonical not in CL_PROTOCOL_VARIANTS:
+    if canonical not in CL_PROTOCOL_VARIANTS + CL_MEMORY_ABLATION_VARIANTS:
         raise ValueError(
             f"unsupported CL protocol variant {variant!r}; expected one of "
             f"{CL_PROTOCOL_VARIANTS}"
@@ -2021,10 +2027,15 @@ def _hawkes_law_evaluation(
                 f"decay bases, expected {expected_basis}"
             )
         # The routing table is checkpoint-static.  Reuse it for every anchor
-        # batch; the causal Working Memory state is still reset per sequence
-        # inside ``run_sequence`` below.
-        static_cache = inference.tree.frontier_routing.build_static_cache(
-            detach=True
+        # batch when the optional padded API is available; the current HM
+        # runtime intentionally exposes only the canonical event-wise path.
+        has_batch_api = (
+            hasattr(inference, "prepare_sequence_batch")
+            and hasattr(inference, "run_sequence_batch_compact")
+        )
+        static_cache = (
+            inference.tree.frontier_routing.build_static_cache(detach=True)
+            if has_batch_api else None
         )
         for anchor in anchors:
             regime_id = str(anchor.regime_id)
@@ -2036,19 +2047,25 @@ def _hawkes_law_evaluation(
                 batch = sequences[
                     batch_start:batch_start + args.eval_batch_size
                 ]
-                prepared, static_cache = inference.prepare_sequence_batch(
-                    batch,
-                    frontier_static_cache=static_cache,
-                )
-                if not all(item.get("z") is not None for item in prepared):
-                    raise RuntimeError(
-                        "Hawkes law evaluation requires a padded CausalPrefixEncoder"
+                if has_batch_api:
+                    prepared, static_cache = inference.prepare_sequence_batch(
+                        batch,
+                        frontier_static_cache=static_cache,
                     )
-                batch_results = inference.run_sequence_batch_compact(
-                    prepared,
-                    frontier_static_cache=static_cache,
-                    capture_prediction_theta=True,
-                )
+                    if not all(item.get("z") is not None for item in prepared):
+                        raise RuntimeError(
+                            "Hawkes law evaluation requires a padded CausalPrefixEncoder"
+                        )
+                    batch_results = inference.run_sequence_batch_compact(
+                        prepared,
+                        frontier_static_cache=static_cache,
+                        capture_prediction_theta=True,
+                    )
+                else:
+                    batch_results = [
+                        inference.run_sequence(sequence)
+                        for sequence in batch
+                    ]
                 snapshots_by_sequence: list[list[torch.Tensor]] = []
                 for result in batch_results:
                     events = result.get("events", ())
@@ -2999,7 +3016,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--variants", nargs="+",
-        choices=CL_PROTOCOL_VARIANTS + tuple(LEGACY_CL_VARIANT_MAP),
+        choices=(
+            CL_PROTOCOL_VARIANTS
+            + CL_MEMORY_ABLATION_VARIANTS
+            + tuple(LEGACY_CL_VARIANT_MAP)
+        ),
         default=None,
         help="canonical protocol/full keys; legacy names are accepted as aliases",
     )

@@ -30,6 +30,8 @@ def main() -> None:
         *(project_root / "Models" / name for name in (
             "RMTPP", "THP", "TPP-LLM", "FullyNN", "EasyTPP",
         )),
+        project_root / "Models" / "HawkesMemory",
+        project_root / "Models" / "HawkesMemory" / "Memory",
     ]
     errors.extend(
         f"missing project directory: {path}"
@@ -42,6 +44,10 @@ def main() -> None:
         project_root / "Models" / "THP" / "run_experiment.py",
         project_root / "Models" / "TPP-LLM" / "scripts" / "train_tpp_llm.py",
         project_root / "Models" / "FullyNN" / "run_experiment.py",
+        project_root / "Models" / "HawkesMemory" / "Memory" / "Train" / "Train.py",
+        project_root / "Models" / "HawkesMemory" / "Memory" / "Train" / "Inference.py",
+        project_root / "Models" / "HawkesMemory" / "Memory" / "Evaluate.py",
+        project_root / "Models" / "HawkesMemory" / "Memory" / "EvaluateCL.py",
     ]
     errors.extend(
         f"missing baseline entrypoint: {path}"

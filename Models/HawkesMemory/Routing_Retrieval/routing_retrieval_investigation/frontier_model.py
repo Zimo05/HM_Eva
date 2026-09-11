@@ -202,6 +202,20 @@ class FrontierRoutingRetrieval(nn.Module):
         self._validated_frontiers: set[tuple[str, ...]] = set()
         self.expansion_gain: Dict[str, float] = {}
         self.expansion_visits: Dict[str, int] = {}
+        # Expansion gains are mutable training state, so unlike topology
+        # tensors they cannot be frozen until Sleep.  The tensor is the hot-
+        # path source of truth; the legacy dictionary is materialized only at
+        # explicit API/checkpoint boundaries.
+        self.register_buffer(
+            "_expansion_gain_tensor",
+            torch.empty(
+                0,
+                device=tree._device_anchor.device,
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
+        self._gain_topology_signature: Optional[tuple[str, ...]] = None
         # Training-only, p_expand-independent coverage state for Regional
         # Probe. Counts are keyed by actual leaves and survive checkpoints.
         self.probe_leaf_visits: Dict[str, int] = {}
@@ -209,6 +223,65 @@ class FrontierRoutingRetrieval(nn.Module):
         self._target_leaf_mass_by_id: Dict[str, float] = {}
         self._pending_target_leaf_mass: Optional[tuple[float, ...]] = None
         self._reset_target_leaf_mass_from_config()
+
+    def _sync_gain_tensor(self) -> None:
+        """Initialize or migrate the device gain vector after topology changes."""
+        node_ids = tuple(self.tree.all_node_ids)
+        if (
+            self._gain_topology_signature == node_ids
+            and self._expansion_gain_tensor.numel() == len(node_ids)
+        ):
+            return
+
+        device = self.tree._device_anchor.device
+        previous_ids = self._gain_topology_signature
+        previous = self._expansion_gain_tensor
+        if previous_ids is None or previous.numel() != len(previous_ids):
+            # Initial construction and checkpoint restoration originate from
+            # the compatibility dictionary.
+            migrated = torch.as_tensor(
+                [
+                    self.expansion_gain.get(
+                        node_id,
+                        self.config.default_expansion_gain,
+                    )
+                    for node_id in node_ids
+                ],
+                device=device,
+                dtype=torch.float32,
+            )
+        else:
+            # Sleep may split, merge, or prune nodes.  Preserve every surviving
+            # value entirely on-device and initialize only genuinely new nodes.
+            migrated = torch.full(
+                (len(node_ids),),
+                float(self.config.default_expansion_gain),
+                device=device,
+                dtype=torch.float32,
+            )
+            previous_lookup = {
+                node_id: index for index, node_id in enumerate(previous_ids)
+            }
+            surviving = [
+                (new_index, previous_lookup[node_id])
+                for new_index, node_id in enumerate(node_ids)
+                if node_id in previous_lookup
+            ]
+            if surviving:
+                new_indices, old_indices = zip(*surviving)
+                new_index = torch.tensor(
+                    new_indices, device=device, dtype=torch.long
+                )
+                old_index = torch.tensor(
+                    old_indices, device=previous.device, dtype=torch.long
+                )
+                migrated.index_copy_(
+                    0,
+                    new_index,
+                    previous.index_select(0, old_index).to(migrated),
+                )
+        self._expansion_gain_tensor = migrated
+        self._gain_topology_signature = node_ids
 
     @staticmethod
     def _is_descendant(node_id: str, ancestor_id: str) -> bool:
@@ -377,6 +450,8 @@ class FrontierRoutingRetrieval(nn.Module):
             for leaf_id, visits in self.probe_leaf_visits.items()
             if leaf_id in active_leaves
         }
+        # Keep the previous gain signature until _sync_gain_tensor runs.  It
+        # uses that ID order to migrate surviving values fully on-device.
         self._topology_signature = node_ids
         self._validated_frontiers.clear()
         if not self._apply_pending_target_leaf_mass():
@@ -437,6 +512,7 @@ class FrontierRoutingRetrieval(nn.Module):
             "leaf_mass": leaf_mass,
             "node_mass": node_mass,
             "child_prior": child_prior,
+            "log_child_prior": child_prior.clamp_min(1e-12).log(),
             "path_mask": path_mask,
         }
 
@@ -505,6 +581,9 @@ class FrontierRoutingRetrieval(nn.Module):
         if gain < 0.0:
             raise ValueError("expansion gain must be non-negative")
         self.expansion_gain[node_id] = float(gain)
+        self._sync_gain_tensor()
+        index = tuple(self.tree.all_node_ids).index(node_id)
+        self._expansion_gain_tensor[index] = float(gain)
 
     @torch.no_grad()
     def update_expansion_gain(
@@ -520,18 +599,25 @@ class FrontierRoutingRetrieval(nn.Module):
         ):
             raise ValueError("expansion gain tensors must have the same shape")
         decay = self.config.expansion_gain_decay
-        for node_index in node_indices[mask].unique().cpu().tolist():
-            selected = mask & (node_indices == int(node_index))
-            value = float(
-                observed_gain.masked_select(selected).mean().cpu()
-            )
-            node_id = self.tree.all_node_ids[int(node_index)]
-            previous = self.expansion_gain.get(
-                node_id, self.config.default_expansion_gain
-            )
-            self.expansion_gain[node_id] = (
-                decay * previous + (1.0 - decay) * max(value, 0.0)
-            )
+        self._sync_gain_tensor()
+        selected_nodes = node_indices.masked_select(mask)
+        selected_values = observed_gain.masked_select(mask).clamp_min(0.0)
+        if selected_nodes.numel() == 0:
+            return
+        sums = selected_values.new_zeros(self._expansion_gain_tensor.shape)
+        counts = selected_values.new_zeros(self._expansion_gain_tensor.shape)
+        sums.scatter_add_(0, selected_nodes, selected_values)
+        counts.scatter_add_(
+            0,
+            selected_nodes,
+            torch.ones_like(selected_values),
+        )
+        old = self._expansion_gain_tensor.to(sums)
+        updated = decay * old + (1.0 - decay) * (
+            sums / counts.clamp_min(1.0)
+        )
+        active = counts > 0.0
+        self._expansion_gain_tensor.copy_(torch.where(active, updated, old))
 
     def _child_ids(self, node_id: str) -> tuple[str, str]:
         node = self.tree.nodes[node_id]
@@ -614,10 +700,9 @@ class FrontierRoutingRetrieval(nn.Module):
         mass: Tensor,
         decision: BranchDecision,
     ) -> Tensor:
-        gain = self.expansion_gain.get(
-            node_id,
-            self.config.default_expansion_gain,
-        )
+        self._sync_gain_tensor()
+        node_index = tuple(self.tree.all_node_ids).index(node_id)
+        gain = self._expansion_gain_tensor[node_index].to(mass)
         confidence = (
             1.0
             - decision.entropy.detach()
@@ -774,6 +859,7 @@ class FrontierRoutingRetrieval(nn.Module):
             )
         if projected_z is None:
             projected_z = self.tree.router_compat.project_z(z_t)
+        self._sync_gain_tensor()
 
         batch = z_t.size(0)
         width = self.config.frontier_budget
@@ -805,12 +891,10 @@ class FrontierRoutingRetrieval(nn.Module):
         child_table = topology["child_index"]
         internal_table = topology["internal"]
         prior_table = topology["child_prior"].to(z_t)
-        gain_table = z_t.new_tensor([
-            self.expansion_gain.get(
-                node_id, self.config.default_expansion_gain
-            )
-            for node_id in self.tree.all_node_ids
-        ])
+        gain_table = self._expansion_gain_tensor.to(
+            device=device,
+            dtype=z_t.dtype,
+        )
 
         for round_index in range(rounds):
             safe_nodes = node_indices.clamp_min(0)
@@ -1449,6 +1533,14 @@ class FrontierRoutingRetrieval(nn.Module):
         )
 
     def get_extra_state(self) -> Dict[str, Any]:
+        # Checkpointing is the synchronization boundary for the legacy mapping.
+        # Global routing/update never pays this device-to-host transfer.
+        self._sync_gain_tensor()
+        gain_values = self._expansion_gain_tensor.detach().cpu().tolist()
+        self.expansion_gain = {
+            node_id: float(value)
+            for node_id, value in zip(self.tree.all_node_ids, gain_values)
+        }
         return {
             "expansion_gain": dict(self.expansion_gain),
             "expansion_visits": dict(self.expansion_visits),
@@ -1465,6 +1557,7 @@ class FrontierRoutingRetrieval(nn.Module):
                 "expansion_gain", {}
             ).items()
         }
+        self._gain_topology_signature = None
         self.expansion_visits = {
             str(key): int(value)
             for key, value in state.get(

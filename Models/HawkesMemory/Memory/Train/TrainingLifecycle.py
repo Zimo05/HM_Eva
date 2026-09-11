@@ -11,6 +11,49 @@ from Train.TrainingComponents import (
 
 
 class TrainingLifecycleMixin:
+    @staticmethod
+    def _make_adamw(
+        parameter_groups: Sequence[Mapping[str, Any]],
+        *,
+        optimizer_impl: str = "auto",
+        **kwargs: Any,
+    ) -> torch.optim.Optimizer:
+        """Construct AdamW with the CUDA fused/foreach fast path.
+
+        Sleep and controller-only mode rebuild the optimizer after topology or
+        parameter-group changes.  Keeping construction in one helper ensures
+        those rebuilds retain the same fused-kernel policy as initial setup;
+        parameter groups, learning rates, and update equations are unchanged.
+        """
+        groups = list(parameter_groups)
+        implementation = str(optimizer_impl).lower()
+        if implementation not in {"auto", "standard", "foreach", "fused"}:
+            raise ValueError(
+                "optimizer_impl must be one of auto, standard, foreach, fused"
+            )
+        parameters = [
+            parameter
+            for group in groups
+            for parameter in group.get("params", ())
+        ]
+        use_cuda = bool(parameters) and all(
+            parameter.device.type == "cuda" for parameter in parameters
+        )
+        if use_cuda and implementation in {"auto", "fused"}:
+            try:
+                return torch.optim.AdamW(groups, fused=True, **kwargs)
+            except (TypeError, RuntimeError):
+                if implementation == "fused":
+                    implementation = "foreach"
+        if implementation == "foreach" or (
+            implementation == "auto" and use_cuda
+        ):
+            try:
+                return torch.optim.AdamW(groups, foreach=True, **kwargs)
+            except (TypeError, RuntimeError):
+                pass
+        return torch.optim.AdamW(groups, **kwargs)
+
     def __init__(
         self,
         tree: HawkesTree,
@@ -362,24 +405,29 @@ class TrainingLifecycleMixin:
             for parameter in named_parameters.values()
             if id(parameter) not in router_ids
         ]
-        self.optimizer = torch.optim.AdamW(
-            [
-                {
-                    "params": base_parameters,
-                    "lr": self.training_config.learning_rate,
-                    "group_name": "base",
-                },
-                {
-                    "params": router_parameters,
-                    "lr": (
-                        self.training_config.learning_rate
-                        * self.training_config.router_lr_scale
-                    ),
-                    "group_name": "router",
-                },
-            ],
-            lr=self.training_config.learning_rate,
-            weight_decay=self.training_config.weight_decay,
+        optimizer_groups = [
+            {
+                "params": base_parameters,
+                "lr": self.training_config.learning_rate,
+                "group_name": "base",
+            },
+            {
+                "params": router_parameters,
+                "lr": (
+                    self.training_config.learning_rate
+                    * self.training_config.router_lr_scale
+                ),
+                "group_name": "router",
+            },
+        ]
+        optimizer_kwargs = {
+            "lr": self.training_config.learning_rate,
+            "weight_decay": self.training_config.weight_decay,
+        }
+        self.optimizer = self._make_adamw(
+            optimizer_groups,
+            optimizer_impl=self.training_config.optimizer_impl,
+            **optimizer_kwargs,
         )
         self.split_modules: Dict[str, SplitModule] = {}
         self.controller_utility_replay = ControllerUtilityReplay(
@@ -520,7 +568,6 @@ class TrainingLifecycleMixin:
             base_group["group_name"] = "base"
         base_group["params"] = base_parameters
         base_group["lr"] = self.training_config.learning_rate
-        base_group["weight_decay"] = self.training_config.weight_decay
 
         router_group = groups_by_name.get("router")
         if router_group is None:
@@ -533,7 +580,6 @@ class TrainingLifecycleMixin:
             self.training_config.learning_rate
             * self.training_config.router_lr_scale
         )
-        router_group["weight_decay"] = self.training_config.weight_decay
         self.optimizer.param_groups = [base_group, router_group]
 
     def _restore_optimizer(
@@ -656,8 +702,9 @@ class TrainingLifecycleMixin:
                     next_parameter_id
                 )
                 next_parameter_id += 1
-        self.optimizer = torch.optim.AdamW(
+        self.optimizer = self._make_adamw(
             groups,
+            optimizer_impl=self.training_config.optimizer_impl,
             lr=self.training_config.learning_rate,
         )
         self.optimizer.load_state_dict(migrated_state)
@@ -951,17 +998,6 @@ class TrainingLifecycleMixin:
         trainer._reconcile_optimizer_parameters()
         trainer.history = list(checkpoint.get("history", []))
         trainer.completed_epochs = int(checkpoint.get("epoch", 0))
-        validation_selection = checkpoint.get("validation_selection", {})
-        if isinstance(validation_selection, Mapping):
-            trainer.validation_history = list(
-                validation_selection.get("history", []) or []
-            )
-            saved_best = validation_selection.get("best")
-            trainer.best_validation = (
-                dict(saved_best)
-                if isinstance(saved_best, Mapping)
-                else None
-            )
         rng_state = checkpoint.get("rng_state", {})
         if "torch" in rng_state:
             torch.set_rng_state(rng_state["torch"].cpu())
@@ -1107,8 +1143,9 @@ class TrainingLifecycleMixin:
                 "weight_decay": self.training_config.weight_decay,
             })
         optimizer_groups.append({"params": [context_weight], "weight_decay": 0.0})
-        self.optimizer = torch.optim.AdamW(
+        self.optimizer = self._make_adamw(
             optimizer_groups,
+            optimizer_impl=self.training_config.optimizer_impl,
             lr=self.training_config.learning_rate,
         )
         self.tree.reset_working_memory()

@@ -77,44 +77,217 @@ class ControllerUtilityReplay:
         half = self.capacities[action] // 2
         return max(1, half // 2)  # half storage mode, then positive/negative
 
-    def add(self, row: Mapping[str, Any], action: int) -> None:
+    def _add_cpu_row(self, stored: Mapping[str, Any], action: int) -> None:
+        """Insert an already CPU-resident row without device scalar reads."""
         action = int(action)
+        stored = dict(stored)
         if action == 2 and self.write_ranking_enabled:
-            stored = _cpu_row(row)
-            group_id = int(stored.get("group_id", stored.get("source_index", -1)))
+            group_id = int(
+                stored.get("group_id", stored.get("source_index", -1))
+            )
             stored["group_id"] = group_id
-            stored["raw_write_utility"] = float(
-                torch.as_tensor(stored.get("raw_write_utility", stored["utility"][2]))
-            )
-            stored["probe_propensity"] = float(
-                stored.get("probe_propensity", torch.as_tensor(stored["propensity"])[2])
-            )
+            raw_utility = stored.get("raw_write_utility")
+            if raw_utility is None:
+                raw_utility = stored["utility"][2]
+            stored["raw_write_utility"] = float(raw_utility)
+            propensity = stored.get("probe_propensity")
+            if propensity is None:
+                propensity = stored["propensity"][2]
+            stored["probe_propensity"] = float(propensity)
             stored["probe_top"] = bool(stored.get("probe_top", False))
             self.write_pending[group_id].append(stored)
             return
-        utility = float(torch.as_tensor(row["utility"])[action])
+
+        utility = float(stored["utility"][action])
         sign = int(utility > 0.0)
         key = (action, sign)
-        stored = _cpu_row(row)
         self.seen[key] += 1
         uniform_capacity = self._bucket_capacity(action, False)
         uniform = self.uniform[key]
         if len(uniform) < uniform_capacity:
             uniform.append(stored)
         else:
+            # This is intentionally kept as the same sequential RNG call as
+            # add().  Batch insertion changes only tensor transfer and hard
+            # sorting, never reservoir sampling semantics.
             position = self.rng.randrange(self.seen[key])
             if position < uniform_capacity:
                 uniform[position] = stored
 
         hard_capacity = self._bucket_capacity(action, True)
         hard = self.hard[key]
-        gate = float(torch.as_tensor(row["gate"])[action])
-        target = float(torch.as_tensor(row["target"])[action])
-        score = abs(gate - target) * max(abs(utility), 1e-12)
-        stored["hard_score"] = score
+        gate = float(stored["gate"][action])
+        target = float(stored["target"][action])
+        stored["hard_score"] = (
+            abs(gate - target) * max(abs(utility), 1e-12)
+        )
         hard.append(stored)
-        hard.sort(key=lambda item: float(item["hard_score"]), reverse=True)
-        del hard[hard_capacity:]
+
+    def add_batch(
+        self,
+        *,
+        inputs: torch.Tensor,
+        utility: torch.Tensor,
+        target: torch.Tensor,
+        label_mask: torch.Tensor,
+        propensity: torch.Tensor,
+        gate: torch.Tensor,
+        cluster_ids: Sequence[int] | torch.Tensor,
+        source_indices: Sequence[int] | torch.Tensor,
+        event_indices: Sequence[int] | torch.Tensor,
+        owner_indices: Sequence[int] | torch.Tensor,
+        node_ids: Sequence[str],
+        action: int,
+    ) -> None:
+        """Insert one controller batch with a single device-to-host copy.
+
+        The uniform reservoir still consumes ``randrange`` in event-row
+        order.  Hard rows are accumulated per sign bucket and stably trimmed
+        once after the batch; stable sorting gives the same final result as
+        sorting after every individual insertion.
+        """
+        tensors = {
+            "inputs": inputs,
+            "utility": utility,
+            "target": target,
+            "label_mask": label_mask,
+            "propensity": propensity,
+            "gate": gate,
+        }
+        if not tensors or inputs.ndim != 2:
+            raise ValueError("replay batch tensors must be two-dimensional")
+        batch_size = int(inputs.size(0))
+        expected = (batch_size,)
+        for name, value in tensors.items():
+            if value.size(0) != batch_size:
+                raise ValueError(f"replay field {name!r} has wrong batch size")
+        if utility.ndim != 2 or utility.size(1) != 4:
+            raise ValueError("utility must have shape [B, 4]")
+        if target.shape != utility.shape or label_mask.shape != utility.shape:
+            raise ValueError("target/label_mask must have shape [B, 4]")
+        if propensity.shape != utility.shape or gate.shape != utility.shape:
+            raise ValueError("propensity/gate must have shape [B, 4]")
+        if label_mask.dtype != torch.bool:
+            raise ValueError("label_mask must be boolean")
+        metadata = {
+            "cluster_id": cluster_ids,
+            "source_index": source_indices,
+            "event_index": event_indices,
+            "owner_index": owner_indices,
+        }
+        for name, value in metadata.items():
+            if torch.is_tensor(value):
+                if value.ndim != 1 or value.numel() != batch_size:
+                    raise ValueError(f"{name} must have shape [B]")
+            elif len(value) != batch_size:
+                raise ValueError(f"{name} must have length B")
+
+        # A single bulk transfer replaces the old per-event .cpu() calls.
+        # Controller replay fields are normally all float32; keep a guarded
+        # mixed-dtype fallback for compatibility with hand-built tests.
+        same_dtype = all(
+            value.dtype == inputs.dtype
+            for name, value in tensors.items()
+            if name != "label_mask"
+        )
+        if same_dtype:
+            packed_gpu = torch.cat(
+                (
+                    inputs,
+                    target,
+                    utility,
+                    propensity,
+                    label_mask.to(dtype=inputs.dtype),
+                    gate,
+                ),
+                dim=-1,
+            )
+            packed_cpu = packed_gpu.detach().to(device="cpu")
+            input_width = int(inputs.size(1))
+            cpu_tensors = {
+                "inputs": packed_cpu[:, :input_width],
+                "target": packed_cpu[:, input_width : input_width + 4],
+                "utility": packed_cpu[:, input_width + 4 : input_width + 8],
+                "propensity": packed_cpu[:, input_width + 8 : input_width + 12],
+                "label_mask": packed_cpu[
+                    :, input_width + 12 : input_width + 16
+                ].bool(),
+                "gate": packed_cpu[:, input_width + 16 : input_width + 20],
+            }
+        else:
+            cpu_tensors = {
+                name: value.detach().to(device="cpu")
+                for name, value in tensors.items()
+            }
+        cpu_metadata: dict[str, list[Any]] = {}
+        tensor_metadata = [
+            (name, value)
+            for name, value in metadata.items()
+            if torch.is_tensor(value)
+        ]
+        if tensor_metadata:
+            metadata_device = torch.stack([
+                value.to(device=inputs.device, dtype=torch.long)
+                for _, value in tensor_metadata
+            ], dim=0)
+            metadata_cpu = metadata_device.detach().to(device="cpu").T.tolist()
+            for column, (name, _) in enumerate(tensor_metadata):
+                cpu_metadata[name] = [
+                    int(row[column]) for row in metadata_cpu
+                ]
+        for name, value in metadata.items():
+            if name not in cpu_metadata:
+                cpu_metadata[name] = [int(item) for item in value]
+
+        new_rows: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+        ordered_rows: list[dict[str, Any]] = []
+        for index in range(batch_size):
+            owner_index = int(cpu_metadata["owner_index"][index])
+            if owner_index < 0 or owner_index >= len(node_ids):
+                owner_id = ""
+            else:
+                owner_id = node_ids[owner_index]
+            row = {
+                "inputs": cpu_tensors["inputs"][index].clone(),
+                "utility": cpu_tensors["utility"][index].clone(),
+                "target": cpu_tensors["target"][index].clone(),
+                "label_mask": cpu_tensors["label_mask"][index].clone(),
+                "propensity": cpu_tensors["propensity"][index].clone(),
+                "gate": cpu_tensors["gate"][index].clone(),
+                "cluster_id": int(cpu_metadata["cluster_id"][index]),
+                "source_index": int(cpu_metadata["source_index"][index]),
+                "event_index": int(cpu_metadata["event_index"][index]),
+                "owner_id": owner_id,
+            }
+            utility_value = float(row["utility"][int(action)])
+            sign = int(utility_value > 0.0)
+            row["hard_score"] = abs(
+                float(row["gate"][int(action)])
+                - float(row["target"][int(action)])
+            ) * max(abs(utility_value), 1e-12)
+            new_rows[(int(action), sign)].append(row)
+            ordered_rows.append(row)
+
+        # Uniform reservoir updates must remain strictly row ordered.
+        for row in ordered_rows:
+            self._add_cpu_row(row, int(action))
+
+        # _add_cpu_row appended every row to hard.  Trim each affected bucket
+        # once, instead of sorting after every event.
+        for key, rows in new_rows.items():
+            hard_capacity = self._bucket_capacity(key[0], True)
+            hard = self.hard[key]
+            hard.sort(key=lambda item: float(item["hard_score"]), reverse=True)
+            del hard[hard_capacity:]
+
+    def add(self, row: Mapping[str, Any], action: int) -> None:
+        self._add_cpu_row(_cpu_row(row), int(action))
+        key = (int(action), int(float(torch.as_tensor(row["utility"])[int(action)]) > 0.0))
+        if int(action) != 2 or not self.write_ranking_enabled:
+            hard_capacity = self._bucket_capacity(int(action), True)
+            hard = self.hard[key]
+            hard.sort(key=lambda item: float(item["hard_score"]), reverse=True)
+            del hard[hard_capacity:]
 
     @staticmethod
     def _decorate_write_group(
@@ -312,6 +485,35 @@ class ControllerUtilityReplay:
             output.extend(self._sample_bucket(negative, negative_count))
         self.rng.shuffle(output)
         return output
+
+    def sample_packed(
+        self,
+        batch_sizes: Sequence[int] = DEFAULT_BATCH_SIZES,
+    ) -> torch.Tensor | None:
+        """Return replay tensors in one CPU payload for one H2D transfer.
+
+        The final four columns encode ``label_mask`` as 0/1 values.  They are
+        converted back to bool by the Global consumer; replay state remains
+        serialized in the original list-of-dicts format.
+        """
+        rows = self.sample(batch_sizes)
+        if not rows:
+            return None
+        try:
+            inputs = torch.stack([row["inputs"] for row in rows])
+            target = torch.stack([row["target"] for row in rows])
+            utility = torch.stack([row["utility"] for row in rows])
+            propensity = torch.stack([row["propensity"] for row in rows])
+            label_mask = torch.stack([
+                row["label_mask"].to(dtype=inputs.dtype)
+                for row in rows
+            ])
+        except (KeyError, RuntimeError) as error:
+            raise ValueError("replay rows cannot be packed") from error
+        return torch.cat(
+            (inputs, target, utility, propensity, label_mask),
+            dim=-1,
+        )
 
     def state_dict(self) -> dict[str, Any]:
         return {

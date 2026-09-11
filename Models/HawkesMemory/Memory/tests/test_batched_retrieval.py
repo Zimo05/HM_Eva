@@ -230,6 +230,104 @@ class MaskedEntmaxTests(unittest.TestCase):
             rtol=1e-5,
         )
 
+    def test_packed_read_materializes_only_requested_info_fields(self):
+        torch.manual_seed(100)
+        memory = TreeEpisodicMemory(
+            key_dim=3,
+            num_event_types=2,
+            num_basis=1,
+            capacity_per_node=5,
+            device="cpu",
+        )
+        memory.add_memory(
+            "root", torch.randn(3), torch.randn(memory.param_dim)
+        )
+        query = torch.randn(3, 3)
+        indices = torch.zeros(3, 1, dtype=torch.long)
+        mask = torch.ones_like(indices, dtype=torch.bool)
+
+        complete, complete_info = memory.read_packed(
+            query, indices, mask, ("root",), update_state=False
+        )
+        alpha_only, alpha_info = memory.read_packed(
+            query,
+            indices,
+            mask,
+            ("root",),
+            update_state=False,
+            info_fields=("alpha",),
+        )
+        no_info, empty_info = memory.read_packed(
+            query,
+            indices,
+            mask,
+            ("root",),
+            update_state=False,
+            info_fields=(),
+        )
+
+        self.assertEqual(
+            set(complete_info),
+            {"alpha", "similarity", "effective_k", "null_alpha", "valid_mask"},
+        )
+        self.assertEqual(set(alpha_info), {"alpha"})
+        self.assertEqual(empty_info, {})
+        torch.testing.assert_close(alpha_only, complete)
+        torch.testing.assert_close(no_info, complete)
+        torch.testing.assert_close(alpha_info["alpha"], complete_info["alpha"])
+
+    def test_single_scatter_chunking_preserves_retrieval_gradients(self):
+        torch.manual_seed(102)
+        chunked = TreeEpisodicMemory(
+            key_dim=3,
+            num_event_types=2,
+            num_basis=1,
+            capacity_per_node=5,
+            device="cpu",
+        )
+        node_ids = ("root", "root_L")
+        for node_id in node_ids:
+            for _ in range(3):
+                chunked.add_memory(
+                    node_id,
+                    torch.randn(3),
+                    torch.randn(chunked.param_dim),
+                )
+        unbounded = copy.deepcopy(chunked)
+        chunked_query = torch.randn(5, 3, requires_grad=True)
+        unbounded_query = chunked_query.detach().clone().requires_grad_(True)
+        indices = torch.tensor([
+            [0, 1], [1, 0], [0, 1], [1, 0], [0, 1],
+        ])
+        mask = torch.ones_like(indices, dtype=torch.bool)
+        chunked_delta, _ = chunked.read_packed(
+            chunked_query,
+            indices,
+            mask,
+            node_ids,
+            update_state=False,
+            retrieval_chunk_size=2,
+            info_fields=(),
+        )
+        unbounded_delta, _ = unbounded.read_packed(
+            unbounded_query,
+            indices,
+            mask,
+            node_ids,
+            update_state=False,
+            retrieval_chunk_size=None,
+            info_fields=(),
+        )
+        torch.testing.assert_close(chunked_delta, unbounded_delta)
+        objective_weight = torch.randn_like(chunked_delta)
+        (chunked_delta * objective_weight).sum().backward()
+        (unbounded_delta * objective_weight).sum().backward()
+        torch.testing.assert_close(chunked_query.grad, unbounded_query.grad)
+        for actual, expected in zip(
+            chunked.retriever.parameters(), unbounded.retriever.parameters()
+        ):
+            torch.testing.assert_close(actual.grad, expected.grad)
+
     def test_padded_rows_match_independent_entmax_forward_and_backward(self):
         torch.manual_seed(101)
         lengths = (1, 3, 6, 4)

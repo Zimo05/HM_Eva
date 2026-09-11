@@ -1,0 +1,3042 @@
+"""Wake-only online inference for a trained Hawkes Memory Tree."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional, Sequence
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
+
+from HawkesBackbone import (
+    EVENT_TIME_FEATURES_KEY,
+    HAWKES_CACHE_SIGNATURE_KEY,
+    HAWKES_HISTORY_STATS_KEY,
+    HAWKES_INTERVAL_STATS_KEY,
+    HawkesFamily,
+)
+from LatentHawkesTree import HawkesTree
+from MemoryResiduals.ProbationMemory import (
+    ProbationCandidate,
+    WriteProbationBuffer,
+)
+from Train.Train import (
+    CausalPrefixEncoder,
+    WakeObjectiveConfig,
+    _frontier_config_from_checkpoint,
+)
+from Wake.HawkesParams import HawkesParams
+from Wake.SequentialController import Action, Controller
+
+
+class EvaluationProtocol(str, Enum):
+    """The state transition allowed during evaluation.
+
+    Episodic retrieval is part of the frozen learner state.  The protocol
+    controls which state is allowed to change while a sequence is evaluated;
+    memory-view ablations are layered on top by the evaluator.
+    """
+
+    FROZEN = "frozen"
+    FAST_ADAPT = "fast_adapt"
+    ONLINE_WRITE = "online_write"
+
+
+def inference_config_for_protocol(
+    protocol: EvaluationProtocol | str,
+    **overrides: Any,
+) -> "InferenceConfig":
+    """Return the one canonical inference configuration for ``protocol``.
+
+    The optional keyword overrides are intentionally limited to fields on
+    :class:`InferenceConfig` that do not redefine the protocol state machine
+    in normal evaluator use (for example diagnostic write probes).  Callers
+    that need a memory-view ablation may override ``adapt_working_memory`` or
+    clear episodic banks after loading the checkpoint.
+    """
+
+    if isinstance(protocol, str):
+        protocol = EvaluationProtocol(protocol)
+    settings = {
+        EvaluationProtocol.FROZEN: {
+            "adapt_working_memory": False,
+            "allow_memory_writes": False,
+            "update_memory_usage": False,
+        },
+        EvaluationProtocol.FAST_ADAPT: {
+            "adapt_working_memory": True,
+            "allow_memory_writes": False,
+            "update_memory_usage": False,
+        },
+        EvaluationProtocol.ONLINE_WRITE: {
+            "adapt_working_memory": True,
+            "allow_memory_writes": True,
+            "update_memory_usage": True,
+        },
+    }[protocol]
+    settings.update(overrides)
+    return InferenceConfig(**settings)
+
+
+@dataclass
+class InferenceConfig:
+    adapt_working_memory: bool = True
+    allow_memory_writes: bool = True
+    update_memory_usage: bool = True
+    probe_write_counterfactuals: bool = False
+    write_probe_random_count: int = 16
+    write_probe_seed: int = 42
+    prototype_duplicate_threshold: Optional[float] = None
+    prototype_mode_threshold: Optional[float] = None
+    prototype_context_alias_capacity: Optional[int] = None
+    # Local Write acceptance only creates an invisible probation candidate.
+    # Persistent admission requires reuse evidence from independent sequences.
+    probation_capacity: int = 1024
+    probation_match_threshold: float = 0.5
+    probation_match_temperature: float = 0.1
+    probation_min_effective_samples: float = 2.0
+    probation_lcb_kappa: float = 1.96
+    probation_persist_threshold: float = 0.0
+    # Diagnostic-only causal replay.  When set, no event outside the allowlist
+    # may write; listed events bypass the learned Write threshold but still use
+    # the normal candidate construction and virtual retrieval path.
+    write_event_allowlist: Optional[tuple[int, ...]] = None
+
+
+class MemoryTreeInference:
+    def _controller_effective_parameters(
+        self,
+        memory_output: Mapping[str, Any],
+        working_delta: Tensor,
+        retrieval_gate: Tensor,
+    ):
+        semantic = memory_output["frontier_semantic_theta"]
+        episodic = memory_output["frontier_episodic_delta"]
+        gate = torch.as_tensor(retrieval_gate).to(episodic)
+        while gate.ndim < episodic.ndim - 1:
+            gate = gate.unsqueeze(-1)
+        D = self.hawkes.num_types
+        return self.tree.episodic_memory.parameter_update.compose_effective_parameters(
+            semantic_mu=semantic[..., :D],
+            semantic_W=semantic[..., D:].reshape(
+                *semantic.shape[:-1], D, D, self.hawkes.num_basis
+            ),
+            episodic_delta=episodic * gate.unsqueeze(-1),
+            routing_weights=memory_output["r"],
+            working_delta=working_delta,
+            decays=self.hawkes.decays,
+        )
+
+    """Route, retrieve, adapt working memory, and predict without sleep updates."""
+
+    def __init__(
+        self,
+        tree: HawkesTree,
+        hawkes: HawkesFamily,
+        encoder: nn.Module,
+        *,
+        wake_config: Optional[WakeObjectiveConfig] = None,
+        inference_config: Optional[InferenceConfig] = None,
+        device: Optional[torch.device | str] = None,
+    ) -> None:
+        self.wake_config = (
+            WakeObjectiveConfig() if wake_config is None else wake_config
+        )
+        self.config = InferenceConfig() if inference_config is None else inference_config
+        if self.config.probation_match_temperature <= 0.0:
+            raise ValueError("probation match temperature must be positive")
+        if self.config.probation_min_effective_samples < 0.0:
+            raise ValueError(
+                "probation minimum effective samples must be non-negative"
+            )
+        if self.config.probation_lcb_kappa < 0.0:
+            raise ValueError("probation LCB kappa must be non-negative")
+        if device is None:
+            device = next(tree.parameters()).device
+        self.device = torch.device(device)
+        self.tree = tree.to(self.device).eval()
+        self.hawkes = hawkes.to(self.device).eval()
+        self.encoder = encoder.to(self.device).eval()
+        self.tree.episodic_memory.configure_prototype_memory(
+            duplicate_threshold=(
+                self.wake_config.prototype_duplicate_threshold
+                if self.config.prototype_duplicate_threshold is None
+                else self.config.prototype_duplicate_threshold
+            ),
+            mode_threshold=(
+                self.wake_config.prototype_mode_threshold
+                if self.config.prototype_mode_threshold is None
+                else self.config.prototype_mode_threshold
+            ),
+            duplicate_quantile=self.wake_config.prototype_duplicate_quantile,
+            mode_capacity=self.wake_config.prototype_mode_capacity,
+            context_alias_capacity=(
+                self.wake_config.prototype_context_alias_capacity
+                if self.config.prototype_context_alias_capacity is None
+                else self.config.prototype_context_alias_capacity
+            ),
+        )
+        self.tree.episodic_memory.rebuild_law_keys(
+            self.tree.semantic_theta,
+            self.hawkes.decays,
+        )
+        self.write_probation = WriteProbationBuffer(
+            capacity=self.config.probation_capacity
+        )
+        self._anonymous_sequence_counter = 0
+        self.controller = Controller(
+            nll_fn=self.hawkes,
+            tau_s=self.wake_config.tau_surprise,
+            tau_n=self.wake_config.tau_novelty,
+            tau_c=self.wake_config.tau_count,
+            tau_sim=self.wake_config.tau_similarity,
+            eta_mem=self.wake_config.eta_memory_write,
+            memory_write_grad_clip=self.wake_config.memory_write_grad_clip,
+            write_horizon=self.wake_config.write_horizon,
+            episodic_memory=self.tree.episodic_memory,
+            working_memory=self.tree.working_memory,
+            action_temperature=self.wake_config.action_temperature,
+            novelty_temperature=self.wake_config.novelty_temperature,
+            count_exponent=self.wake_config.count_exponent,
+            count_similarity_low=self.wake_config.count_similarity_low,
+            count_similarity_high=self.wake_config.count_similarity_high,
+            count_topk=self.wake_config.count_topk,
+            count_saturation=self.wake_config.count_saturation,
+            surprise_ema_decay=self.wake_config.surprise_ema_decay,
+            write_candidate_threshold=(
+                self.wake_config.controller_write_admission_threshold
+            ),
+            # Inference is deterministic and never creates exploration writes.
+            exploration_rate=0.0,
+            utility_topc_multiplier=(
+                self.wake_config.controller_utility_topc_multiplier
+            ),
+            utility_stage_enabled=(
+                self.wake_config.controller_utility_stage_enabled
+            ),
+            utility_temperature=self.wake_config.controller_utility_temperature,
+            utility_cost_margin=self.wake_config.controller_utility_cost_margin,
+        ).to(self.device)
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint_path: str | Path,
+        *,
+        device: Optional[torch.device | str] = None,
+        inference_config: Optional[InferenceConfig] = None,
+        encoder: Optional[nn.Module] = None,
+    ) -> "MemoryTreeInference":
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = torch.device(device)
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
+        config = checkpoint["model_config"]
+        if config.get("router_kind") not in {
+            "node_semantic_compat_v1",
+            "active_frontier_v1",
+            "posterior_frontier_v2",
+        }:
+            raise ValueError(
+                "checkpoint uses the retired z-only Linear Router; the current "
+                "model requires Compat(z_t, u_n). Retrain before inference."
+            )
+        decays = torch.as_tensor(config["decays"], dtype=torch.float32)
+        hawkes = HawkesFamily(
+            num_types=config["num_event_types"],
+            num_basis=config["num_basis"],
+            decays=decays,
+        ).to(device)
+        tree = HawkesTree(
+            z_dim=config["z_dim"],
+            node_dim=config["node_dim"],
+            num_event_types=config["num_event_types"],
+            num_basis=config["num_basis"],
+            init_depth=0,
+            temperature=config.get("tree_temperature", 1.0),
+            hyper_hidden_dim=config.get("hyper_hidden_dim", 256),
+            memory_key_dim=config["memory_key_dim"],
+            memory_capacity_per_node=config.get(
+                "memory_capacity_per_node", 128
+            ),
+            working_rho=config.get("working_rho", 0.8),
+            working_eta=config.get("working_eta", 1e-2),
+        ).to(device)
+        tree.configure_frontier_routing(
+            config=_frontier_config_from_checkpoint(config)
+        )
+        if encoder is None:
+            encoder_config = config.get("encoder_config", {"kind": "causal_prefix"})
+            kind = encoder_config.get("kind", "causal_prefix")
+            if kind == "attention_memory":
+                raise ValueError(
+                    "checkpoint encoder_config.kind='attention_memory' is no longer "
+                    "supported; retrain with CausalPrefixEncoder and optional "
+                    "--h-tree semantic initialization"
+                )
+            type_dim = config.get("encoder_type_dim") or 32
+            hidden_dim = config.get("encoder_hidden_dim") or 128
+            encoder = CausalPrefixEncoder(
+                num_event_types=config["num_event_types"],
+                z_dim=config["z_dim"],
+                type_dim=type_dim,
+                hidden_dim=hidden_dim,
+            )
+        encoder = encoder.to(device)
+        hawkes.load_state_dict(checkpoint["hawkes_state_dict"])
+        incompatible = tree.load_state_dict(
+            checkpoint["tree_state_dict"],
+            strict=False,
+        )
+        legacy_missing = {
+            key
+            for key in incompatible.missing_keys
+            if key.startswith("frontier_routing.prototypes.")
+        }
+        if set(incompatible.missing_keys).difference(legacy_missing):
+            raise RuntimeError(
+                "checkpoint is missing model tensors: "
+                f"{incompatible.missing_keys}"
+            )
+        if incompatible.unexpected_keys:
+            raise RuntimeError(
+                "checkpoint contains unexpected model tensors: "
+                f"{incompatible.unexpected_keys}"
+            )
+        encoder.load_state_dict(checkpoint["encoder_state_dict"])
+        wake_config = WakeObjectiveConfig(**checkpoint.get("wake_config", {}))
+        inference = cls(
+            tree=tree,
+            hawkes=hawkes,
+            encoder=encoder,
+            wake_config=wake_config,
+            inference_config=inference_config,
+            device=device,
+        )
+        controller_state = checkpoint.get("controller_state", {})
+        module_state = controller_state.get("module_state_dict")
+        if module_state is not None:
+            incompatible_controller = inference.controller.load_state_dict(
+                module_state, strict=False
+            )
+            allowed_missing = {
+                "controller_version",
+                "context_gate.weight",
+                "bias_assimilate",
+                "utility_mean",
+                "utility_variance",
+                "utility_observations",
+                "utility_temperatures",
+                "calibration_thresholds",
+                "split_enabled",
+            }
+            if set(incompatible_controller.missing_keys).difference(
+                allowed_missing
+            ) or incompatible_controller.unexpected_keys:
+                raise RuntimeError(
+                    "checkpoint controller state is incompatible: "
+                    f"missing={incompatible_controller.missing_keys}, "
+                    f"unexpected={incompatible_controller.unexpected_keys}"
+                )
+            if controller_state.get("controller_version", 1) < 2:
+                inference.controller.migrate_legacy_policy()
+            if controller_state.get("controller_version", 1) < 5:
+                # v2-v4 checkpoints predate the conservative v5 Split policy.
+                inference.controller.split_enabled.fill_(True)
+        inference.controller.utility_stage_enabled = bool(
+            controller_state.get(
+                "utility_stage_enabled",
+                inference.controller.utility_stage_enabled,
+            )
+        )
+        inference.controller.split_queues.update(
+            controller_state.get("split_queues", {})
+        )
+        return inference
+
+    def _move_sequence(self, sequence: Mapping[str, Tensor]) -> Dict[str, Any]:
+        """Move one sequence to the inference device and prepare Hawkes caches.
+
+        CL evaluation prepares padded batches before entering the causal event
+        loop.  Keep that resident representation intact so a cached sequence
+        is not rebuilt for every helper call.
+        """
+        times = sequence.get("times")
+        types = sequence.get("types")
+        history = sequence.get(HAWKES_HISTORY_STATS_KEY)
+        interval = sequence.get(HAWKES_INTERVAL_STATS_KEY)
+        time_features = sequence.get(EVENT_TIME_FEATURES_KEY)
+        event_count = int(times.numel()) if torch.is_tensor(times) else -1
+        expected_hawkes_shape = (
+            event_count,
+            self.hawkes.num_types,
+            self.hawkes.num_basis,
+        )
+        resident_ready = (
+            event_count >= 0
+            and all(torch.is_tensor(value) for value in (
+                times,
+                types,
+                history,
+                interval,
+                time_features,
+            ))
+            and all(value.device == self.device for value in (
+                times,
+                types,
+                history,
+                interval,
+                time_features,
+            ))
+            and sequence.get(HAWKES_CACHE_SIGNATURE_KEY)
+            == self.hawkes.cache_signature
+            and times.ndim == 1
+            and types.shape == times.shape
+            and types.dtype == torch.long
+            and history.shape == expected_hawkes_shape
+            and interval.shape == expected_hawkes_shape
+            and time_features.shape == (event_count, 2)
+        )
+        if resident_ready:
+            return dict(sequence)
+
+        cached = self.hawkes.prepare_sequence_cache(sequence, inplace=True)
+        result = {
+            "times": cached["times"].to(self.device),
+            "types": cached["types"].to(self.device).long(),
+            EVENT_TIME_FEATURES_KEY: cached[EVENT_TIME_FEATURES_KEY].to(
+                self.device
+            ),
+            HAWKES_HISTORY_STATS_KEY: cached[HAWKES_HISTORY_STATS_KEY].to(
+                self.device
+            ),
+            HAWKES_INTERVAL_STATS_KEY: cached[HAWKES_INTERVAL_STATS_KEY].to(
+                self.device
+            ),
+            HAWKES_CACHE_SIGNATURE_KEY: cached[HAWKES_CACHE_SIGNATURE_KEY],
+        }
+        if "source_index" in sequence:
+            result["source_index"] = sequence["source_index"]
+        if "T" in sequence:
+            result["T"] = sequence["T"].to(self.device)
+        return result
+
+    @torch.no_grad()
+    def prepare_sequence_batch(
+        self,
+        cpu_sequences: Sequence[Mapping[str, Tensor]],
+        *,
+        frontier_static_cache: Any = None,
+    ) -> tuple[list[Dict[str, Any]], Any]:
+        """Prepare a padded CL evaluation batch without changing recurrence.
+
+        The returned records contain one cached sequence plus its strict-prefix
+        encoder states, projected routing queries, and memory queries.  These
+        stateless quantities are computed in one padded pass for a batch of
+        variable-length sequences.  The causal tree/Working Memory transition
+        remains sequence-local in :meth:`run_sequence`.
+        """
+        if not cpu_sequences:
+            raise ValueError("sequence batches cannot be empty")
+        cached = [self._move_sequence(sequence) for sequence in cpu_sequences]
+        lengths = [int(sequence["times"].numel()) for sequence in cached]
+        if any(length <= 0 for length in lengths):
+            raise ValueError("sequence batches cannot contain empty sequences")
+
+        prefix_states: list[Tensor | None]
+        if isinstance(self.encoder, CausalPrefixEncoder):
+            times = nn.utils.rnn.pad_sequence(
+                [sequence["times"] for sequence in cached],
+                batch_first=True,
+            )
+            types = nn.utils.rnn.pad_sequence(
+                [sequence["types"] for sequence in cached],
+                batch_first=True,
+            )
+            time_features = nn.utils.rnn.pad_sequence(
+                [sequence[EVENT_TIME_FEATURES_KEY] for sequence in cached],
+                batch_first=True,
+            )
+            length_tensor = torch.as_tensor(
+                lengths,
+                device=self.device,
+                dtype=torch.long,
+            )
+            valid = (
+                torch.arange(times.size(1), device=self.device)[None, :]
+                < length_tensor[:, None]
+            )
+            padded_states, _ = self.encoder.forward_padded_prefix(
+                times,
+                types,
+                valid,
+                time_features=time_features,
+            )
+            prefix_states = [
+                padded_states[index, :length].detach()
+                for index, length in enumerate(lengths)
+            ]
+        else:
+            # Custom encoders do not necessarily expose a padded API.  Keep
+            # their existing event-wise semantics while still sharing the
+            # static tree cache below.
+            prefix_states = [None] * len(cached)
+
+        if frontier_static_cache is None:
+            frontier_static_cache = (
+                self.tree.frontier_routing.build_static_cache(detach=True)
+            )
+
+        records: list[Dict[str, Any]] = []
+        for sequence, states in zip(cached, prefix_states):
+            projected_z = None
+            memory_query = None
+            if states is not None:
+                projected_z = self.tree.router_compat.project_z(states).detach()
+                memory_query = (
+                    self.tree.episodic_memory.query_net(states).detach()
+                )
+            records.append({
+                "sequence": sequence,
+                "z": states,
+                "projected_z": projected_z,
+                "memory_query": memory_query,
+            })
+        return records, frontier_static_cache
+
+    def _action(
+        self,
+        memory_output: Mapping[str, Any],
+        nll: Tensor,
+        frontier_energy: Tensor,
+    ) -> tuple[Action, str, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        mask = memory_output["frontier_mask"][0]
+        prior = memory_output["frontier_mass"][0]
+        temperature = (
+            self.tree.frontier_routing.config.posterior_temperature
+        )
+        posterior = torch.softmax(
+            (
+                prior.clamp_min(1e-12).log()
+                - frontier_energy / temperature
+            ).masked_fill(~mask, -torch.inf),
+            dim=-1,
+        ).masked_fill(~mask, 0.0)
+        frontier_node_ids = memory_output.get("frontier_node_ids")
+        if frontier_node_ids and frontier_node_ids[0]:
+            frontier_ids = frontier_node_ids[0]
+        else:
+            # Compact inference deliberately skips the compatibility
+            # ``FrontierSample`` objects.  The action policy still needs the
+            # active node names for owner selection, so recover only those
+            # names from the packed indices without materializing the other
+            # per-event diagnostics.
+            node_indices = memory_output["frontier_node_indices"][0]
+            node_mask = memory_output["frontier_mask"][0]
+            all_node_ids = memory_output["all_node_ids"]
+            frontier_ids = tuple(
+                all_node_ids[int(index)]
+                for index in node_indices[node_mask].detach().cpu().tolist()
+            )
+        owner_id = self._posterior_owner(frontier_ids, posterior)
+        query = memory_output["memory_query"][0].detach()
+        novelty, count, retrieval_similarity = (
+            self.controller.leaf_novelty_count(
+            query, owner_id
+            )
+        )
+        controller_output = self.controller.action_distribution(
+            surprise=nll.detach(),
+            novelty=novelty,
+            count=count,
+            update_statistics=False,
+            owner_confidence=posterior.max(),
+            retrieval_similarity=retrieval_similarity,
+            retrieval_residual_norm=memory_output[
+                "frontier_episodic_delta"
+            ][0].norm(dim=-1).mean(),
+        )
+        probabilities = controller_output["probabilities"]
+        raw_probabilities = controller_output.get("raw_probabilities", probabilities)
+        action = tuple(Action)[
+            int(probabilities.detach().argmax().item())
+        ]
+        return (
+            action,
+            owner_id,
+            query,
+            probabilities,
+            raw_probabilities,
+            posterior,
+            novelty.detach(),
+            retrieval_similarity.detach(),
+        )
+
+    def _lowest_common_ancestor(self, node_ids: Sequence[str]) -> str:
+        paths = [self.tree.path_to_node(node_id) for node_id in node_ids]
+        common = "root"
+        for values in zip(*paths):
+            if len(set(values)) != 1:
+                break
+            common = values[0]
+        return common
+
+    def _posterior_owner(
+        self,
+        frontier_ids: Sequence[str],
+        posterior: Tensor,
+    ) -> str:
+        config = self.tree.frontier_routing.config
+        order = posterior[: len(frontier_ids)].argsort(descending=True)
+        cumulative = posterior.index_select(0, order).cumsum(dim=0)
+        count = min(
+            int((cumulative < config.credible_mass).sum().item()) + 1,
+            len(frontier_ids),
+        )
+        top = int(order[0].item())
+        if (
+            count == 1
+            and float(posterior[top]) >= config.owner_confidence_threshold
+        ):
+            return frontier_ids[top]
+        return self._lowest_common_ancestor([
+            frontier_ids[index]
+            for index in order[:count].cpu().tolist()
+        ])
+
+    def _frontier_event_energy(
+        self,
+        sequence: Mapping[str, Tensor],
+        memory_output: Mapping[str, Any],
+        event_index: int,
+    ) -> Tensor:
+        theta = memory_output["frontier_theta"][0]
+        D = self.hawkes.num_types
+        energies = []
+        for row in theta:
+            params = HawkesParams(
+                row[:D],
+                row[D:].reshape(D, D, self.hawkes.num_basis),
+            )
+            energies.append(
+                self.hawkes.event_NLL(sequence, params, event_index)
+            )
+        result = torch.stack(energies)
+        return result.masked_fill(
+            ~memory_output["frontier_mask"][0], torch.inf
+        )
+
+    def _batched_event_nll(
+        self,
+        event_types: Tensor,
+        history_stats: Tensor,
+        interval_stats: Tensor,
+        durations: Tensor,
+        effective: Any,
+    ) -> tuple[Tensor, Tensor]:
+        """Evaluate cached Hawkes event terms for a wavefront batch."""
+        if event_types.ndim != 1:
+            raise ValueError("event_types must have shape [B]")
+        if (
+            history_stats.ndim != 3
+            or interval_stats.shape != history_stats.shape
+            or history_stats.size(0) != event_types.numel()
+            or durations.shape != event_types.shape
+        ):
+            raise ValueError("batched Hawkes statistics are misaligned")
+        intensity = (
+            effective.mu
+            + torch.einsum(
+                "bdem,bem->bd",
+                effective.W,
+                history_stats,
+            )
+        ).clamp_min(1e-8)
+        target_intensity = intensity.gather(
+            1,
+            event_types.long().reshape(-1, 1),
+        ).squeeze(1)
+        integral = (
+            effective.mu.sum(dim=-1) * durations
+            + torch.einsum(
+                "bdem,bem->b",
+                effective.W,
+                interval_stats,
+            )
+        )
+        return -target_intensity.log() + integral, intensity
+
+    def _batched_frontier_event_energy(
+        self,
+        event_types: Tensor,
+        history_stats: Tensor,
+        interval_stats: Tensor,
+        durations: Tensor,
+        memory_output: Mapping[str, Any],
+    ) -> Tensor:
+        """Evaluate every frontier expert for one padded time position."""
+        raw_theta = memory_output["frontier_theta"]
+        mask = memory_output["frontier_mask"]
+        if (
+            raw_theta.ndim != 3
+            or mask.shape != raw_theta.shape[:2]
+            or raw_theta.size(0) != event_types.numel()
+        ):
+            raise ValueError("frontier tensors must align with the wavefront")
+        D = self.hawkes.num_types
+        M = self.hawkes.num_basis
+        raw_mu = raw_theta[..., :D]
+        raw_W = raw_theta[..., D:].reshape(
+            raw_theta.size(0), raw_theta.size(1), D, D, M
+        )
+        mu = F.softplus(raw_mu)
+        W = F.softplus(raw_W)
+        intensity = (
+            mu
+            + torch.einsum(
+                "bkdem,bem->bkd",
+                W,
+                history_stats,
+            )
+        ).clamp_min(1e-8)
+        selected = intensity.gather(
+            2,
+            event_types.long().reshape(-1, 1, 1).expand(
+                -1, raw_theta.size(1), 1
+            ),
+        ).squeeze(2)
+        integral = (
+            mu.sum(dim=-1) * durations[:, None]
+            + torch.einsum(
+                "bkdem,bem->bk",
+                W,
+                interval_stats,
+            )
+        )
+        return (-selected.log() + integral).masked_fill(~mask, torch.inf)
+
+    def _batched_forecast_intensity(
+        self,
+        times: Tensor,
+        types: Tensor,
+        event_index: int,
+        effective: Any,
+    ) -> Tensor:
+        """Return the causal local-rate forecast for a padded wavefront."""
+        batch_size = times.size(0)
+        D = self.hawkes.num_types
+        M = self.hawkes.num_basis
+        if event_index == 0:
+            source_stats = effective.mu.new_zeros(batch_size, D, M)
+            origin = times.new_zeros(batch_size)
+        else:
+            origin = times[:, event_index - 1]
+            history_times = times[:, :event_index]
+            history_types = types[:, :event_index].long()
+            valid = history_times < origin[:, None] + times.new_tensor(1e-6)
+            delta = (
+                origin[:, None, None]
+                - history_times[:, :, None]
+            ).clamp_min(0.0)
+            decays = self.hawkes.decays.to(
+                device=times.device,
+                dtype=times.dtype,
+            )
+            kernels = torch.exp(
+                -delta * decays.reshape(1, 1, -1)
+            ) * valid[:, :, None].to(times.dtype)
+            one_hot = F.one_hot(
+                history_types,
+                num_classes=D,
+            ).to(times.dtype)
+            source_stats = torch.einsum(
+                "bjm,bjc->bcm",
+                kernels,
+                one_hot,
+            )
+        return (
+            effective.mu
+            + torch.einsum(
+                "bdem,bem->bd",
+                effective.W,
+                source_stats.to(effective.W),
+            )
+        ).clamp_min(1e-8)
+
+    def _owner_indices_from_frontier(
+        self,
+        memory_output: Mapping[str, Any],
+        posterior: Tensor,
+    ) -> tuple[Tensor, list[tuple[str, ...]]]:
+        """Resolve packed posterior rows to owner node indices."""
+        node_ids = tuple(self.tree.all_node_ids)
+        node_to_index = {
+            node_id: index for index, node_id in enumerate(node_ids)
+        }
+        frontier_indices = memory_output["frontier_node_indices"]
+        frontier_mask = memory_output["frontier_mask"]
+        owners: list[int] = []
+        frontier_id_rows: list[tuple[str, ...]] = []
+        for row in range(posterior.size(0)):
+            indices = frontier_indices[row, frontier_mask[row]]
+            frontier_ids = tuple(
+                node_ids[int(index)]
+                for index in indices.detach().cpu().tolist()
+            )
+            if not frontier_ids:
+                raise RuntimeError("packed frontier contains no active node")
+            frontier_id_rows.append(frontier_ids)
+            owner_id = self._posterior_owner(
+                frontier_ids,
+                posterior[row],
+            )
+            owners.append(node_to_index[owner_id])
+        owner_indices = torch.as_tensor(
+            owners,
+            device=posterior.device,
+            dtype=torch.long,
+        )
+        return owner_indices, frontier_id_rows
+
+    @staticmethod
+    def _packed_retrieval_diagnostics(
+        memory_output: Mapping[str, Any],
+    ) -> dict[str, Tensor]:
+        """Summarize packed retrieval without materializing Python diagnostics.
+
+        The compact evaluator still needs a causal ``retrieval_hit`` signal
+        for FAST_ADAPT/ONLINE_WRITE curves.  ``materialize_diagnostics=False``
+        intentionally leaves ``memory_info`` empty, but the packed alpha,
+        similarity, and validity tensors are already part of the hot path.
+        Reduce those tensors here so compact evaluation retains the same
+        retrieval semantics as the ordinary event-row path.
+        """
+        frontier_mass = memory_output["frontier_mass"]
+        batch_size = frontier_mass.size(0)
+        device = frontier_mass.device
+        dtype = frontier_mass.dtype
+        packed = memory_output.get("packed_memory_info") or {}
+        alpha = packed.get("alpha")
+        visited_mask = memory_output.get("visited_node_mask")
+        if alpha is None or visited_mask is None:
+            return {
+                "retrieval_alpha_mass": torch.zeros(
+                    batch_size, device=device, dtype=dtype
+                ),
+                "retrieval_similarity": torch.full(
+                    (batch_size,), -1.0, device=device, dtype=dtype
+                ),
+                "retrieval_effective_k": torch.zeros(
+                    batch_size, device=device, dtype=torch.long
+                ),
+                "retrieval_null_alpha": torch.ones(
+                    batch_size, device=device, dtype=dtype
+                ),
+                "visited_bank_count": torch.zeros(
+                    batch_size, device=device, dtype=torch.long
+                ),
+                "visited_nonempty_bank_count": torch.zeros(
+                    batch_size, device=device, dtype=torch.long
+                ),
+            }
+
+        visited_mask = visited_mask.to(device=device, dtype=torch.bool)
+        active = visited_mask.unsqueeze(-1)
+        alpha = alpha.to(device=device)
+        active_alpha = alpha.masked_fill(~active, 0.0)
+        alpha_mass = active_alpha.sum(dim=(-2, -1))
+
+        similarity = packed.get("similarity")
+        if similarity is None:
+            retrieval_similarity = torch.full(
+                (batch_size,), -1.0, device=device, dtype=dtype
+            )
+        else:
+            similarity = similarity.to(device=device, dtype=alpha.dtype)
+            retrieval_similarity = (
+                (active_alpha * similarity).sum(dim=(-2, -1))
+                / alpha_mass.clamp_min(1e-12)
+            )
+            retrieval_similarity = torch.where(
+                alpha_mass > 1e-6,
+                retrieval_similarity,
+                retrieval_similarity.new_full((), -1.0),
+            )
+
+        effective_k = packed.get("effective_k")
+        if effective_k is None:
+            retrieval_effective_k = torch.zeros(
+                batch_size, device=device, dtype=torch.long
+            )
+        else:
+            retrieval_effective_k = (
+                effective_k.to(device=device, dtype=torch.long)
+                .masked_fill(~visited_mask, 0)
+                .sum(dim=-1)
+            )
+
+        null_alpha = packed.get("null_alpha")
+        if null_alpha is None:
+            retrieval_null_alpha = torch.ones(
+                batch_size, device=device, dtype=dtype
+            )
+        else:
+            null_alpha = null_alpha.to(device=device, dtype=alpha.dtype)
+            visited_count = visited_mask.sum(dim=-1)
+            retrieval_null_alpha = (
+                null_alpha.masked_fill(~visited_mask, 0.0).sum(dim=-1)
+                / visited_count.clamp_min(1).to(null_alpha.dtype)
+            )
+            retrieval_null_alpha = torch.where(
+                visited_count > 0,
+                retrieval_null_alpha,
+                retrieval_null_alpha.new_ones(()),
+            )
+
+        valid_mask = packed.get("valid_mask")
+        if valid_mask is None:
+            nonempty = visited_mask
+        else:
+            nonempty = valid_mask.to(device=device, dtype=torch.bool).any(
+                dim=-1
+            ) & visited_mask
+
+        return {
+            "retrieval_alpha_mass": alpha_mass,
+            "retrieval_similarity": retrieval_similarity,
+            "retrieval_effective_k": retrieval_effective_k,
+            "retrieval_null_alpha": retrieval_null_alpha,
+            "visited_bank_count": visited_mask.sum(dim=-1),
+            "visited_nonempty_bank_count": nonempty.sum(dim=-1),
+        }
+
+    def run_sequence_batch_compact(
+        self,
+        prepared_sequences: Sequence[Mapping[str, Any]],
+        *,
+        frontier_static_cache: Any = None,
+        capture_event_predictions: bool = False,
+        capture_prediction_theta: bool = False,
+    ) -> list[Dict[str, Any]]:
+        """Run read-only-persistent inference as a causal GPU wavefront.
+
+        ``prepared_sequences`` must come from :meth:`prepare_sequence_batch`.
+        Prefix encoding, routing, retrieval, Hawkes likelihood terms, and the
+        row-wise Working Memory recurrence are batched over all sequences that
+        are still active at each time position.  The caller's protocol controls
+        whether the transient Working Memory recurrence is enabled; episodic
+        memory usage and writes are always disabled on this path.  No persistent
+        memory state is changed, so rows remain independent despite sharing the
+        wavefront.
+        """
+        if not prepared_sequences:
+            raise ValueError("sequence batches cannot be empty")
+        if any(record.get("z") is None for record in prepared_sequences):
+            raise ValueError(
+                "batched compact inference requires padded CausalPrefixEncoder states"
+            )
+        if self.config.allow_memory_writes or self.config.update_memory_usage:
+            raise ValueError(
+                "batched compact inference requires frozen read-only memory"
+            )
+
+        sequences = [record["sequence"] for record in prepared_sequences]
+        lengths = [int(sequence["times"].numel()) for sequence in sequences]
+        if any(length <= 0 for length in lengths):
+            raise ValueError("sequence batches cannot contain empty sequences")
+        batch_size = len(sequences)
+        max_length = max(lengths)
+        device = self.device
+        times = nn.utils.rnn.pad_sequence(
+            [sequence["times"] for sequence in sequences],
+            batch_first=True,
+        ).to(device)
+        types = nn.utils.rnn.pad_sequence(
+            [sequence["types"] for sequence in sequences],
+            batch_first=True,
+        ).to(device).long()
+        history_stats = nn.utils.rnn.pad_sequence(
+            [sequence[HAWKES_HISTORY_STATS_KEY] for sequence in sequences],
+            batch_first=True,
+        ).to(device)
+        interval_stats = nn.utils.rnn.pad_sequence(
+            [sequence[HAWKES_INTERVAL_STATS_KEY] for sequence in sequences],
+            batch_first=True,
+        ).to(device)
+        z = nn.utils.rnn.pad_sequence(
+            [record["z"] for record in prepared_sequences],
+            batch_first=True,
+        ).to(device)
+        projected_z = nn.utils.rnn.pad_sequence(
+            [record["projected_z"] for record in prepared_sequences],
+            batch_first=True,
+        ).to(device)
+        memory_query = nn.utils.rnn.pad_sequence(
+            [record["memory_query"] for record in prepared_sequences],
+            batch_first=True,
+        ).to(device)
+        length_tensor = torch.as_tensor(
+            lengths,
+            device=device,
+            dtype=torch.long,
+        )
+        working_state = self.tree.working_memory.new_batch_state(batch_size)
+        nll_sum = torch.zeros(batch_size, device=device, dtype=torch.float64)
+        correct = torch.zeros(batch_size, device=device, dtype=torch.long)
+        time_abs_sum = torch.zeros(
+            batch_size,
+            device=device,
+            dtype=torch.float64,
+        )
+        events_by_sequence: list[list[Dict[str, Any]]] = [
+            [] for _ in range(batch_size)
+        ]
+        self.tree.reset_working_memory()
+
+        for event_index in range(max_length):
+            active = torch.nonzero(
+                length_tensor > event_index,
+                as_tuple=False,
+            ).flatten()
+            if active.numel() == 0:
+                continue
+            active_times = times.index_select(0, active)
+            active_types = types.index_select(0, active)[:, event_index]
+            active_history = history_stats.index_select(0, active)[:, event_index]
+            active_interval = interval_stats.index_select(0, active)[:, event_index]
+            if event_index == 0:
+                previous = active_times.new_zeros(active_times.size(0))
+            else:
+                previous = active_times[:, event_index - 1]
+            durations = (active_times[:, event_index] - previous).clamp_min(0.0)
+            working_delta = (
+                working_state.index_select(0, active)
+                .detach()
+                .clone()
+                .requires_grad_(self.config.adapt_working_memory)
+            )
+
+            with torch.set_grad_enabled(self.config.adapt_working_memory):
+                memory_output = self.tree(
+                    z_t=z.index_select(0, active)[:, event_index],
+                    working_delta=working_delta,
+                    decays=self.hawkes.decays,
+                    frontier_static_cache=frontier_static_cache,
+                    frontier_projected_z=(
+                        projected_z.index_select(0, active)[:, event_index]
+                    ),
+                    frontier_query=(
+                        memory_query.index_select(0, active)[:, event_index]
+                    ),
+                    update_memory_state=False,
+                    materialize_diagnostics=False,
+                )
+                pre_action_params = self._controller_effective_parameters(
+                    memory_output,
+                    working_delta,
+                    working_delta.new_zeros(working_delta.size(0)),
+                )
+                pre_action_nll, _ = self._batched_event_nll(
+                    active_types,
+                    active_history,
+                    active_interval,
+                    durations,
+                    pre_action_params,
+                )
+            retrieval_diagnostics = self._packed_retrieval_diagnostics(
+                memory_output
+            )
+
+            with torch.no_grad():
+                frontier_energy = self._batched_frontier_event_energy(
+                    active_types,
+                    active_history,
+                    active_interval,
+                    durations,
+                    memory_output,
+                )
+                frontier_mask = memory_output["frontier_mask"]
+                prior = memory_output["frontier_mass"]
+                posterior = torch.softmax(
+                    (
+                        prior.clamp_min(1e-12).log()
+                        - frontier_energy
+                        / self.tree.frontier_routing.config.posterior_temperature
+                    ).masked_fill(~frontier_mask, -torch.inf),
+                    dim=-1,
+                ).masked_fill(~frontier_mask, 0.0)
+                owner_indices, frontier_id_rows = (
+                    self._owner_indices_from_frontier(
+                        memory_output,
+                        posterior,
+                    )
+                )
+                novelty, soft_count, retrieval_similarity = (
+                    self.tree.episodic_memory.novelty_count_packed(
+                        query=memory_output["memory_query"],
+                        node_indices=owner_indices,
+                        node_ids=tuple(self.tree.all_node_ids),
+                        temperature=self.controller.novelty_temperature,
+                        count_exponent=self.controller.count_exponent,
+                        eps=self.controller.controller_eps,
+                        count_similarity_low=(
+                            self.controller.count_similarity_low
+                        ),
+                        count_similarity_high=(
+                            self.controller.count_similarity_high
+                        ),
+                        count_topk=self.controller.count_topk,
+                        count_saturation=self.controller.count_saturation,
+                    )
+                )
+                controller_output = self.controller.action_distribution_batch(
+                    pre_action_nll.detach(),
+                    novelty.detach(),
+                    soft_count.detach(),
+                    update_statistics=False,
+                    owner_confidence=posterior.max(dim=-1).values,
+                    retrieval_similarity=retrieval_similarity.detach(),
+                    retrieval_residual_norm=(
+                        memory_output["frontier_episodic_delta"]
+                        .norm(dim=-1)
+                        .mean(dim=-1)
+                    ),
+                )
+                action_probabilities = controller_output["probabilities"]
+
+            with torch.set_grad_enabled(self.config.adapt_working_memory):
+                params = self._controller_effective_parameters(
+                    memory_output,
+                    working_delta,
+                    action_probabilities[:, 1],
+                )
+                nll, observed_intensity = self._batched_event_nll(
+                    active_types,
+                    active_history,
+                    active_interval,
+                    durations,
+                    params,
+                )
+                if self.config.adapt_working_memory:
+                    working_grad = torch.autograd.grad(
+                        nll.sum(),
+                        working_delta,
+                        retain_graph=False,
+                        create_graph=False,
+                    )[0]
+                else:
+                    working_grad = torch.zeros_like(working_delta)
+
+            with torch.no_grad():
+                forecast_intensity = self._batched_forecast_intensity(
+                    active_times,
+                    types.index_select(0, active),
+                    event_index,
+                    params,
+                )
+                forecast_rate = forecast_intensity.sum(dim=-1).clamp_min(1e-8)
+                forecast_type_probabilities = (
+                    forecast_intensity
+                    / forecast_rate[:, None]
+                )
+                predicted_delta = forecast_rate.reciprocal()
+                predicted_time = (
+                    (
+                        active_times[:, event_index - 1]
+                        if event_index > 0
+                        else active_times.new_zeros(active_times.size(0))
+                    )
+                    + predicted_delta
+                )
+                type_probabilities = (
+                    observed_intensity
+                    / observed_intensity.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                )
+                predicted_type = observed_intensity.argmax(dim=-1)
+                self.tree.working_memory.update_batch_rows(
+                    working_state,
+                    active,
+                    working_grad,
+                    adaptation_probability=action_probabilities[:, 0],
+                )
+                nll_sum.index_add_(
+                    0,
+                    active,
+                    nll.detach().to(torch.float64),
+                )
+                correct.index_add_(
+                    0,
+                    active,
+                    (predicted_type == active_types).to(torch.long),
+                )
+                time_abs_sum.index_add_(
+                    0,
+                    active,
+                    (predicted_time - active_times[:, event_index])
+                    .abs()
+                    .to(torch.float64),
+                )
+                if capture_event_predictions or capture_prediction_theta:
+                    active_rows = active.detach().cpu().tolist()
+                    for local_index, sequence_index in enumerate(active_rows):
+                        event: Dict[str, Any] = {
+                            "event_index": int(event_index),
+                            "retrieval_alpha_mass": float(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][local_index].detach().cpu()
+                            ),
+                            "retrieval_alpha_per_visited_node": float(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][local_index].detach().cpu()
+                            ) / max(
+                                int(
+                                    retrieval_diagnostics[
+                                        "visited_bank_count"
+                                    ][local_index].detach().cpu()
+                                ),
+                                1,
+                            ),
+                            "retrieval_similarity": float(
+                                retrieval_diagnostics[
+                                    "retrieval_similarity"
+                                ][local_index].detach().cpu()
+                            ),
+                            "retrieval_effective_k": int(
+                                retrieval_diagnostics[
+                                    "retrieval_effective_k"
+                                ][local_index].detach().cpu()
+                            ),
+                            "retrieval_null_alpha": float(
+                                retrieval_diagnostics[
+                                    "retrieval_null_alpha"
+                                ][local_index].detach().cpu()
+                            ),
+                            "visited_bank_count": int(
+                                retrieval_diagnostics["visited_bank_count"][
+                                    local_index
+                                ].detach().cpu()
+                            ),
+                            "visited_nonempty_bank_count": int(
+                                retrieval_diagnostics[
+                                    "visited_nonempty_bank_count"
+                                ][local_index].detach().cpu()
+                            ),
+                            "retrieval_hit": bool(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][local_index].detach().cpu()
+                                > 1e-6
+                            ),
+                            "working_norm": float(
+                                working_state[sequence_index]
+                                .detach()
+                                .norm()
+                                .cpu()
+                            ),
+                            "raw_episodic_residual_norm": float(
+                                memory_output[
+                                    "frontier_episodic_delta"
+                                ][local_index]
+                                .detach()
+                                .norm(dim=-1)
+                                .mean()
+                                .cpu()
+                            ),
+                            "episodic_residual_norm": float(
+                                memory_output["episodic_delta"][local_index]
+                                .detach()
+                                .norm(dim=-1)
+                                .mean()
+                                .cpu()
+                            ),
+                            "retrieve_gate": float(
+                                action_probabilities[local_index, 1]
+                                .detach()
+                                .cpu()
+                            ),
+                            "write_count": 0,
+                            "nll": (
+                                float(nll[local_index].detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                            "predicted_type": (
+                                int(predicted_type[local_index].detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                            "true_type": (
+                                int(active_types[local_index].detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                            "predicted_delta": (
+                                float(predicted_delta[local_index].detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                            "predicted_time": (
+                                float(predicted_time[local_index].detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                            "true_time": (
+                                float(
+                                    active_times[
+                                        local_index, event_index
+                                    ].detach().cpu()
+                                )
+                                if capture_event_predictions else None
+                            ),
+                        }
+                        if capture_event_predictions:
+                            event.update({
+                                "type_probabilities_at_event_time": (
+                                    type_probabilities[local_index]
+                                    .detach()
+                                    .cpu()
+                                ),
+                                "forecast_type_probabilities": (
+                                    forecast_type_probabilities[local_index]
+                                    .detach()
+                                    .cpu()
+                                ),
+                            })
+                        if capture_prediction_theta:
+                            event["prediction_theta"] = (
+                                pre_action_params.theta[local_index]
+                                .detach()
+                                .clone()
+                            )
+                        events_by_sequence[sequence_index].append(event)
+
+        results: list[Dict[str, Any]] = []
+        for sequence_index, length in enumerate(lengths):
+            event_count = int(length)
+            results.append({
+                "events": events_by_sequence[sequence_index],
+                "total_nll": float(nll_sum[sequence_index].detach().cpu()),
+                "nll_per_event": (
+                    float(nll_sum[sequence_index].detach().cpu())
+                    / max(event_count, 1)
+                ),
+                "scalar_metrics": {
+                    "events": event_count,
+                    "nll_sum": float(nll_sum[sequence_index].detach().cpu()),
+                    "correct": int(correct[sequence_index].detach().cpu()),
+                    "time_abs_sum": float(
+                        time_abs_sum[sequence_index].detach().cpu()
+                    ),
+                },
+                "leaf_ids": list(self.tree.leaf_ids),
+            })
+        return results
+
+    def _delayed_write_evidence(
+        self,
+        sequence: Mapping[str, Tensor],
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if int(self.controller.controller_version.detach().cpu()) >= 6:
+            return self._delayed_write_evidence_v6(sequence, request)
+        D = self.hawkes.num_types
+        start = int(request["event_index"])
+        end = min(
+            int(sequence["times"].numel()),
+            start + self.wake_config.write_horizon + 1,
+        )
+        energy = []
+        for theta in request["frontier_theta"]:
+            params = HawkesParams(
+                theta[:D],
+                theta[D:].reshape(D, D, self.hawkes.num_basis),
+            )
+            value = theta.new_zeros(())
+            for event_index in range(start, end):
+                value += self.hawkes.event_NLL(
+                    sequence, params, event_index
+                )
+            energy.append(value / max(end - start, 1))
+        energy_tensor = torch.stack(energy)
+        prior = request["frontier_mass"].clamp_min(1e-12)
+        temperature = (
+            self.tree.frontier_routing.config.posterior_temperature
+        )
+        posterior = torch.softmax(
+            prior.log() - energy_tensor / temperature,
+            dim=-1,
+        )
+        owner_id = self._posterior_owner(
+            request["frontier_node_ids"], posterior
+        )
+        mixture_energy = -torch.logsumexp(
+            prior.log() - energy_tensor / temperature,
+            dim=0,
+        )
+        theta_owner = self.tree.semantic_theta(owner_id).detach()
+        owner_params = HawkesParams(
+            theta_owner[:D].clone(),
+            theta_owner[D:].reshape(D, D, self.hawkes.num_basis).clone(),
+        )
+        candidate_item = self.controller.write_residual_memory(
+            q_t=request["query"],
+            theta_sem_leaf=owner_params,
+            times=sequence["times"],
+            types=sequence["types"],
+            k=start,
+            node_id=owner_id,
+            cached_sequence=sequence,
+            write_quality=request["write_gate"],
+            queue_weight=request["queue_weight"],
+        )
+        delta = candidate_item.delta_theta
+        if int(self.controller.controller_version.detach().cpu()) < 5:
+            before = energy_tensor.new_zeros(())
+            after = energy_tensor.new_zeros(())
+            candidate_theta = theta_owner + delta
+            candidate_params = HawkesParams(
+                candidate_theta[:D],
+                candidate_theta[D:].reshape(D, D, self.hawkes.num_basis),
+            )
+            for future_index in range(start, end):
+                before += self.hawkes.event_NLL(sequence, owner_params, future_index)
+                after += self.hawkes.event_NLL(sequence, candidate_params, future_index)
+            raw_write_gain = before - after
+            write_utility = raw_write_gain / max(end - start, 1) - self.wake_config.lambda_write
+            write_gain = raw_write_gain.clamp_min(0.0)
+            bounded_gain = -torch.expm1(
+                -write_gain / self.wake_config.controller_gain_reference
+            )
+            return {
+                "owner_id": owner_id,
+                "posterior": posterior,
+                "write_gain": write_gain,
+                "write_utility": write_utility,
+                "owner_on_score_path": True,
+                "virtual_candidate_alpha": 0.0,
+                "bounded_gain": bounded_gain,
+                "candidate_item": candidate_item,
+                "priority": (
+                    request["write_gate"] * posterior.max()
+                    * write_utility.clamp_min(0.0)
+                    * request["novelty"].clamp(0.0, 1.0)
+                ),
+            }
+        score_start = start + self.wake_config.write_horizon + 1
+        score_end = start + 2 * self.wake_config.write_horizon + 1
+        contexts = request.get("future_contexts") or []
+        if score_end > len(contexts):
+            raise RuntimeError("Write probe score window is incomplete")
+        before = energy_tensor.new_zeros(())
+        after = energy_tensor.new_zeros(())
+        virtual_usage = 1.0
+        virtual_alpha = []
+        owner_on_path = False
+        for age, context in enumerate(contexts[score_start:score_end]):
+            query = context["query"]
+            base_delta, _ = self.tree.episodic_memory.read_nodes(
+                query, [owner_id], update_state=False
+            )
+            virtual_delta, virtual_info = self.tree.episodic_memory.read_node_with_virtual_item(
+                query, owner_id, key=candidate_item.key, delta=delta,
+                write_quality=request["write_gate"], virtual_usage=virtual_usage,
+                virtual_age=float(age),
+            )
+            candidate_alpha = float(virtual_info["alpha"][-1].detach().cpu())
+            virtual_alpha.append(candidate_alpha)
+            virtual_usage += candidate_alpha
+            episodic = context["frontier_episodic_delta"].clone()
+            difference = virtual_delta - base_delta[owner_id]
+            for slot, frontier_id in enumerate(context["frontier_node_ids"]):
+                if owner_id in self.tree.path_to_node(frontier_id):
+                    episodic[slot] = episodic[slot] + difference
+                    owner_on_path = True
+            virtual_output = {
+                "frontier_semantic_theta": context["frontier_semantic_theta"].unsqueeze(0),
+                "frontier_episodic_delta": episodic.unsqueeze(0),
+                "r": context["posterior"].unsqueeze(0),
+            }
+            with_params = self._controller_effective_parameters(
+                virtual_output, context["working_delta"], context["retrieve_gate"]
+            ).select(0)
+            theta = context["no_write_theta"]
+            without_params = HawkesParams(
+                theta[:D], theta[D:].reshape(D, D, self.hawkes.num_basis)
+            )
+            event_index = int(context["event_index"])
+            before += self.hawkes.event_NLL(sequence, without_params, event_index)
+            after += self.hawkes.event_NLL(sequence, with_params, event_index)
+        raw_write_gain = before - after
+        if not owner_on_path:
+            raw_write_gain = raw_write_gain * 0.0
+        write_utility = (
+            raw_write_gain / self.wake_config.write_horizon
+            - self.wake_config.lambda_write
+        )
+        write_gain = raw_write_gain.clamp_min(0.0)
+        bounded_gain = -torch.expm1(
+            -write_gain / self.wake_config.controller_gain_reference
+        )
+        priority = (
+            request["write_gate"]
+            * posterior.max()
+            * write_utility.clamp_min(0.0)
+            * request["novelty"].clamp(0.0, 1.0)
+        )
+        return {
+            "owner_id": owner_id,
+            "posterior": posterior,
+            "write_gain": write_gain,
+            "write_utility": write_utility,
+            "owner_on_score_path": owner_on_path,
+            "virtual_candidate_alpha": sum(virtual_alpha) / max(len(virtual_alpha), 1),
+            "bounded_gain": bounded_gain,
+            "candidate_item": candidate_item,
+            "priority": priority,
+        }
+
+    def _causal_write_evidence_v6(
+        self,
+        sequence: Mapping[str, Tensor],
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Build a candidate from exactly F=[t,t+h), without future labels."""
+        D = self.hawkes.num_types
+        h = self.wake_config.write_horizon
+        start = int(request["event_index"])
+        build_end = start + h
+        if build_end > int(sequence["times"].numel()):
+            raise RuntimeError("v6 construction window is incomplete")
+        energy = []
+        for theta in request["frontier_theta"]:
+            params = HawkesParams(
+                theta[:D], theta[D:].reshape(D, D, self.hawkes.num_basis)
+            )
+            value = theta.new_zeros(())
+            for event_index in range(start, build_end):
+                value = value + self.hawkes.event_NLL(sequence, params, event_index)
+            energy.append(value / h)
+        energy_tensor = torch.stack(energy)
+        prior = request["frontier_mass"].clamp_min(1e-12)
+        posterior = torch.softmax(
+            prior.log() - energy_tensor / self.tree.frontier_routing.config.posterior_temperature,
+            dim=-1,
+        )
+        owner_id = self._posterior_owner(request["frontier_node_ids"], posterior)
+        theta_owner = self.tree.semantic_theta(owner_id).detach()
+        owner_params = HawkesParams(
+            theta_owner[:D].clone(),
+            theta_owner[D:].reshape(D, D, self.hawkes.num_basis).clone(),
+        )
+        candidate_item = self.controller.write_residual_memory(
+            q_t=request["query"], theta_sem_leaf=owner_params,
+            times=sequence["times"], types=sequence["types"], k=start,
+            node_id=owner_id, cached_sequence=sequence,
+            write_quality=request["write_gate"], queue_weight=request["queue_weight"],
+            window_events=h,
+        )
+        threshold = self.controller.calibration_thresholds[2].to(request["write_gate"])
+        priority = (
+            (request["write_gate"] - threshold).clamp_min(0.0)
+            * posterior.max() * request["novelty"].clamp(0.0, 1.0)
+        )
+        return {
+            "owner_id": owner_id,
+            "posterior": posterior,
+            "candidate_item": candidate_item,
+            "priority": priority,
+            "bounded_gain": request["write_gate"].clamp(0.0, 1.0),
+            "construction_window": [start, build_end],
+        }
+
+    def _delayed_write_evidence_v6(
+        self,
+        sequence: Mapping[str, Tensor],
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Score v6 candidate on C=[t+h,t+2h), after causal admission."""
+        base = dict(request.get("admission_evidence") or self._causal_write_evidence_v6(sequence, request))
+        D = self.hawkes.num_types
+        h = self.wake_config.write_horizon
+        start = int(request["event_index"])
+        score_start, score_end = start + h, start + 2 * h
+        contexts = request.get("future_contexts") or []
+        if score_end > len(contexts):
+            raise RuntimeError("v6 score window C is incomplete")
+        owner_id = base["owner_id"]
+        item = base["candidate_item"]
+        before = request["frontier_theta"].new_zeros(())
+        after = before.clone()
+        virtual_usage = 1.0
+        virtual_alpha: list[float] = []
+        owner_on_path = False
+        committed = bool(request.get("committed", False))
+        for age, context in enumerate(contexts[score_start:score_end]):
+            query = context["query"]
+            stored_episodic = context["frontier_episodic_delta"].clone()
+            if committed:
+                with_delta, with_info = self.tree.episodic_memory.read_nodes(
+                    query, [owner_id], update_state=False
+                )
+                without_delta, without_info = self.tree.episodic_memory.read_node_without_item(
+                    query, owner_id, key=item.key, delta=item.delta_theta
+                )
+                difference = with_delta[owner_id] - without_delta
+                excluded = without_info.get("excluded_index")
+                alpha = 0.0
+                if excluded is not None and with_info[owner_id].get("alpha") is not None:
+                    index = int(excluded.detach().cpu())
+                    values = with_info[owner_id]["alpha"]
+                    if 0 <= index < values.numel():
+                        alpha = float(values[index].detach().cpu())
+                virtual_alpha.append(alpha)
+                baseline_episodic = stored_episodic.clone()
+                for slot, frontier_id in enumerate(context["frontier_node_ids"]):
+                    if owner_id in self.tree.path_to_node(frontier_id):
+                        baseline_episodic[slot] = baseline_episodic[slot] - difference
+                        owner_on_path = True
+                baseline_output = {
+                    "frontier_semantic_theta": context["frontier_semantic_theta"].unsqueeze(0),
+                    "frontier_episodic_delta": baseline_episodic.unsqueeze(0),
+                    "r": context["posterior"].unsqueeze(0),
+                }
+                before_params = self._controller_effective_parameters(
+                    baseline_output, context["working_delta"], context["retrieve_gate"]
+                ).select(0)
+                theta = context["no_write_theta"]
+                after_params = HawkesParams(
+                    theta[:D], theta[D:].reshape(D, D, self.hawkes.num_basis)
+                )
+            else:
+                # Training/read-only probes use the production add_memory and
+                # sparse read path on an isolated bank snapshot.  This avoids
+                # a second, approximate "virtual retriever" implementation.
+                memory = self.tree.episodic_memory
+                if age == 0:
+                    baseline_memory = copy.deepcopy(memory)
+                    treatment_memory = copy.deepcopy(memory)
+                    base_by_age = []
+                    original_clock = baseline_memory._age_clock
+                    for base_age, base_context in enumerate(
+                        contexts[score_start:score_end]
+                    ):
+                        baseline_memory._age_clock = original_clock + base_age
+                        values, _ = baseline_memory.read_nodes(
+                            base_context["query"], [owner_id], update_state=False
+                        )
+                        base_by_age.append(values[owner_id].detach().clone())
+                    treatment_memory.add_memory(
+                        owner_id, item.key, item.delta_theta,
+                        write_quality=base["bounded_gain"],
+                        queue_weight=request["queue_weight"],
+                        semantic_theta=self.tree.semantic_theta(owner_id).detach(),
+                        decays=self.hawkes.decays.detach(),
+                        force_new_mode_confirmation=True,
+                    )
+                    request["_physical_probe_memory"] = treatment_memory
+                    request["_physical_probe_clock"] = original_clock
+                    request["_physical_probe_base_delta"] = base_by_age
+                probe_memory = request["_physical_probe_memory"]
+                probe_memory._age_clock = request["_physical_probe_clock"] + age
+                with_delta, info_by_node = probe_memory.read_nodes(
+                    query, [owner_id], update_state=False
+                )
+                info = info_by_node[owner_id]
+                alpha_values = info.get("alpha")
+                alpha = 0.0
+                if alpha_values is not None and alpha_values.numel():
+                    alpha = float(alpha_values[-1].detach().cpu())
+                virtual_alpha.append(alpha)
+                difference = (
+                    with_delta[owner_id]
+                    - request["_physical_probe_base_delta"][age]
+                )
+                virtual_episodic = stored_episodic.clone()
+                for slot, frontier_id in enumerate(context["frontier_node_ids"]):
+                    if owner_id in self.tree.path_to_node(frontier_id):
+                        virtual_episodic[slot] = virtual_episodic[slot] + difference
+                        owner_on_path = True
+                virtual_output = {
+                    "frontier_semantic_theta": context["frontier_semantic_theta"].unsqueeze(0),
+                    "frontier_episodic_delta": virtual_episodic.unsqueeze(0),
+                    "r": context["posterior"].unsqueeze(0),
+                }
+                after_params = self._controller_effective_parameters(
+                    virtual_output, context["working_delta"], context["retrieve_gate"]
+                ).select(0)
+                theta = context["no_write_theta"]
+                before_params = HawkesParams(
+                    theta[:D], theta[D:].reshape(D, D, self.hawkes.num_basis)
+                )
+            event_index = int(context["event_index"])
+            before = before + self.hawkes.event_NLL(sequence, before_params, event_index)
+            after = after + self.hawkes.event_NLL(sequence, after_params, event_index)
+        if not committed and "_physical_probe_memory" in request:
+            request.pop("_physical_probe_memory")
+            request.pop("_physical_probe_clock", None)
+            request.pop("_physical_probe_base_delta", None)
+        raw_gain = before - after
+        if not owner_on_path:
+            raw_gain = raw_gain * 0.0
+        utility = raw_gain / h - self.wake_config.lambda_write
+        return {
+            **base,
+            "write_gain": raw_gain,
+            "write_utility": utility,
+            "owner_on_score_path": owner_on_path,
+            "virtual_candidate_alpha": sum(virtual_alpha) / max(len(virtual_alpha), 1),
+            "score_window": [score_start, score_end],
+        }
+
+    def _commit_delayed_write(
+        self,
+        sequence: Mapping[str, Tensor],
+        request: Mapping[str, Any],
+    ) -> bool:
+        persistent = self._commit_delayed_writes_batch(sequence, [request])
+        return bool(persistent[0]) if persistent else False
+
+    def _commit_delayed_writes_batch(
+        self,
+        sequence: Mapping[str, Tensor],
+        requests: Sequence[Mapping[str, Any]],
+    ) -> list[bool]:
+        """Commit ready delayed writes and report persistent admissions.
+
+        A ``queue`` result is a pending-law candidate, not a committed
+        physical row.  Returning one flag per request prevents the caller
+        from marking queued candidates as accepted writes.
+        """
+        if not requests:
+            return []
+        records = []
+        for request in requests:
+            evidence = request.get("window_evidence")
+            if evidence is None:
+                evidence = self._delayed_write_evidence(sequence, request)
+            owner_id = evidence["owner_id"]
+            item = evidence.get("candidate_item")
+            if item is None:
+                raise RuntimeError("write evidence is missing its residual candidate")
+            item.write_quality = float(evidence["bounded_gain"].detach().cpu())
+            item.queue_weight = float(request["queue_weight"])
+            item.prediction_gain = float(evidence["write_gain"].detach().cpu())
+            records.append((owner_id, item))
+
+        grouped_items = {}
+        for owner_id, item in records:
+            grouped_items.setdefault(owner_id, []).append(item)
+        persistent_by_item: dict[int, bool] = {}
+        for owner_id, owner_items in grouped_items.items():
+            reference = owner_items[0].key
+            admission = self.tree.episodic_memory.add_memory_batch(
+                owner_id,
+                torch.stack([
+                    item.key.reshape(-1).to(
+                        device=reference.device, dtype=reference.dtype
+                    )
+                    for item in owner_items
+                ]),
+                torch.stack([
+                    item.delta_theta.reshape(-1).to(device=reference.device)
+                    for item in owner_items
+                ]),
+                windows=[item.window for item in owner_items],
+                write_quality=torch.as_tensor(
+                    [item.write_quality for item in owner_items],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                queue_weight=torch.as_tensor(
+                    [item.queue_weight for item in owner_items],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                prediction_gain=torch.as_tensor(
+                    [item.prediction_gain for item in owner_items],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                semantic_theta=self.tree.semantic_theta(owner_id).detach(),
+                decays=self.hawkes.decays.detach(),
+            )
+            for item, result in zip(owner_items, admission):
+                persistent = result["action"] != "queue"
+                persistent_by_item[id(item)] = persistent
+                if persistent:
+                    self.controller.split_queues[owner_id] += item.queue_weight
+        return [persistent_by_item.get(id(item), False) for _, item in records]
+
+    def _enqueue_probation_candidate(
+        self,
+        request: Mapping[str, Any],
+        *,
+        source_sequence_id: Any,
+    ) -> ProbationCandidate:
+        """Store local evidence without exposing the residual to retrieval."""
+        evidence = request.get("window_evidence")
+        if evidence is None:
+            raise RuntimeError("probation candidate requires local window evidence")
+        item = evidence.get("candidate_item")
+        if item is None:
+            raise RuntimeError("write evidence is missing its residual candidate")
+        local_utility = float(evidence["write_utility"].detach().cpu())
+        gain_reference = self.wake_config.controller_gain_reference
+        local_quality = 1.0 - torch.exp(torch.tensor(
+            -max(local_utility, 0.0) / gain_reference
+        )).item()
+        probabilities = request.get("raw_action_probabilities")
+        write_probability = float(request["write_gate"].detach().cpu())
+        split_probability = (
+            float(probabilities[3].detach().cpu())
+            if probabilities is not None and probabilities.numel() > 3
+            else 0.0
+        )
+        token = (source_sequence_id, int(request["event_index"]))
+        candidate = ProbationCandidate(
+            token=token,
+            source_sequence_id=source_sequence_id,
+            event_index=int(request["event_index"]),
+            owner_id=str(evidence["owner_id"]),
+            key=item.key.detach().clone(),
+            delta_theta=item.delta_theta.detach().clone(),
+            window=item.window,
+            local_utility=local_utility,
+            local_quality=float(local_quality),
+            write_probability=write_probability,
+            split_probability=split_probability,
+            # Probation preserves the pure structural vote.  The legacy
+            # request queue_weight is p_write * p_split and must not dilute
+            # q_struct once cross-sequence persistence has been established.
+            queue_weight=split_probability,
+        )
+        self.write_probation.add(candidate)
+        return candidate
+
+    def _candidate_match(
+        self,
+        candidate: ProbationCandidate,
+        contexts: Sequence[Mapping[str, Any]],
+    ) -> Optional[tuple[int, float]]:
+        """Return the best topology-compatible context with a full CF window."""
+        horizon = self.wake_config.write_horizon
+        best: Optional[tuple[int, float]] = None
+        for index in range(max(len(contexts) - horizon + 1, 0)):
+            context = contexts[index]
+            compatible = any(
+                candidate.owner_id in self.tree.path_to_node(frontier_id)
+                for frontier_id in context["frontier_node_ids"]
+            )
+            if not compatible:
+                continue
+            query = context["query"]
+            similarity = float(F.cosine_similarity(
+                candidate.key.to(query).reshape(1, -1),
+                query.reshape(1, -1),
+                dim=-1,
+            )[0].detach().cpu())
+            if best is None or similarity > best[1]:
+                best = (index, similarity)
+        return best
+
+    def _cross_sequence_gain(
+        self,
+        sequence: Mapping[str, Tensor],
+        contexts: Sequence[Mapping[str, Any]],
+        candidate: ProbationCandidate,
+        match_index: int,
+    ) -> tuple[float, float]:
+        """Evaluate a probation residual through the production read path."""
+        horizon = self.wake_config.write_horizon
+        D = self.hawkes.num_types
+        baseline_loss = candidate.key.new_zeros(())
+        counterfactual_loss = baseline_loss.clone()
+        virtual_usage = 1.0
+        alpha_values: list[float] = []
+        for age, context in enumerate(
+            contexts[match_index:match_index + horizon]
+        ):
+            query = context["query"]
+            baseline_delta, _ = self.tree.episodic_memory.read_nodes(
+                query, [candidate.owner_id], update_state=False
+            )
+            virtual_delta, info = (
+                self.tree.episodic_memory.read_node_with_virtual_item(
+                    query,
+                    candidate.owner_id,
+                    key=candidate.key,
+                    delta=candidate.delta_theta,
+                    write_quality=candidate.local_quality,
+                    virtual_usage=virtual_usage,
+                    virtual_age=float(age),
+                )
+            )
+            alpha = 0.0
+            values = info.get("alpha")
+            if values is not None and values.numel():
+                alpha = float(values[-1].detach().cpu())
+            alpha_values.append(alpha)
+            virtual_usage += alpha
+
+            difference = virtual_delta - baseline_delta[candidate.owner_id]
+            episodic = context["frontier_episodic_delta"].clone()
+            for slot, frontier_id in enumerate(context["frontier_node_ids"]):
+                if candidate.owner_id in self.tree.path_to_node(frontier_id):
+                    episodic[slot] = episodic[slot] + difference
+            virtual_output = {
+                "frontier_semantic_theta": (
+                    context["frontier_semantic_theta"].unsqueeze(0)
+                ),
+                "frontier_episodic_delta": episodic.unsqueeze(0),
+                "r": context["posterior"].unsqueeze(0),
+            }
+            counterfactual_params = self._controller_effective_parameters(
+                virtual_output,
+                context["working_delta"],
+                context["retrieve_gate"],
+            ).select(0)
+            theta = context["no_write_theta"]
+            baseline_params = HawkesParams(
+                theta[:D], theta[D:].reshape(D, D, self.hawkes.num_basis)
+            )
+            event_index = int(context["event_index"])
+            baseline_loss = baseline_loss + self.hawkes.event_NLL(
+                sequence, baseline_params, event_index
+            )
+            counterfactual_loss = counterfactual_loss + self.hawkes.event_NLL(
+                sequence, counterfactual_params, event_index
+            )
+        gain = float(
+            ((baseline_loss - counterfactual_loss) / horizon).detach().cpu()
+        )
+        mean_alpha = sum(alpha_values) / max(len(alpha_values), 1)
+        return gain, mean_alpha
+
+    def _validate_probation_candidates(
+        self,
+        sequence: Mapping[str, Tensor],
+        contexts: Sequence[Mapping[str, Any]],
+        *,
+        sequence_id: Any,
+    ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+        """Validate once per independent sequence, then promote by ESS + LCB."""
+        validations: list[Dict[str, Any]] = []
+        for candidate in self.write_probation.candidates_for(sequence_id):
+            match = self._candidate_match(candidate, contexts)
+            # Even an unmatched sequence is consumed: rerunning it must not
+            # fabricate another independent opportunity for this candidate.
+            if match is None:
+                candidate.record_validation(
+                    sequence_id, gain=0.0, weight=0.0
+                )
+                validations.append({
+                    "token": candidate.token,
+                    "matched": False,
+                })
+                continue
+            match_index, similarity = match
+            gain, virtual_alpha = self._cross_sequence_gain(
+                sequence, contexts, candidate, match_index
+            )
+            weight = float(torch.sigmoid(torch.tensor(
+                (
+                    similarity - self.config.probation_match_threshold
+                ) / self.config.probation_match_temperature
+            )).item())
+            candidate.record_validation(
+                sequence_id, gain=gain, weight=weight
+            )
+            validations.append({
+                "token": candidate.token,
+                "matched": True,
+                "match_index": match_index,
+                "similarity": similarity,
+                "weight": weight,
+                "gain": gain,
+                "virtual_candidate_alpha": virtual_alpha,
+                "effective_sample_size": candidate.effective_sample_size,
+                "gain_mean": candidate.gain_mean,
+                "gain_variance": candidate.gain_variance,
+                "lcb": candidate.lower_confidence_bound(
+                    self.config.probation_lcb_kappa
+                ),
+            })
+
+        promotions: list[Dict[str, Any]] = []
+        promotable: list[tuple[ProbationCandidate, float]] = []
+        for candidate in list(self.write_probation):
+            if not candidate.promotion_ready(
+                minimum_effective_samples=(
+                    self.config.probation_min_effective_samples
+                ),
+                kappa=self.config.probation_lcb_kappa,
+                persist_threshold=self.config.probation_persist_threshold,
+            ):
+                continue
+            quality = candidate.promoted_quality(
+                self.wake_config.controller_gain_reference
+            )
+            promotable.append((candidate, quality))
+
+        # Promotion is the other persistent-write path outside the Wake
+        # batch. Candidates remain in insertion order inside each owner group;
+        # grouping only removes repeated law-key construction and admission
+        # synchronizations, while the metadata report below retains the
+        # original global order.
+        grouped_promotions = {}
+        admission_by_token: Dict[Any, Dict[str, Any]] = {}
+        for candidate, quality in promotable:
+            grouped_promotions.setdefault(candidate.owner_id, []).append(
+                (candidate, quality)
+            )
+        for owner_id, owner_candidates in grouped_promotions.items():
+            reference = owner_candidates[0][0].key
+            admission = self.tree.episodic_memory.add_memory_batch(
+                owner_id,
+                torch.stack([
+                    candidate.key.reshape(-1).to(
+                        device=reference.device, dtype=reference.dtype
+                    )
+                    for candidate, _ in owner_candidates
+                ]),
+                torch.stack([
+                    candidate.delta_theta.reshape(-1).to(
+                        device=reference.device
+                    )
+                    for candidate, _ in owner_candidates
+                ]),
+                windows=[candidate.window for candidate, _ in owner_candidates],
+                write_quality=torch.as_tensor(
+                    [quality for _, quality in owner_candidates],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                queue_weight=torch.as_tensor(
+                    [candidate.queue_weight for candidate, _ in owner_candidates],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                prediction_gain=torch.as_tensor(
+                    [candidate.gain_mean for candidate, _ in owner_candidates],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                semantic_theta=self.tree.semantic_theta(owner_id).detach(),
+                decays=self.hawkes.decays.detach(),
+            )
+            for (candidate, _), result in zip(owner_candidates, admission):
+                admission_by_token[candidate.token] = result
+
+        for candidate, quality in promotable:
+            admission = admission_by_token[candidate.token]
+            if admission["action"] == "queue":
+                # Keep the independently validated candidate in probation;
+                # a later recurrence supplies the persistence confirmation.
+                continue
+            # This is the sole probation-to-Split bridge. Before promotion the
+            # candidate is absent from both the bank and the trigger queue.
+            self.controller.split_queues[
+                candidate.owner_id
+            ] += candidate.queue_weight
+            promotions.append({
+                "token": candidate.token,
+                "owner_id": candidate.owner_id,
+                "write_quality": quality,
+                "structural_weight": candidate.queue_weight,
+                "gain_mean": candidate.gain_mean,
+                "effective_sample_size": candidate.effective_sample_size,
+                "lcb": candidate.lower_confidence_bound(
+                    self.config.probation_lcb_kappa
+                ),
+            })
+            self.write_probation.remove(candidate.token)
+        return validations, promotions
+
+    def run_sequence(
+        self,
+        cpu_sequence: Mapping[str, Tensor],
+        *,
+        precomputed_z: Optional[Tensor] = None,
+        frontier_static_cache: Any = None,
+        precomputed_projected_z: Optional[Tensor] = None,
+        precomputed_memory_query: Optional[Tensor] = None,
+        compact: bool = False,
+        capture_event_predictions: bool = False,
+        capture_prediction_theta: bool = False,
+    ) -> Dict[str, Any]:
+        """Process observed events causally using only the wake mechanism.
+
+        Local candidates wait for their complete causal write horizon, then
+        remain retrieval-invisible until independent sequences pass ESS + LCB.
+
+        ``compact`` is the frozen-evaluation path. It keeps the same causal
+        model computation and Working Memory update, but accumulates NLL,
+        accuracy, and time error on device instead of materializing the large
+        per-event diagnostic dictionary. Optional event predictions or causal
+        ``prediction_theta`` snapshots are emitted only when explicitly
+        requested by an evaluator.
+        """
+        if compact and (
+            self.config.allow_memory_writes
+            or self.config.update_memory_usage
+            or self.config.probe_write_counterfactuals
+        ):
+            raise ValueError(
+                "compact inference requires frozen read-only memory: "
+                "disable writes, usage updates, and write probes"
+            )
+        source_value = cpu_sequence.get("source_index", -1)
+        source_index = int(
+            source_value.item() if hasattr(source_value, "item") else source_value
+        )
+        if source_index >= 0:
+            source_sequence_id: Any = source_index
+        else:
+            source_sequence_id = (
+                "anonymous_inference_sequence",
+                self._anonymous_sequence_counter,
+            )
+            self._anonymous_sequence_counter += 1
+        sequence = self._move_sequence(cpu_sequence)
+        if precomputed_z is None and isinstance(self.encoder, CausalPrefixEncoder):
+            with torch.no_grad():
+                precomputed_z = self.encoder.forward_all_prefix(
+                    sequence["times"],
+                    sequence["types"],
+                    time_features=sequence.get(EVENT_TIME_FEATURES_KEY),
+                ).detach()
+        if precomputed_z is not None:
+            precomputed_z = torch.as_tensor(
+                precomputed_z,
+                device=self.device,
+            ).detach()
+            expected_z_shape = (int(sequence["times"].numel()), self.tree.z_dim)
+            if precomputed_z.shape != expected_z_shape:
+                raise ValueError(
+                    "precomputed_z must have shape "
+                    f"{expected_z_shape}, got {tuple(precomputed_z.shape)}"
+                )
+            if precomputed_projected_z is None:
+                with torch.no_grad():
+                    precomputed_projected_z = (
+                        self.tree.router_compat.project_z(precomputed_z).detach()
+                    )
+            else:
+                precomputed_projected_z = torch.as_tensor(
+                    precomputed_projected_z,
+                    device=self.device,
+                ).detach()
+            if precomputed_memory_query is None:
+                with torch.no_grad():
+                    precomputed_memory_query = (
+                        self.tree.episodic_memory.query_net(precomputed_z).detach()
+                    )
+            else:
+                precomputed_memory_query = torch.as_tensor(
+                    precomputed_memory_query,
+                    device=self.device,
+                ).detach()
+            expected_projected_shape = (
+                int(sequence["times"].numel()),
+                self.tree.router_compat.node_dim,
+            )
+            if precomputed_projected_z.shape != expected_projected_shape:
+                raise ValueError(
+                    "precomputed_projected_z must have shape "
+                    f"{expected_projected_shape}, got "
+                    f"{tuple(precomputed_projected_z.shape)}"
+                )
+            expected_query_shape = (
+                int(sequence["times"].numel()),
+                self.tree.episodic_memory.key_dim,
+            )
+            if precomputed_memory_query.shape != expected_query_shape:
+                raise ValueError(
+                    "precomputed_memory_query must have shape "
+                    f"{expected_query_shape}, got "
+                    f"{tuple(precomputed_memory_query.shape)}"
+                )
+        self.tree.reset_working_memory()
+        pending_writes: list[Dict[str, Any]] = []
+        write_probe_contexts: list[Dict[str, Any]] = []
+        outputs = []
+        total_nll = 0.0
+        compact_nll_total = torch.zeros(
+            (), device=self.device, dtype=torch.float64
+        )
+        compact_correct_total = torch.zeros(
+            (), device=self.device, dtype=torch.long
+        )
+        compact_time_abs_total = torch.zeros(
+            (), device=self.device, dtype=torch.float64
+        )
+        accepted_write_count = 0
+        local_accepted_write_count = 0
+        accepted_write_requests: list[Dict[str, Any]] = []
+
+        for event_index in range(sequence["times"].numel()):
+            with torch.no_grad():
+                if precomputed_z is not None:
+                    z_t = precomputed_z[event_index:event_index + 1]
+                elif isinstance(self.encoder, CausalPrefixEncoder):
+                    z_t = self.encoder(
+                        sequence["times"],
+                        sequence["types"],
+                        event_index,
+                        time_features=sequence.get(
+                            EVENT_TIME_FEATURES_KEY
+                        ),
+                    ).reshape(1, -1)
+                else:
+                    z_t = self.encoder(
+                        sequence["times"],
+                        sequence["types"],
+                        event_index,
+                    ).reshape(1, -1)
+            working_delta = self.tree.working_memory.make_trainable_delta()
+            if not self.config.adapt_working_memory:
+                working_delta = working_delta.detach()
+
+            with torch.set_grad_enabled(self.config.adapt_working_memory):
+                memory_output = self.tree(
+                    z_t=z_t,
+                    working_delta=working_delta,
+                    decays=self.hawkes.decays,
+                    frontier_static_cache=frontier_static_cache,
+                    frontier_projected_z=(
+                        None
+                        if precomputed_projected_z is None
+                        else precomputed_projected_z[
+                            event_index:event_index + 1
+                        ]
+                    ),
+                    frontier_query=(
+                        None
+                        if precomputed_memory_query is None
+                        else precomputed_memory_query[
+                            event_index:event_index + 1
+                        ]
+                    ),
+                    update_memory_state=False,
+                    materialize_diagnostics=not compact,
+                )
+                pre_action_params = self._controller_effective_parameters(
+                    memory_output,
+                    working_delta,
+                    working_delta.new_zeros(()),
+                ).select(0)
+                nll = self.hawkes.event_NLL(
+                    sequence, pre_action_params, event_index
+                )
+                # The working-memory gradient is evaluated after the retrieval
+                # gate has recomposed the final effective parameters below.
+            retrieval_diagnostics = self._packed_retrieval_diagnostics(
+                memory_output
+            )
+            if self.config.update_memory_usage:
+                # Retrieval uses age in its differentiable scores; mutate it
+                # only after the event's working-memory gradient is complete.
+                self.tree.episodic_memory.step_age()
+
+            with torch.no_grad():
+                # A causal local-rate forecast made at the end of the prefix.
+                # This is distinct from ``intensity_at_cached_event`` below,
+                # which conditions mark prediction on the observed event time.
+                forecast_origin = (
+                    sequence["times"].new_tensor(0.0)
+                    if event_index == 0
+                    else sequence["times"][event_index - 1]
+                )
+                frontier_energy = self._frontier_event_energy(
+                    sequence, memory_output, event_index
+                )
+                (
+                    action,
+                    owner_id,
+                    query,
+                    action_probabilities,
+                    raw_action_probabilities,
+                    posterior,
+                    novelty,
+                    retrieval_similarity,
+                ) = self._action(
+                    memory_output, nll, frontier_energy
+                )
+                with torch.set_grad_enabled(self.config.adapt_working_memory):
+                    params = self._controller_effective_parameters(
+                        memory_output,
+                        working_delta,
+                        action_probabilities[1],
+                    ).select(0)
+                    nll = self.hawkes.event_NLL(
+                        sequence, params, event_index
+                    )
+                    if self.config.adapt_working_memory:
+                        working_grad = torch.autograd.grad(
+                            nll, working_delta
+                        )[0]
+                forecast_intensity = self.hawkes.intensity_at_event(
+                    {
+                        "times": sequence["times"][:event_index],
+                        "types": sequence["types"][:event_index],
+                    },
+                    forecast_origin + forecast_origin.new_tensor(1e-6),
+                    params,
+                )
+                forecast_rate = forecast_intensity.sum().clamp_min(1e-8)
+                forecast_type_probabilities = forecast_intensity / forecast_rate
+                predicted_delta = forecast_rate.reciprocal()
+                predicted_time = forecast_origin + predicted_delta
+                intensity = self.hawkes.intensity_at_cached_event(
+                    sequence, event_index, params
+                )
+                type_probabilities_at_event_time = (
+                    intensity / intensity.sum().clamp_min(1e-8)
+                )
+                predicted_type_index = intensity.argmax()
+                predicted_type = (
+                    int(predicted_type_index.detach().cpu())
+                    if not compact or capture_event_predictions
+                    else None
+                )
+                if self.config.adapt_working_memory:
+                    self.tree.working_memory.update_from_gradient(
+                        working_grad,
+                        adaptation_probability=action_probabilities[0],
+                    )
+                working_norm = float(
+                    self.tree.working_memory.delta.detach().norm().cpu()
+                )
+                if self.config.update_memory_usage:
+                    self.tree.episodic_memory.credit_retrieval(
+                        info_by_batch=memory_output["memory_info"],
+                        leaf_paths=[
+                            self.tree.path_to_node(node_id)
+                            for node_id in memory_output[
+                                "frontier_node_ids"
+                            ][0]
+                        ],
+                        routing_weights=posterior.unsqueeze(0),
+                        retrieval_probability=action_probabilities[1],
+                    )
+                if compact:
+                    true_time = sequence["times"][event_index]
+                    true_type = sequence["types"][event_index]
+                    compact_nll_total.add_(nll.detach().to(torch.float64))
+                    compact_correct_total.add_(
+                        (predicted_type_index == true_type).to(torch.long)
+                    )
+                    compact_time_abs_total.add_(
+                        (predicted_time - true_time).abs().to(torch.float64)
+                    )
+                    if capture_event_predictions or capture_prediction_theta:
+                        compact_event: Dict[str, Any] = {
+                            "event_index": int(event_index),
+                            "retrieval_alpha_mass": float(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][0].detach().cpu()
+                            ),
+                            "retrieval_alpha_per_visited_node": float(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][0].detach().cpu()
+                            ) / max(
+                                int(
+                                    retrieval_diagnostics[
+                                        "visited_bank_count"
+                                    ][0].detach().cpu()
+                                ),
+                                1,
+                            ),
+                            "retrieval_similarity": float(
+                                retrieval_diagnostics[
+                                    "retrieval_similarity"
+                                ][0].detach().cpu()
+                            ),
+                            "retrieval_effective_k": int(
+                                retrieval_diagnostics[
+                                    "retrieval_effective_k"
+                                ][0].detach().cpu()
+                            ),
+                            "retrieval_null_alpha": float(
+                                retrieval_diagnostics[
+                                    "retrieval_null_alpha"
+                                ][0].detach().cpu()
+                            ),
+                            "visited_bank_count": int(
+                                retrieval_diagnostics["visited_bank_count"][
+                                    0
+                                ].detach().cpu()
+                            ),
+                            "visited_nonempty_bank_count": int(
+                                retrieval_diagnostics[
+                                    "visited_nonempty_bank_count"
+                                ][0].detach().cpu()
+                            ),
+                            "retrieval_hit": bool(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][0].detach().cpu()
+                                > 1e-6
+                            ),
+                            "working_norm": working_norm,
+                            "raw_episodic_residual_norm": float(
+                                memory_output[
+                                    "frontier_episodic_delta"
+                                ][0]
+                                .detach()
+                                .norm(dim=-1)
+                                .mean()
+                                .cpu()
+                            ),
+                            "episodic_residual_norm": float(
+                                memory_output["episodic_delta"][0]
+                                .detach()
+                                .norm(dim=-1)
+                                .mean()
+                                .cpu()
+                            ),
+                            "retrieve_gate": float(
+                                action_probabilities[1].detach().cpu()
+                            ),
+                            "write_count": 0,
+                            "nll": (
+                                float(nll.detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                            "predicted_type": predicted_type,
+                            "true_type": int(true_type.detach().cpu())
+                            if capture_event_predictions else None,
+                            "predicted_delta": (
+                                float(predicted_delta.detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                            "predicted_time": (
+                                float(predicted_time.detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                            "true_time": (
+                                float(true_time.detach().cpu())
+                                if capture_event_predictions else None
+                            ),
+                        }
+                        if capture_event_predictions:
+                            compact_event.update({
+                                "type_probabilities_at_event_time": (
+                                    type_probabilities_at_event_time.detach().cpu()
+                                ),
+                                "forecast_type_probabilities": (
+                                    forecast_type_probabilities.detach().cpu()
+                                ),
+                            })
+                        if capture_prediction_theta:
+                            # Keep law snapshots on the active device. The
+                            # NISE layer stacks them into one GPU batch later.
+                            compact_event["prediction_theta"] = (
+                                pre_action_params.theta.detach().clone()
+                            )
+                        outputs.append(compact_event)
+                    continue
+                selected_memory_info = (
+                    memory_output["memory_info"][0]
+                    if memory_output.get("memory_info")
+                    else {}
+                )
+                for accepted_request in accepted_write_requests:
+                    if accepted_request.get("retrieved_later", False):
+                        continue
+                    accepted_event = int(accepted_request["event_index"])
+                    if event_index <= accepted_event:
+                        continue
+                    evidence = accepted_request.get("admission_evidence") or {}
+                    owner = evidence.get("owner_id")
+                    item = evidence.get("candidate_item")
+                    info = selected_memory_info.get(owner, {})
+                    bank = self.tree.episodic_memory.banks.get(owner)
+                    alpha = info.get("alpha")
+                    if item is None or bank is None or alpha is None or not len(bank):
+                        continue
+                    bank._ensure_prototype_state()
+                    key = F.normalize(
+                        item.key.to(bank.context_keys).reshape(1, -1), dim=-1
+                    ).reshape(-1)
+                    delta = item.delta_theta.to(bank.deltas)
+                    alias_matches = torch.isclose(
+                        bank.context_keys,
+                        key.unsqueeze(0).unsqueeze(1),
+                        rtol=1e-5,
+                        atol=1e-7,
+                    ).all(dim=-1) & bank.context_valid
+                    matches = alias_matches.any(dim=-1) & torch.isclose(
+                        bank.deltas, delta.unsqueeze(0), rtol=1e-5, atol=1e-7
+                    ).all(dim=-1)
+                    indices = torch.nonzero(matches, as_tuple=False).flatten()
+                    if indices.numel() and bool(
+                        (alpha.index_select(0, indices.to(alpha.device)) > 1e-6)
+                        .any().detach().cpu()
+                    ):
+                        accepted_request["retrieved_later"] = True
+                        outputs[accepted_event]["write_retrieved_later"] = True
+                packed_memory_info = memory_output.get(
+                    "packed_memory_info", {}
+                )
+                retrieval_alpha_mass = sum(
+                    float(info["alpha"].sum().detach().cpu())
+                    for info in selected_memory_info.values()
+                    if "alpha" in info
+                )
+                retrieval_effective_k = sum(
+                    int(info["effective_k"].sum().detach().cpu())
+                    for info in selected_memory_info.values()
+                    if "effective_k" in info
+                )
+                packed_null_alpha = packed_memory_info.get("null_alpha")
+                if packed_null_alpha is not None:
+                    packed_null_alpha = packed_null_alpha[0]
+                    visited_mask = memory_output["visited_node_mask"][0]
+                    null_values = packed_null_alpha[visited_mask]
+                    retrieval_null_alpha = (
+                        float(null_values.mean().detach().cpu())
+                        if null_values.numel() else 1.0
+                    )
+                else:
+                    retrieval_null_alpha = 1.0
+
+                visited_mask = memory_output["visited_node_mask"][0]
+                visited_indices = memory_output["visited_node_indices"][0][
+                    visited_mask
+                ]
+                visited_node_ids = tuple(
+                    memory_output["memory_node_ids"][int(index)]
+                    for index in visited_indices.detach().cpu().tolist()
+                )
+                visited_bank_count = len(visited_node_ids)
+                visited_nonempty_bank_count = sum(
+                    bool(
+                        node_id in self.tree.episodic_memory.banks
+                        and len(self.tree.episodic_memory.banks[node_id]) > 0
+                    )
+                    for node_id in visited_node_ids
+                )
+                raw_episodic_residual_norm = float(
+                    memory_output["frontier_episodic_delta"][0]
+                    .detach().norm(dim=-1).mean().cpu()
+                )
+                retrieve_gate = float(action_probabilities[1].detach().cpu())
+                gated_episodic_residual_norm = (
+                    raw_episodic_residual_norm * abs(retrieve_gate)
+                )
+                owner_on_retrieval_path = owner_id in set(visited_node_ids)
+
+            frontier_ids = tuple(memory_output["frontier_node_ids"][0])
+            write_probe_contexts.append({
+                "event_index": int(event_index),
+                "query": query.detach().clone(),
+                "frontier_node_ids": frontier_ids,
+                "frontier_semantic_theta": memory_output["frontier_semantic_theta"][
+                    0, :len(frontier_ids)
+                ].detach().clone(),
+                "frontier_episodic_delta": memory_output["frontier_episodic_delta"][
+                    0, :len(frontier_ids)
+                ].detach().clone(),
+                "posterior": posterior[:len(frontier_ids)].detach().clone(),
+                "working_delta": working_delta.detach().clone(),
+                "retrieve_gate": action_probabilities[1].detach().clone(),
+                "no_write_theta": params.theta.detach().clone(),
+            })
+
+            if (
+                self.config.allow_memory_writes
+                or self.config.probe_write_counterfactuals
+            ):
+                pending_writes.append({
+                    "event_index": event_index,
+                    "ready_index": (
+                        event_index + 2 * self.wake_config.write_horizon - 1
+                        if int(self.controller.controller_version.detach().cpu()) >= 6
+                        else event_index + (
+                            2 if int(self.controller.controller_version.detach().cpu()) >= 5 else 1
+                        ) * self.wake_config.write_horizon
+                    ),
+                    "admission_index": event_index + self.wake_config.write_horizon - 1,
+                    "query": query,
+                    "frontier_node_ids": frontier_ids,
+                    "frontier_mass": memory_output["frontier_mass"][
+                        0, : len(frontier_ids)
+                    ].detach().clone(),
+                    "frontier_theta": memory_output["frontier_theta"][
+                        0, : len(frontier_ids)
+                    ].detach().clone(),
+                    "action": action,
+                    "write_gate": raw_action_probabilities[2].detach(),
+                    "raw_action_probabilities": (
+                        raw_action_probabilities.detach().clone()
+                    ),
+                    "source_sequence_id": source_sequence_id,
+                    "exploration": False,
+                    "novelty": novelty,
+                    "queue_weight": float(
+                        self.controller.queue_weight(
+                            raw_action_probabilities
+                        ).detach().cpu()
+                    ),
+                    "future_contexts": write_probe_contexts,
+                })
+
+            total_nll += float(nll.detach().cpu())
+            outputs.append({
+                "event_index": event_index,
+                "nll": float(nll.detach().cpu()),
+                "predicted_type": predicted_type,
+                "true_type": int(sequence["types"][event_index].item()),
+                # ``pre_action_theta`` is the parameter state formed from the
+                # strict prefix events[:event_index].  CL law-recovery uses it
+                # to draw a genuinely causal intensity curve; the ordinary
+                # event rows intentionally keep this diagnostic internal.
+                "prediction_theta": pre_action_params.theta.detach().cpu(),
+                "intensity": intensity.detach().cpu(),
+                "type_probabilities_at_event_time": (
+                    type_probabilities_at_event_time.detach().cpu()
+                ),
+                "forecast_type_probabilities": (
+                    forecast_type_probabilities.detach().cpu()
+                ),
+                "predicted_delta": float(predicted_delta.detach().cpu()),
+                "predicted_time": float(predicted_time.detach().cpu()),
+                "true_time": float(
+                    sequence["times"][event_index].detach().cpu()
+                ),
+                "responsibility": memory_output["r"][0].detach().cpu(),
+                "owner_id": owner_id,
+                "frontier_node_ids": tuple(
+                    memory_output["frontier_node_ids"][0]
+                ),
+                "frontier_posterior": posterior.detach().cpu(),
+                "action": str(action),
+                "memorize_argmax": action == Action.MEMORIZE,
+                "action_probabilities": (
+                    action_probabilities.detach().cpu()
+                ),
+                "raw_action_probabilities": (
+                    raw_action_probabilities.detach().cpu()
+                ),
+                "retrieval_alpha_mass": retrieval_alpha_mass,
+                "retrieval_alpha_per_visited_node": (
+                    retrieval_alpha_mass / visited_bank_count
+                    if visited_bank_count else 0.0
+                ),
+                "retrieval_similarity": float(
+                    retrieval_similarity.detach().cpu()
+                ),
+                "retrieval_effective_k": retrieval_effective_k,
+                "retrieval_null_alpha": retrieval_null_alpha,
+                "visited_bank_count": visited_bank_count,
+                "visited_nonempty_bank_count": visited_nonempty_bank_count,
+                "raw_episodic_residual_norm": raw_episodic_residual_norm,
+                "retrieve_gate": retrieve_gate,
+                "gated_episodic_residual_norm": (
+                    gated_episodic_residual_norm
+                ),
+                "owner_on_retrieval_path": owner_on_retrieval_path,
+                "retrieval_counterfactual_gain": None,
+                "retrieval_counterfactual_unavailable_reason": (
+                    "requires paired no_episodic evaluation"
+                ),
+                "working_norm": working_norm,
+                "episodic_residual_norm": float(
+                    memory_output["episodic_delta"][0]
+                    .detach().norm().cpu()
+                ),
+                "write_token": (
+                    f"{source_index}:{int(event_index)}"
+                ),
+                "write_candidate": bool(
+                    float(raw_action_probabilities[2].detach().cpu())
+                    >= self.controller.write_candidate_threshold
+                ),
+                "write_gate_active": bool(
+                    float(action_probabilities[2].detach().cpu()) > 0.0
+                ),
+                "write_gate_passed": bool(
+                    float(raw_action_probabilities[2].detach().cpu())
+                    >= float(self.controller.calibration_thresholds[2].detach().cpu())
+                ),
+                "write_priority_passed": False,
+                "write_window_complete": False,
+                "write_accepted": False,
+                "write_local_accepted": False,
+                "write_probation_enqueued": False,
+                "write_promotion_count": 0,
+                "write_retrieved_later": False,
+                "write_beneficial": False,
+            })
+
+            # F=[t,t+h) still performs the existing causal local admission.
+            # It no longer mutates EpisodicMemory: C-window local utility must
+            # first create an invisible probation candidate, which later needs
+            # evidence from independent sequences.
+            if (
+                int(self.controller.controller_version.detach().cpu()) >= 6
+                and self.config.allow_memory_writes
+            ):
+                due = [
+                    request for request in pending_writes
+                    if request["admission_index"] == event_index
+                    and not request.get("admission_evaluated", False)
+                ]
+                for request in due:
+                    evidence = self._causal_write_evidence_v6(sequence, request)
+                    allowlist = self.config.write_event_allowlist
+                    if (
+                        allowlist is not None
+                        and int(request["event_index"]) in allowlist
+                        and float(evidence["priority"].detach().cpu()) <= 0.0
+                    ):
+                        evidence["priority"] = (
+                            request["write_gate"].clamp_min(1e-6)
+                            * evidence["posterior"].max().clamp_min(1e-6)
+                            * request["novelty"].clamp_min(1e-6)
+                        )
+                    request["admission_evidence"] = evidence
+                    request["admission_evaluated"] = True
+                    origin = outputs[request["event_index"]]
+                    origin["write_window_complete"] = True
+                    origin["write_priority_passed"] = bool(
+                        float(evidence["priority"].detach().cpu())
+                        > self.wake_config.controller_priority_threshold
+                    )
+                    allowlist = self.config.write_event_allowlist
+                    request["local_admission_passed"] = bool(
+                        (
+                            allowlist is not None
+                            and int(request["event_index"]) in allowlist
+                        )
+                        or (
+                            allowlist is None
+                            and self.controller.write_admissible(
+                                request["write_gate"],
+                                0.0,
+                                evidence["priority"],
+                                future_window_complete=True,
+                                priority_threshold=(
+                                    self.wake_config.controller_priority_threshold
+                                ),
+                            )
+                        )
+                    )
+
+        event_count = int(sequence["times"].numel())
+        if compact:
+            total_nll = float(compact_nll_total.detach().cpu())
+            compact_metrics = {
+                "events": event_count,
+                "nll_sum": total_nll,
+                "correct": int(compact_correct_total.detach().cpu()),
+                "time_abs_sum": float(compact_time_abs_total.detach().cpu()),
+            }
+        else:
+            compact_metrics = None
+        probation_validations: list[Dict[str, Any]] = []
+        promotions: list[Dict[str, Any]] = []
+        eligible = [
+            request
+            for request in pending_writes
+            if request["ready_index"] < event_count
+        ]
+        top_c = self.wake_config.controller_write_probe_topc
+        ranked = sorted(
+            eligible,
+            key=lambda request: float(
+                request["write_gate"].detach().cpu()
+            ),
+            reverse=True,
+        )
+        if self.config.write_event_allowlist is not None:
+            allowed_events = set(self.config.write_event_allowlist)
+            top = [
+                request for request in ranked
+                if int(request["event_index"]) in allowed_events
+            ]
+            remaining = []
+        else:
+            top = ranked[:top_c]
+            remaining = ranked[top_c:]
+        explored = []
+        if self.config.probe_write_counterfactuals and remaining:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(self.config.write_probe_seed + source_index)
+            count = min(self.config.write_probe_random_count, len(remaining))
+            indices = torch.randperm(len(remaining), generator=generator)[:count].tolist()
+            explored = [remaining[index] for index in indices]
+        eligible = [*top, *explored]
+        top_ids = {id(request) for request in top}
+        explored_ids = {id(request) for request in explored}
+        for request in eligible:
+            outputs[request["event_index"]]["write_probed"] = True
+            outputs[request["event_index"]]["write_probe_top"] = id(request) in top_ids
+            outputs[request["event_index"]]["write_probe_exploration"] = id(request) in explored_ids
+            request["write_probe_exploration"] = id(request) in explored_ids
+            outputs[request["event_index"]]["write_probe_propensity"] = (
+                1.0 if id(request) in top_ids else len(explored) / max(len(remaining), 1)
+            )
+        for request in eligible:
+            request["window_evidence"] = self._delayed_write_evidence(
+                sequence, request
+            )
+            outputs[request["event_index"]].update({
+                "write_utility": float(
+                    request["window_evidence"]["write_utility"].detach().cpu()
+                ),
+                "write_priority": float(
+                    request["window_evidence"]["priority"].detach().cpu()
+                ),
+                "write_owner_on_score_path": bool(
+                    request["window_evidence"].get("owner_on_score_path", False)
+                ),
+                "write_virtual_candidate_alpha": float(
+                    request["window_evidence"].get("virtual_candidate_alpha", 0.0)
+                ),
+                "write_gate_passed": bool(
+                    float(request["write_gate"])
+                    >= float(self.controller.calibration_thresholds[2])
+                ),
+                "write_utility_passed": bool(
+                    float(
+                        request["window_evidence"]["write_utility"]
+                        .detach().cpu()
+                    ) > self.wake_config.controller_write_gain_threshold
+                ),
+                "write_beneficial": bool(
+                    float(
+                        request["window_evidence"]["write_utility"]
+                        .detach().cpu()
+                    ) > 0.0
+                ),
+                "write_priority_passed": bool(
+                    float(
+                        request["window_evidence"]["priority"].detach().cpu()
+                    )
+                    > self.wake_config.controller_priority_threshold
+                ),
+                "write_window_complete": True,
+                "write_accepted": bool(request.get("committed", False)),
+            })
+        if (
+            self.config.allow_memory_writes
+            and int(self.controller.controller_version.detach().cpu()) >= 6
+        ):
+            probation_validations, promotions = (
+                self._validate_probation_candidates(
+                    sequence,
+                    write_probe_contexts,
+                    sequence_id=source_sequence_id,
+                )
+            )
+            accepted_write_count = len(promotions)
+            if outputs and promotions:
+                outputs[0]["write_promotion_count"] = len(promotions)
+                outputs[0]["promoted_write_tokens"] = [
+                    row["token"] for row in promotions
+                ]
+        if int(self.controller.controller_version.detach().cpu()) >= 6:
+            local_candidates = [
+                request
+                for request in eligible
+                if (
+                    not request.get("write_probe_exploration", False)
+                    and request.get("local_admission_passed", False)
+                    and float(
+                        request["window_evidence"]["write_utility"]
+                        .detach().cpu()
+                    )
+                    > self.wake_config.controller_write_gain_threshold
+                )
+            ]
+            local_candidates.sort(
+                key=lambda request: float(
+                    request["window_evidence"]["priority"].detach().cpu()
+                ),
+                reverse=True,
+            )
+            local_budget = min(
+                4, self.tree.frontier_routing.config.max_writes_per_sequence
+            )
+            for request in local_candidates[:local_budget]:
+                candidate = self._enqueue_probation_candidate(
+                    request,
+                    source_sequence_id=source_sequence_id,
+                )
+                local_accepted_write_count += 1
+                outputs[request["event_index"]].update({
+                    "write_local_accepted": True,
+                    "write_probation_enqueued": True,
+                    "write_probation_token": candidate.token,
+                    # Persistent acceptance is deliberately false until a
+                    # later independent sequence passes the ESS + LCB gate.
+                    "write_accepted": False,
+                })
+        else:
+            eligible = [
+                request for request in eligible
+                if not request.get("write_probe_exploration", False)
+                and self.controller.write_admissible(
+                    request["write_gate"],
+                    request["window_evidence"].get("write_utility", 0.0),
+                    request["window_evidence"]["priority"],
+                    future_window_complete=True,
+                    priority_threshold=self.wake_config.controller_priority_threshold,
+                )
+            ]
+            if eligible:
+                priorities = torch.stack([
+                    request["window_evidence"]["priority"]
+                    for request in eligible
+                ])
+                selected = priorities.topk(
+                    min(
+                        len(eligible),
+                        min(4, self.tree.frontier_routing.config.max_writes_per_sequence),
+                    )
+                ).indices.cpu().tolist()
+            else:
+                selected = []
+            selected_requests = [eligible[index] for index in selected]
+            if self.config.allow_memory_writes:
+                persistent_flags = self._commit_delayed_writes_batch(
+                    sequence, selected_requests
+                )
+                for request, persistent in zip(
+                    selected_requests, persistent_flags
+                ):
+                    if not persistent:
+                        continue
+                    request["committed"] = True
+                    accepted_write_requests.append(request)
+                    outputs[request["event_index"]]["write_accepted"] = True
+            if not self.config.allow_memory_writes:
+                selected = []
+        pending_writes = [
+            request
+            for request in pending_writes
+            if request["ready_index"] >= event_count
+        ]
+        return {
+            "events": outputs,
+            "total_nll": total_nll,
+            "nll_per_event": total_nll / max(
+                event_count if compact else len(outputs),
+                1,
+            ),
+            "scalar_metrics": compact_metrics,
+            "pending_write_count": len(pending_writes),
+            "accepted_write_count": (
+                accepted_write_count
+                if int(self.controller.controller_version.detach().cpu()) >= 6
+                else len(accepted_write_requests)
+            ),
+            "local_accepted_write_count": local_accepted_write_count,
+            "probation_validation_count": sum(
+                bool(row.get("matched", False))
+                for row in probation_validations
+            ),
+            "probation_validations": probation_validations,
+            "promoted_write_count": len(promotions),
+            "promotions": promotions,
+            "probation_size": len(self.write_probation),
+            "write_probe_count": sum(
+                bool(event.get("write_probed", False)) for event in outputs
+            ),
+            "leaf_ids": list(self.tree.leaf_ids),
+        }
+
+    @torch.no_grad()
+    def predict_next_event(
+        self,
+        cpu_prefix: Mapping[str, Tensor],
+    ) -> Dict[str, Any]:
+        """Return a local-rate next-event forecast from the observed prefix.
+
+        The event type distribution is the normalized current Hawkes intensity.
+        The reported time uses the standard locally constant-rate expectation
+        ``1 / sum_d lambda_d``; it is deterministic and is not an exact Hawkes
+        sample. Exact simulation can be added with Ogata thinning if required.
+        """
+        prefix = self._move_sequence(cpu_prefix)
+        event_index = int(prefix["times"].numel())
+        if isinstance(self.encoder, CausalPrefixEncoder):
+            z_t = self.encoder(
+                prefix["times"],
+                prefix["types"],
+                event_index,
+                time_features=prefix.get(EVENT_TIME_FEATURES_KEY),
+            ).reshape(1, -1)
+        else:
+            z_t = self.encoder(
+                prefix["times"], prefix["types"], event_index
+            ).reshape(1, -1)
+        memory_output = self.tree(
+            z_t=z_t,
+            working_delta=self.tree.working_memory.delta,
+            decays=self.hawkes.decays,
+            update_memory_state=False,
+        )
+        params = memory_output["effective_params"].select(0)
+        if event_index == 0:
+            current_time = prefix["times"].new_tensor(0.0)
+        else:
+            current_time = prefix["times"][-1]
+        evaluation_time = current_time + current_time.new_tensor(1e-6)
+        intensity = self.hawkes.intensity_at_event(
+            {"times": prefix["times"], "types": prefix["types"]},
+            evaluation_time,
+            params,
+        )
+        total_rate = intensity.sum().clamp_min(1e-8)
+        probabilities = intensity / total_rate
+        expected_delta = total_rate.reciprocal()
+        return {
+            "predicted_time": float((current_time + expected_delta).cpu()),
+            "expected_delta": float(expected_delta.cpu()),
+            "predicted_type": int(probabilities.argmax().item()),
+            "type_probabilities": probabilities.cpu(),
+            "intensity": intensity.cpu(),
+            "responsibility": memory_output["r"][0].cpu(),
+        }
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Wake-only Memory Tree inference")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--times", type=float, nargs="+", required=True)
+    parser.add_argument("--types", type=int, nargs="+", required=True)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--no-write", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    inference = MemoryTreeInference.from_checkpoint(
+        args.checkpoint,
+        device=args.device,
+        inference_config=InferenceConfig(allow_memory_writes=not args.no_write),
+    )
+    sequence = {
+        "times": torch.tensor(args.times, dtype=torch.float32),
+        "types": torch.tensor(args.types, dtype=torch.long),
+    }
+    result = inference.run_sequence(sequence)
+    forecast = inference.predict_next_event(sequence)
+    print(result)
+    print(forecast)
+
+
+if __name__ == "__main__":
+    main()

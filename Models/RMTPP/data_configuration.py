@@ -62,7 +62,17 @@ class DataConfiguration:
         ).items():
             target = ensure_directory(base / "dws_{}".format(variant))
             outputs[variant] = {
-                split: write_json(target / "{}.json".format(split), records)
+                split: write_json(
+                    target / "{}.json".format(split),
+                    [
+                        {
+                            key: value
+                            for key, value in record.items()
+                            if key != "cluster"
+                        }
+                        for record in records
+                    ],
+                )
                 for split, records in splits.items()
             }
         return outputs

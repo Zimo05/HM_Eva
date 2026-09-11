@@ -280,6 +280,22 @@ class TrainingCheckpointMixin:
             "sleep_config": asdict(self.sleep_config),
             "structure_config": asdict(self.structure_config),
             "training_config": asdict(self.training_config),
+            "cl_protocol": {
+                "format_version": 1,
+                "config_path": self.training_config.cl_config_path,
+                "config_sha256": self.training_config.cl_config_sha256,
+                "benchmark_path": self.training_config.benchmark_manifest_path,
+                "benchmark_sha256": (
+                    self.training_config.benchmark_manifest_sha256
+                ),
+                "task_id": self.training_config.cl_task_id,
+                "previous_checkpoint": (
+                    self.training_config.cl_previous_checkpoint
+                ),
+                "config_override": bool(
+                    self.training_config.cl_config_override
+                ),
+            },
             "history": self.history,
             "validation_selection": {
                 "history": list(self.validation_history),

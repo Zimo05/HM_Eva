@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections import defaultdict
 
 from Train.TrainingComponents import *  # noqa: F403
@@ -120,6 +121,84 @@ class TrainingLoopMixin:
             for line in lines:
                 stream.write(f"{line}\n")
             stream.write("\n")
+
+    def _topology_events_path(self) -> Path:
+        """Resolve the append-only JSONL stream of committed topology edits."""
+        configured = getattr(
+            self.training_config,
+            "topology_events_path",
+            None,
+        )
+        if configured:
+            return Path(configured)
+        checkpoint = Path(self.training_config.checkpoint_path)
+        return checkpoint.parent / "topology_events.jsonl"
+
+    @staticmethod
+    def _topology_event_value(value: Any) -> Any:
+        """Convert transaction fields into stable JSON-compatible values."""
+        if torch.is_tensor(value):
+            return value.detach().cpu().tolist()
+        if isinstance(value, Mapping):
+            return {
+                str(key): TrainingLoopMixin._topology_event_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (tuple, list)):
+            return [
+                TrainingLoopMixin._topology_event_value(item)
+                for item in value
+            ]
+        if isinstance(value, Path):
+            return str(value)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        return str(value)
+
+    def _write_topology_events(
+        self,
+        epoch: int,
+        transaction: Mapping[str, Any] | None,
+    ) -> None:
+        """Persist only committed topology actions as one JSON object per line."""
+        if not isinstance(transaction, Mapping):
+            return
+        actions = transaction.get("actions", ())
+        if not isinstance(actions, (tuple, list)):
+            return
+        committed = [
+            action for action in actions
+            if isinstance(action, Mapping)
+            and action.get("action") in {
+                "split", "merge", "topology_prune"
+            }
+        ]
+        if not committed:
+            return
+        path = self._topology_events_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        configured_task = getattr(self.training_config, "cl_task_id", None)
+        task_id = 0 if configured_task is None else int(configured_task)
+        with path.open("a", encoding="utf-8") as stream:
+            for action in committed:
+                event = {
+                    **{
+                        str(key): self._topology_event_value(value)
+                        for key, value in action.items()
+                    },
+                    "global_epoch": int(epoch),
+                    "task_id": task_id,
+                    "committed": True,
+                }
+                stream.write(
+                    json.dumps(
+                        event,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
 
     def _calibrate_controller_checkpoint(
         self,
@@ -1027,6 +1106,7 @@ class TrainingLoopMixin:
                 )
                 self.sleep_state["accepted_writes_since_sleep"] = 0
                 transaction = sleep_result.get("transaction") or {}
+                self._write_topology_events(epoch, transaction)
                 split_nodes = {
                     action.get("node")
                     for action in transaction.get("actions", [])

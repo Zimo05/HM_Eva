@@ -108,7 +108,10 @@ def _continual_hm_command(
     )
     cold_start_epochs = 0 if previous is not None else (1 if args.smoke else 5)
     initial_checkpoint = target / "checkpoint" / f"initial_seed{args.seed}.pt"
+    topology_log_path = target / "topology_diagnostics.log"
     topology_events_path = target / "topology_events.jsonl"
+    cl_config_path = target / "cl_config.json"
+    benchmark_manifest_path = target / "benchmark_protocol.json"
     command = [
         args.python_executable or sys.executable,
         "-m",
@@ -134,13 +137,23 @@ def _continual_hm_command(
         "--cold-start-epochs",
         str(cold_start_epochs),
         "--unified-topology-log-path",
+        str(topology_log_path),
+        "--topology-events-path",
         str(topology_events_path),
+        "--cl-config",
+        str(cl_config_path),
+        "--benchmark-manifest",
+        str(benchmark_manifest_path),
+        "--cl-task-id",
+        str(task),
     ]
     if previous is None:
         command += ["--initial-checkpoint-output", str(initial_checkpoint)]
     if previous is not None:
         command += [
             "--resume",
+            str(previous),
+            "--cl-previous-checkpoint",
             str(previous),
         ]
     if strategy in {
@@ -190,6 +203,7 @@ def _continual_cl_config(args, protocol: CLProtocol, strategy: str) -> dict[str,
             "learning_rate": 1e-3,
             "weight_decay": 1e-5,
             "grad_clip": 5.0,
+            "optimizer_impl": "auto",
             "sleep_every": 1,
             "evaluation_ablation": strategy,
             "controller_target_version": 5,

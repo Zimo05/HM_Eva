@@ -79,11 +79,11 @@ J077,continual:continual:RMTPP:sequential:17:,evaluate_continual_RMTPP_sequentia
 J078,continual:continual:RMTPP:sequential:27:,evaluate_continual_RMTPP_sequential.py,continual,RMTPP,sequential,27,Datasets/CL/hm_continual_v2,pending,,
 J079,continual:continual:RMTPP:sequential:37:,evaluate_continual_RMTPP_sequential.py,continual,RMTPP,sequential,37,Datasets/CL/hm_continual_v2,pending,,
 J080,continual:continual:RMTPP:sequential:47:,evaluate_continual_RMTPP_sequential.py,continual,RMTPP,sequential,47,Datasets/CL/hm_continual_v2,pending,,
-J081,continual:continual:RMTPP:replay:7:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,7,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_7,J071
-J082,continual:continual:RMTPP:replay:17:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,17,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_17,J072
-J083,continual:continual:RMTPP:replay:27:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,27,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_27,J073
-J084,continual:continual:RMTPP:replay:37:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,37,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_37,J074
-J085,continual:continual:RMTPP:replay:47:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,47,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_47,J075
+J081,continual:continual:RMTPP:replay:7:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,7,Datasets/CL/hm_continual_v2,pending,#NAME?,J071
+J082,continual:continual:RMTPP:replay:17:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,17,Datasets/CL/hm_continual_v2,pending,#NAME?,J072
+J083,continual:continual:RMTPP:replay:27:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,27,Datasets/CL/hm_continual_v2,pending,#NAME?,J073
+J084,continual:continual:RMTPP:replay:37:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,37,Datasets/CL/hm_continual_v2,pending,#NAME?,J074
+J085,continual:continual:RMTPP:replay:47:,evaluate_continual_RMTPP_replay.py,continual,RMTPP,replay,47,Datasets/CL/hm_continual_v2,pending,#NAME?,J075
 J086,continual:continual:THP:sequential:7:,evaluate_continual_THP_sequential.py,continual,THP,sequential,7,Datasets/CL/hm_continual_v2,pending,,
 J087,continual:continual:THP:sequential:17:,evaluate_continual_THP_sequential.py,continual,THP,sequential,17,Datasets/CL/hm_continual_v2,pending,,
 J088,continual:continual:THP:sequential:27:,evaluate_continual_THP_sequential.py,continual,THP,sequential,27,Datasets/CL/hm_continual_v2,pending,,
@@ -153,8 +153,8 @@ J151,continual:continual:HM:no_working:27:,evaluate_continual_HM_no_working.py,c
 J152,continual:continual:HM:no_episodic:27:,evaluate_continual_HM_no_episodic.py,continual,HM,no_episodic,27,Datasets/CL/hm_continual_v2,pending,,
 J153,continual:continual:HM:fixed_topology:27:,evaluate_continual_HM_fixed_topology.py,continual,HM,fixed_topology,27,Datasets/CL/hm_continual_v2,pending,,
 J154,continual:continual:HM:no_sleep:27:,evaluate_continual_HM_no_sleep.py,continual,HM,no_sleep,27,Datasets/CL/hm_continual_v2,pending,,
-J155,continual:continual:THP:replay:7:,evaluate_continual_THP_replay.py,continual,THP,replay,7,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_7,J071
-J156,continual:continual:THP:replay:17:,evaluate_continual_THP_replay.py,continual,THP,replay,17,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_17,J072
-J157,continual:continual:THP:replay:27:,evaluate_continual_THP_replay.py,continual,THP,replay,27,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_27,J073
-J158,continual:continual:THP:replay:37:,evaluate_continual_THP_replay.py,continual,THP,replay,37,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_37,J074
-J159,continual:continual:THP:replay:47:,evaluate_continual_THP_replay.py,continual,THP,replay,47,Datasets/CL/hm_continual_v2,pending,--hm-resource-root results/continual/HM/full/seed_47,J075
+J155,continual:continual:THP:replay:7:,evaluate_continual_THP_replay.py,continual,THP,replay,7,Datasets/CL/hm_continual_v2,pending,#NAME?,J071
+J156,continual:continual:THP:replay:17:,evaluate_continual_THP_replay.py,continual,THP,replay,17,Datasets/CL/hm_continual_v2,pending,#NAME?,J072
+J157,continual:continual:THP:replay:27:,evaluate_continual_THP_replay.py,continual,THP,replay,27,Datasets/CL/hm_continual_v2,pending,#NAME?,J073
+J158,continual:continual:THP:replay:37:,evaluate_continual_THP_replay.py,continual,THP,replay,37,Datasets/CL/hm_continual_v2,pending,#NAME?,J074
+J159,continual:continual:THP:replay:47:,evaluate_continual_THP_replay.py,continual,THP,replay,47,Datasets/CL/hm_continual_v2,pending,#NAME?,J075

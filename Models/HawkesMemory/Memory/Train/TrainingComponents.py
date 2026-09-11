@@ -414,6 +414,7 @@ class TrainingConfig:
     # Plain-text per-epoch Split candidate diagnostics.  When omitted, the
     # path is derived from ``checkpoint_path`` with a descriptive suffix.
     unified_topology_log_path: Optional[str] = None
+    topology_events_path: Optional[str] = None
     # At the end of each train() call, persist a compact structured metrics
     # log and render one multi-panel PNG beside the checkpoint by default.
     plot_after_training: bool = True
@@ -428,6 +429,14 @@ class TrainingConfig:
     controller_train_heads: tuple[str, ...] = ("adapt", "retrieve", "write")
     controller_write_ranking: bool = False
     frozen_state_sha256: Optional[str] = None
+    # Immutable continual-learning protocol provenance.
+    cl_config_path: Optional[str] = None
+    cl_config_sha256: Optional[str] = None
+    benchmark_manifest_path: Optional[str] = None
+    benchmark_manifest_sha256: Optional[str] = None
+    cl_task_id: Optional[int] = None
+    cl_previous_checkpoint: Optional[str] = None
+    cl_config_override: bool = False
 
 
 def _differentiable_merge_settings(

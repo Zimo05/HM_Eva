@@ -23,8 +23,31 @@ def main() -> None:
                 errors.append("CUDA was requested but is unavailable")
         except ImportError:
             pass
-    required = [Path(__file__).resolve().parents[1] / "Models", Path(__file__).resolve().parents[1] / "Datasets"]
-    errors.extend(f"missing project directory: {path}" for path in required if not path.is_dir())
+    project_root = Path(__file__).resolve().parents[1]
+    required_directories = [
+        project_root / "Models",
+        project_root / "Datasets",
+        *(project_root / "Models" / name for name in (
+            "RMTPP", "THP", "TPP-LLM", "FullyNN", "EasyTPP",
+        )),
+    ]
+    errors.extend(
+        f"missing project directory: {path}"
+        for path in required_directories
+        if not path.is_dir()
+    )
+    required_files = [
+        project_root / "_data_configuration_common.py",
+        project_root / "Models" / "RMTPP" / "run_experiment.py",
+        project_root / "Models" / "THP" / "run_experiment.py",
+        project_root / "Models" / "TPP-LLM" / "scripts" / "train_tpp_llm.py",
+        project_root / "Models" / "FullyNN" / "run_experiment.py",
+    ]
+    errors.extend(
+        f"missing baseline entrypoint: {path}"
+        for path in required_files
+        if not path.is_file()
+    )
     if errors:
         for error in errors:
             print(f"ERROR: {error}")

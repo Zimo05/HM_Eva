@@ -413,33 +413,6 @@ def _native_metric(model: str, output: Path) -> dict:
     }
 
 
-def _replay_law_lookup(data_root: Path) -> dict[tuple[int, int], str]:
-    """Read optional oracle labels used only to balance replay selection.
-
-    The labels never enter a model-facing replay CSV.  They only identify the
-    deterministic task/law strata used by the reservoir.  A missing manifest
-    is valid for small legacy fixtures; those rows fall into ``_unknown``.
-    """
-
-    manifest = data_root / "ground_truth_manifest.csv"
-    if not manifest.is_file():
-        return {}
-    lookup: dict[tuple[int, int], str] = {}
-    with manifest.open("r", newline="", encoding="utf-8-sig") as handle:
-        for row in csv.DictReader(handle):
-            if str(row.get("split", "")) != "train":
-                continue
-            try:
-                task = int(row["task_id"])
-                split_index = int(row["split_index"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            regime = row.get("regime_id")
-            if regime not in (None, ""):
-                lookup[(task, split_index)] = str(regime)
-    return lookup
-
-
 def _serialized_replay_row(row: dict[str, str]) -> bytes:
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(
@@ -451,78 +424,54 @@ def _serialized_replay_row(row: dict[str, str]) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
-def _select_balanced_replay_rows(
-    candidates: dict[int, dict[str, list[tuple[int, dict[str, str], int]]]],
+def _select_task_balanced_replay_rows(
+    candidates: dict[int, list[tuple[int, dict[str, str], int]]],
     budget: int,
     header_bytes: int,
     selection_metadata: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
-    """Select a deterministic task/law-balanced byte reservoir.
+    """Select a deterministic task-balanced byte reservoir.
 
-    Selection is fair at two levels: choose the task with the least selected
-    bytes, then the law within that task with the least selected bytes.  Rows
-    retain source order within each stratum, and the final output is sorted by
-    source identity so repeated runs are byte-identical.
+    Replay is a model-facing training resource, so its selection cannot use
+    ground-truth law labels.  Tasks compete by selected serialized bytes and
+    retain source order within each task.  The final output is sorted by task
+    and source identity so repeated runs are byte-identical.
     """
 
-    group_positions = {
-        (task, law): 0
-        for task, groups in candidates.items()
-        for law in groups
-    }
+    positions = {task: 0 for task in candidates}
     task_bytes = {task: 0 for task in candidates}
-    group_bytes = {
-        (task, law): 0
-        for task, groups in candidates.items()
-        for law in groups
-    }
     remaining = max(0, int(budget) - int(header_bytes))
-    selected: list[tuple[int, str, int, dict[str, str]]] = []
+    selected: list[tuple[int, int, dict[str, str]]] = []
 
     while remaining > 0:
-        fitting_by_task: dict[
-            int, list[tuple[str, int, tuple[int, dict[str, str], int]]]
-        ] = {}
+        fitting_by_task: dict[int, tuple[int, dict[str, str], int]] = {}
         for task in sorted(candidates):
-            for law in sorted(candidates[task]):
-                entries = candidates[task][law]
-                position = group_positions[(task, law)]
-                # If the next source row is too large, skip it permanently;
-                # remaining bytes only decrease, so it can never fit later.
-                while position < len(entries) and entries[position][2] > remaining:
-                    position += 1
-                group_positions[(task, law)] = position
-                if position < len(entries):
-                    fitting_by_task.setdefault(task, []).append(
-                        (law, position, entries[position])
-                    )
+            entries = candidates[task]
+            position = positions[task]
+            # If the next source row is too large, skip it permanently;
+            # remaining bytes only decrease, so it can never fit later.
+            while position < len(entries) and entries[position][2] > remaining:
+                position += 1
+            positions[task] = position
+            if position < len(entries):
+                fitting_by_task[task] = entries[position]
         if not fitting_by_task:
             break
         task = min(fitting_by_task, key=lambda value: (task_bytes[value], value))
-        law, position, entry = min(
-            fitting_by_task[task],
-            key=lambda item: (group_bytes[(task, item[0])], item[0]),
-        )
-        source_index, row, row_bytes = entry
-        selected.append((task, law, source_index, row))
-        group_positions[(task, law)] = position + 1
+        source_index, row, row_bytes = fitting_by_task[task]
+        selected.append((task, source_index, row))
+        positions[task] += 1
         task_bytes[task] += row_bytes
-        group_bytes[(task, law)] += row_bytes
         remaining -= row_bytes
 
-    selected.sort(key=lambda item: (item[0], item[1], item[2]))
+    selected.sort(key=lambda item: (item[0], item[1]))
     if selection_metadata is not None:
         selection_metadata.update({
             "header_bytes": int(header_bytes),
             "selected_rows": len(selected),
             "task_bytes": {str(task): int(value) for task, value in sorted(task_bytes.items())},
-            "task_law_bytes": {
-                f"{task}:{law}": int(value)
-                for (task, law), value in sorted(group_bytes.items())
-                if value
-            },
         })
-    return [row for _, _, _, row in selected]
+    return [row for _, _, row in selected]
 
 
 def _make_replay_buffer(
@@ -533,11 +482,12 @@ def _make_replay_buffer(
     protocol: CLProtocol | None = None,
     selection_metadata: dict[str, Any] | None = None,
 ) -> tuple[Path, int]:
-    """Build a byte-bounded, task/law-balanced replay CSV.
+    """Build a byte-bounded, task-balanced replay CSV.
 
     The small legacy helper remains usable for isolated ``task_XX/train.csv``
-    fixtures.  Production runs pass the loaded protocol and use the optional
-    ground-truth manifest solely for law strata.
+    fixtures.  Production runs pass the loaded protocol.  No ground-truth
+    manifest is consulted because replay selection is part of the learner's
+    training path.
     """
 
     legacy_layout = protocol is None and not (
@@ -546,8 +496,7 @@ def _make_replay_buffer(
     if protocol is None and not legacy_layout:
         protocol = continual_protocol(data_root)
     output.parent.mkdir(parents=True, exist_ok=True)
-    candidates: dict[int, dict[str, list[tuple[int, dict[str, str], int]]]] = {}
-    law_lookup = _replay_law_lookup(data_root)
+    candidates: dict[int, list[tuple[int, dict[str, str], int]]] = {}
     header_bytes = len("event_times,event_types\r\n".encode("utf-8"))
     task_ids = (
         list(range(through_task + 1))
@@ -567,13 +516,11 @@ def _make_replay_buffer(
                     "event_times": row.get("event_times", ""),
                     "event_types": row.get("event_types", ""),
                 }
-                task_groups = candidates.setdefault(task, {})
-                law = law_lookup.get((task, source_index), "_unknown")
-                task_groups.setdefault(law, []).append(
+                candidates.setdefault(task, []).append(
                     (source_index, row, len(_serialized_replay_row(row)))
                 )
                 source_index += 1
-    rows = _select_balanced_replay_rows(
+    rows = _select_task_balanced_replay_rows(
         candidates,
         int(budget),
         header_bytes,
@@ -594,17 +541,17 @@ def _write_adaptation_prefix(
     output: Path,
     exposure_events: int,
 ) -> bool:
-    """Write one causal support prefix for a baseline adaptation run.
+    """Write exactly ``exposure_events`` observed support events.
 
-    A point-process training loss needs one event as context before it can
-    supervise the first transition.  Therefore a curve point labelled K uses
-    K observed support events plus the following event as the first training
-    target; the reported exposure remains K.
+    The benchmark exposure axis counts observed support events.  A one-event
+    prefix is therefore intentionally valid even though it contains no
+    supervised transition; the caller records that point as a no-update
+    baseline instead of silently changing its meaning to ``K + 1``.
     """
 
     if exposure_events <= 0:
         raise ValueError("adaptation prefix exposure_events must be positive")
-    target_events = int(exposure_events) + 1
+    target_events = int(exposure_events)
     parts: list[tuple[list[float], list[int]]] = []
     remaining = target_events
     with source.open("r", newline="", encoding="utf-8-sig") as handle:
@@ -648,21 +595,21 @@ def _run_baseline_adaptation(
     protocol: CLProtocol,
     task: int,
     pre_checkpoint: Path,
-) -> list[AdaptationRecord]:
+) -> tuple[list[AdaptationRecord], list[dict[str, Any]]]:
     """Run baseline K-shot adaptation from a fresh copy of the pre-task model."""
 
     spec = protocol.adaptation(task)
     if spec is None:
-        return []
+        return [], []
     if not pre_checkpoint.is_file():
         raise FileNotFoundError(f"baseline adaptation checkpoint required: {pre_checkpoint}")
 
     adapted_nll: dict[int, float | None] = {}
+    status_rows: list[dict[str, Any]] = []
     adaptation_root = target / "native" / f"task_{task:02d}" / "adaptation"
     prepared_root = target / "prepared" / f"task_{task:02d}_adaptation"
     query_path = Path(spec["query"])
-    for raw_k in spec["K"]:
-        K = int(raw_k)
+    for K in sorted(int(raw_k) for raw_k in spec["K"]):
         output = adaptation_root / f"K_{K:02d}"
         if K == 0:
             # The K=0 point is evaluated on the fixed query from the unchanged
@@ -677,10 +624,40 @@ def _run_baseline_adaptation(
                 protocol=protocol,
             )
             evaluate_only = True
+            status = "baseline"
         else:
             support_path = prepared_root / f"support_K_{K:02d}.csv"
             if not _write_adaptation_prefix(Path(spec["support"]), support_path, K):
                 adapted_nll[K] = None
+                status_rows.append({
+                    "protocol": "baseline",
+                    "task_id": int(task),
+                    "K": K,
+                    "status": "unavailable_missing_support",
+                    "observed_events": K,
+                    "train_events": 0,
+                })
+                continue
+            if K == 1:
+                # There is no supervised transition in a one-event prefix.
+                # Reusing the K=0 query evaluation is the exact zero-gradient
+                # result and avoids asking a native trainer to fabricate a
+                # target event.
+                adapted_nll[K] = adapted_nll.get(0)
+                output.mkdir(parents=True, exist_ok=True)
+                write_json(output / "metrics.json", {
+                    "nll_per_event": adapted_nll[K],
+                    "status": "no_update_insufficient_transition",
+                    "observed_events": K,
+                })
+                status_rows.append({
+                    "protocol": "baseline",
+                    "task_id": int(task),
+                    "K": K,
+                    "status": "no_update_insufficient_transition",
+                    "observed_events": K,
+                    "train_events": 0,
+                })
                 continue
             prepared = prepare_continual_baseline_dataset(
                 model,
@@ -692,8 +669,19 @@ def _run_baseline_adaptation(
                 train_csvs=[support_path],
                 current_task=task,
                 validation_csv=support_path,
+                train_min_events=1,
+                validation_min_events=1,
             )
             evaluate_only = False
+            status = "trained"
+        status_rows.append({
+            "protocol": "baseline",
+            "task_id": int(task),
+            "K": K,
+            "status": status,
+            "observed_events": K,
+            "train_events": K,
+        })
         command, cwd, env = _baseline_command(
             model,
             args,
@@ -711,7 +699,7 @@ def _run_baseline_adaptation(
         adapted_nll[K] = _native_metric(model, output).get("nll_per_event")
 
     pre_nll = adapted_nll.get(0)
-    return [
+    records = [
         AdaptationRecord(
             task_id=int(task),
             K=K,
@@ -721,6 +709,7 @@ def _run_baseline_adaptation(
         )
         for K in sorted(int(value) for value in spec["K"])
     ]
+    return records, status_rows
 
 
 def _baseline_cl_summary(
@@ -825,6 +814,7 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
         raise FileNotFoundError(f"resume checkpoint required for task-start: {previous}")
     stage_rows = []
     adaptation_records: list[AdaptationRecord] = []
+    adaptation_status_rows: list[dict[str, Any]] = []
     replay_rows = []
     prediction_target = target / "predictions.jsonl.gz"
     with gzip.open(prediction_target, "wt", encoding="utf-8") as combined_predictions:
@@ -848,19 +838,27 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                 run_command(command, cwd, env, target / "logs" / f"task_{task:02d}_scratch.log")
                 stage_rows.append({"task": task, "evaluation": "scratch_pre", **_native_metric(model, scratch_output)})
             if pre_checkpoint is not None and protocol.adaptation(task) is not None:
-                adaptation_records.extend(
-                    _run_baseline_adaptation(
-                        model,
-                        strategy,
-                        args,
-                        target,
-                        data_root,
-                        protocol,
-                        task,
-                        pre_checkpoint,
-                    )
+                records, status_rows = _run_baseline_adaptation(
+                    model,
+                    strategy,
+                    args,
+                    target,
+                    data_root,
+                    protocol,
+                    task,
+                    pre_checkpoint,
                 )
+                adaptation_records.extend(records)
+                adaptation_status_rows.extend(status_rows)
             train_tasks = list(protocol.task_ids_between(first_protocol_task, task)) if strategy == "joint" else [task]
+            validation_csvs = (
+                # The protocol gives every task the same fixed validation
+                # sequence count, so this union preserves task-level coverage
+                # without consulting oracle law labels.
+                [protocol.val_path(validation_task) for validation_task in train_tasks]
+                if strategy == "joint"
+                else None
+            )
             replay_csvs = []
             task_index = protocol.task_ids.index(task)
             if strategy == "replay" and task_index > 0:
@@ -887,10 +885,6 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                         replay_selection.get("task_bytes", {}),
                         sort_keys=True,
                     ),
-                    "task_law_bytes": json.dumps(
-                        replay_selection.get("task_law_bytes", {}),
-                        sort_keys=True,
-                    ),
                 })
             prepared = prepare_continual_baseline_dataset(
                 model,
@@ -899,6 +893,7 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                 train_tasks,
                 replay_csvs=replay_csvs,
                 protocol=protocol,
+                validation_csvs=validation_csvs,
             )
             train_output = task_root / "train"
             command, cwd, env = _baseline_command(model, args, prepared, train_output, previous if strategy != "joint" else None, False)
@@ -952,11 +947,20 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                 handle,
                 fieldnames=(
                     "task", "budget_bytes", "actual_bytes", "selected_rows",
-                    "task_bytes", "task_law_bytes",
+                    "task_bytes",
                 ),
             )
             writer.writeheader()
             writer.writerows(replay_rows)
+    if adaptation_status_rows:
+        write_csv(
+            target / "adaptation_status.csv",
+            adaptation_status_rows,
+            fieldnames=(
+                "protocol", "task_id", "K", "status",
+                "observed_events", "train_events",
+            ),
+        )
     summary = _baseline_cl_summary(stage_rows, protocol, adaptation_records)
     cl_report = summary["cl_metrics"]
     write_csv(target / "frozen_anchor_matrix.csv", cl_report["frozen_anchor_matrix"])

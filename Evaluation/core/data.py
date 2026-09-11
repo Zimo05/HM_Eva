@@ -151,13 +151,20 @@ def _continual_split_path(
     return protocol.split_path(task, split)
 
 
-def _read_continual_csv(path: Path, event_dim: int) -> list[dict[str, Any]]:
+def _read_continual_csv(
+    path: Path,
+    event_dim: int,
+    *,
+    min_events: int = 2,
+) -> list[dict[str, Any]]:
+    if min_events < 1:
+        raise ValueError("min_events must be positive")
     records = []
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
         for index, row in enumerate(csv.DictReader(handle)):
             times = [float(value) for value in json.loads(row["event_times"])]
             types = [int(value) for value in json.loads(row["event_types"])]
-            if len(times) != len(types) or len(times) < 2:
+            if len(times) != len(types) or len(times) < min_events:
                 raise ValueError(f"invalid continual sequence in {path} row {index + 2}")
             if any(event_type < 0 or event_type >= event_dim for event_type in types):
                 raise ValueError(
@@ -188,6 +195,9 @@ def prepare_continual_baseline_dataset(
     train_csvs: list[Path] | None = None,
     current_task: int | None = None,
     validation_csv: Path | None = None,
+    validation_csvs: list[Path] | None = None,
+    train_min_events: int = 2,
+    validation_min_events: int = 2,
 ) -> Path:
     """Create private task data in each baseline's native on-disk schema."""
     if protocol is None:
@@ -207,7 +217,13 @@ def prepare_continual_baseline_dataset(
         if not train_paths:
             raise ValueError("train_csvs cannot be empty")
     for train_path in train_paths:
-        train.extend(_read_continual_csv(train_path, event_dim))
+        train.extend(
+            _read_continual_csv(
+                train_path,
+                event_dim,
+                min_events=train_min_events,
+            )
+        )
     for replay_path in replay_csvs or []:
         train.extend(_read_continual_csv(replay_path, event_dim))
     if current_task is None:
@@ -216,10 +232,26 @@ def prepare_continual_baseline_dataset(
         current = train_tasks[-1]
     else:
         current = int(current_task)
-    dev = _read_continual_csv(
-        validation_csv or _continual_split_path(data_root, current, "val", protocol),
-        event_dim,
-    )
+    if validation_csv is not None and validation_csvs is not None:
+        raise ValueError("validation_csv and validation_csvs are mutually exclusive")
+    if validation_csvs is None:
+        validation_paths = [
+            validation_csv
+            or _continual_split_path(data_root, current, "val", protocol)
+        ]
+    else:
+        validation_paths = [Path(path).expanduser().resolve() for path in validation_csvs]
+        if not validation_paths:
+            raise ValueError("validation_csvs cannot be empty")
+    dev = []
+    for validation_path in validation_paths:
+        dev.extend(
+            _read_continual_csv(
+                validation_path,
+                event_dim,
+                min_events=validation_min_events,
+            )
+        )
     test = _read_continual_csv(
         eval_csv or _continual_split_path(
             data_root, current, "test", protocol

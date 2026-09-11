@@ -1,18 +1,18 @@
-"""Frozen continual-learning evaluation for Hawkes Memory Tree checkpoints.
+"""Protocol-separated continual-learning evaluation for Hawkes Memory Tree checkpoints.
 
 The ordinary :mod:`Evaluate` entry point evaluates one flat CSV with one
 train/validation/test split.  CL has a different contract: checkpoint ``C_t``
 is evaluated on its current task, the next task before learning, and the
-independent frozen anchor banks.  This module intentionally contains only the
-main frozen CL benchmark.  Mechanism ablations and online-memory diagnostics
-belong in separate evaluators.
+independent frozen anchor banks.  The primary benchmark runs frozen,
+fast-adapt, and online-write inference as separate state transitions.
+Mechanism ablations remain separate memory-view runs.
 
 Run from the repository root with ``PYTHONPATH`` containing both the project
 root and ``Memory``::
 
     PYTHONPATH="$PWD:$PWD/Memory" python -u -m EvaluateCL \
-      --data-root "$PWD/Data/CL/Data" \
-      --checkpoint-dir "$PWD/Data/CL/runs/cl_dws_aligned/memory_checkpoints" \
+      --data-root "$PWD/Datasets/CL/hm_continual_v2" \
+      --checkpoint-dir "/path/to/continual/checkpoints" \
       --output-dir "$PWD/Memory/Eval/CL" \
       --device cuda
 """
@@ -23,6 +23,7 @@ import argparse
 import ast
 import csv
 import hashlib
+import io
 import json
 import math
 import re
@@ -39,25 +40,63 @@ import torch.nn.functional as F
 try:
     from Evaluate import (
         SUPPORTED_ROUTER_KINDS,
+        _curve_summary,
         _jsonable,
+        adaptation_curve_rows,
         dataset_fingerprint,
+        run_variant,
         run_variant_compact,
         write_csv,
     )
 except ModuleNotFoundError:
     from Memory.Evaluate import (
         SUPPORTED_ROUTER_KINDS,
+        _curve_summary,
         _jsonable,
+        adaptation_curve_rows,
         dataset_fingerprint,
+        run_variant,
         run_variant_compact,
         write_csv,
     )
 
-from Train.Inference import InferenceConfig, MemoryTreeInference
+try:
+    from Evaluation.core.cl_metrics import (
+        AdaptationRecord,
+        CLMetricEngine,
+        FrozenAnchorRecord,
+        HMStateRecord,
+        TaskBoundaryRecord,
+        build_frozen_anchor_matrix,
+        compute_retention_metrics,
+        compute_task_boundary_metrics,
+    )
+    from Evaluation.core.cl_protocol import CLProtocol
+except ModuleNotFoundError:
+    from core.cl_metrics import (
+        AdaptationRecord,
+        CLMetricEngine,
+        FrozenAnchorRecord,
+        HMStateRecord,
+        TaskBoundaryRecord,
+        build_frozen_anchor_matrix,
+        compute_retention_metrics,
+        compute_task_boundary_metrics,
+    )
+    from core.cl_protocol import CLProtocol
+
+from Train.Inference import (
+    EvaluationProtocol,
+    InferenceConfig,
+    MemoryTreeInference,
+    inference_config_for_protocol,
+)
 
 
-TASK_RE = re.compile(r"^task_(\d+)$")
-CHECKPOINT_RE = re.compile(r"^task_(\d+)\.pt$")
+BEST_CHECKPOINT_RE = re.compile(r"^task_(\d+)_best\.pt$")
+LEGACY_CHECKPOINT_RE = re.compile(r"^task_(\d+)\.pt$")
+# Compatibility name for callers that imported the old exact-name matcher.
+CHECKPOINT_RE = LEGACY_CHECKPOINT_RE
 SCALAR_METRICS = (
     "events",
     "sequences",
@@ -65,6 +104,29 @@ SCALAR_METRICS = (
     "accuracy",
     "local_time_mae",
 )
+CL_PROTOCOL_VARIANTS = (
+    "frozen/full",
+    "fast_adapt/full",
+    "online_write/full",
+)
+LEGACY_CL_VARIANT_MAP = {
+    # The historical name was misleading: its implementation enabled
+    # sequence-local Working Memory adaptation.  Preserve that behavior under
+    # the explicit FAST_ADAPT protocol when old scripts are resumed.
+    "full_frozen": "fast_adapt/full",
+    "full_online": "online_write/full",
+    "no_working": "frozen/full",
+}
+
+
+def _canonical_variant(variant: str) -> str:
+    canonical = LEGACY_CL_VARIANT_MAP.get(variant, variant)
+    if canonical not in CL_PROTOCOL_VARIANTS:
+        raise ValueError(
+            f"unsupported CL protocol variant {variant!r}; expected one of "
+            f"{CL_PROTOCOL_VARIANTS}"
+        )
+    return canonical
 
 
 @dataclass(frozen=True)
@@ -77,6 +139,7 @@ class EvaluationSet:
     task_id: int | None = None
     regime_id: str | None = None
     stage_label: str | None = None
+    evaluation_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,7 +219,7 @@ def _load_cl_dataset(
 
 
 def _normalise_data_root(path: Path) -> Path:
-    """Accept either ``Data/CL`` or the generated ``Data/CL/Data`` root."""
+    """Accept the canonical generated root and the older nested layout."""
 
     path = path.expanduser()
     if (path / "task_00").is_dir():
@@ -167,14 +230,13 @@ def _normalise_data_root(path: Path) -> Path:
     return path
 
 
-def _discover_task_sets(data_root: Path) -> dict[int, EvaluationSet]:
+def _discover_task_sets(
+    data_root: Path,
+    protocol: CLProtocol,
+) -> dict[int, EvaluationSet]:
     result: dict[int, EvaluationSet] = {}
-    for directory in sorted(data_root.glob("task_*")):
-        match = TASK_RE.fullmatch(directory.name)
-        test_path = directory / "test.csv"
-        if match is None or not test_path.is_file():
-            continue
-        task_id = int(match.group(1))
+    for task_id in protocol.task_ids:
+        test_path = protocol.split_path(task_id, "test")
         result[task_id] = EvaluationSet(
             name=f"task_{task_id:02d}_test",
             kind="task_test",
@@ -185,76 +247,84 @@ def _discover_task_sets(data_root: Path) -> dict[int, EvaluationSet]:
 
 
 def _discover_checkpoints(checkpoint_dir: Path) -> dict[int, Path]:
-    result: dict[int, Path] = {}
+    best: dict[int, Path] = {}
+    legacy: dict[int, Path] = {}
     for path in sorted(checkpoint_dir.glob("task_*.pt")):
-        match = CHECKPOINT_RE.fullmatch(path.name)
-        if match is not None and path.is_file():
-            result[int(match.group(1))] = path
-    return result
+        if not path.is_file():
+            continue
+        best_match = BEST_CHECKPOINT_RE.fullmatch(path.name)
+        if best_match is not None:
+            best[int(best_match.group(1))] = path
+            continue
+        legacy_match = LEGACY_CHECKPOINT_RE.fullmatch(path.name)
+        if legacy_match is not None:
+            legacy[int(legacy_match.group(1))] = path
+    return {
+        task_id: best.get(task_id, legacy_path)
+        for task_id, legacy_path in legacy.items()
+    } | best
 
 
-def _read_stage_metadata(data_root: Path) -> dict[int, dict[str, Any]]:
+def _read_stage_metadata(
+    protocol: CLProtocol,
+) -> dict[int, dict[str, Any]]:
     """Read labels from the oracle manifest; never use its parameters."""
 
-    path = data_root / "stream_manifest.csv"
-    if not path.is_file():
-        return {}
     metadata: dict[int, dict[str, Any]] = {}
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        for row in csv.DictReader(handle):
-            raw_task = str(row.get("task_id", ""))
-            if not raw_task.isdigit():
-                continue
-            task_id = int(raw_task)
-            metadata.setdefault(task_id, {
-                "stage_label": row.get("stage_label"),
-                "regime_id": row.get("regime_id"),
-                "shift_type": row.get("shift_type"),
-                "recurrence_of": row.get("recurrence_of") or None,
-                "regime_weights": row.get("regime_weights"),
-            })
+    for task_id in protocol.task_ids:
+        task = protocol.task(task_id)
+        weights = dict(task.regime_weights)
+        metadata[task_id] = {
+            "stage_label": task.stage_label,
+            "regime_id": next(iter(weights)) if len(weights) == 1 else None,
+            "shift_type": task.shift_type,
+            "recurrence_of": task.recurrence_of,
+            "paired_control": task.paired_control,
+            "regime_weights": json.dumps(weights, separators=(",", ":")),
+        }
     return metadata
 
 
-def _first_seen_regimes(stage_metadata: Mapping[int, Mapping[str, Any]]) -> dict[str, int]:
-    """Return the first task in which each pure law is present.
-
-    A mixture task contributes every component in ``regime_weights``.  This
-    makes seen-law averages different from a naive average over task IDs:
-    recurrence of A_1 must not count as a newly seen law.
-    """
-
-    first_seen: dict[str, int] = {}
-    for task_id in sorted(stage_metadata):
-        metadata = stage_metadata[task_id]
-        regimes: list[str] = []
-        raw_weights = metadata.get("regime_weights")
-        if raw_weights:
-            try:
-                parsed = json.loads(str(raw_weights))
-                if isinstance(parsed, dict):
-                    regimes.extend(str(key) for key in parsed)
-            except json.JSONDecodeError:
-                pass
-        if not regimes and metadata.get("regime_id"):
-            regimes.append(str(metadata["regime_id"]))
-        for regime_id in regimes:
-            first_seen.setdefault(regime_id, task_id)
-    return first_seen
-
-
-def _discover_anchors(data_root: Path) -> list[EvaluationSet]:
-    return [
-        EvaluationSet(
-            name=f"anchor_{path.stem}",
+def _discover_anchors(
+    data_root: Path,
+    protocol: CLProtocol,
+) -> list[EvaluationSet]:
+    anchors: list[EvaluationSet] = []
+    for item in protocol.anchors:
+        regime_id = item.regime_id
+        path = item.path
+        anchors.append(EvaluationSet(
+            name=f"anchor_{_safe_name(regime_id)}",
             kind="anchor",
             path=path,
-            regime_id=path.stem,
+            regime_id=regime_id,
             stage_label="frozen_anchor",
-        )
-        for path in sorted((data_root / "anchors").glob("*.csv"))
-        if not path.name.startswith("._") and not path.name.startswith(".")
-    ]
+            evaluation_scope=item.evaluation_scope,
+        ))
+    return anchors
+
+
+def _paired_control_set(
+    protocol: CLProtocol,
+    task_id: int,
+    *,
+    pre_update: bool,
+) -> EvaluationSet | None:
+    """Build the manifest-declared matched-control evaluation set."""
+
+    task = protocol.task(task_id)
+    if task.paired_control is None:
+        return None
+    path = protocol.control_split_path(task.paired_control, "test")
+    suffix = "_pre" if pre_update else ""
+    return EvaluationSet(
+        name=f"task_{task_id:02d}_control{suffix}",
+        kind="matched_control_pre" if pre_update else "matched_control",
+        path=path,
+        task_id=task_id,
+        stage_label=f"{task.stage_label or task.shift_type}_control",
+        evaluation_scope="matched_control",
+    )
 
 
 def _safe_name(value: str) -> str:
@@ -308,15 +378,23 @@ def _tree_health(checkpoint: Path) -> dict[str, Any]:
     inference = MemoryTreeInference.from_checkpoint(
         checkpoint,
         device="cpu",
-        inference_config=InferenceConfig(
-            adapt_working_memory=False,
-            allow_memory_writes=False,
-            update_memory_usage=False,
+        inference_config=inference_config_for_protocol(
+            EvaluationProtocol.FROZEN,
         ),
     )
     tree = inference.tree
     leaf_depths = [int(tree.nodes[node_id].depth) for node_id in tree.leaf_ids]
     memory_rows = sum(len(bank) for bank in tree.episodic_memory.banks.values())
+    def serialized_size(value: Any) -> int | None:
+        try:
+            buffer = io.BytesIO()
+            torch.save(value, buffer)
+            return int(buffer.tell())
+        except Exception:
+            return None
+
+    episodic_state = getattr(tree.episodic_memory, "state_dict", lambda: {})()
+    semantic_state = tree.semantic_theta_table()
     return {
         "node_count": len(tree.all_node_ids),
         "leaf_count": len(tree.leaf_ids),
@@ -324,6 +402,9 @@ def _tree_health(checkpoint: Path) -> dict[str, Any]:
         "max_depth": max(leaf_depths, default=0),
         "mean_leaf_depth": _mean(leaf_depths),
         "memory_rows": memory_rows,
+        "episodic_rows": memory_rows,
+        "episodic_bytes": serialized_size(episodic_state),
+        "semantic_bytes": serialized_size(semantic_state),
     }
 
 
@@ -352,19 +433,32 @@ def _load_or_run_batch(
     checkpoint_sha256: str,
     args: argparse.Namespace,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], float, bool]:
-    """Evaluate all sets for one checkpoint in one compact batch transaction."""
+    """Evaluate each set from a fresh checkpoint for one protocol.
+
+    ``ONLINE_WRITE`` mutates the in-memory episodic bank.  A single inference
+    object must therefore never be shared by two evaluation sets (or by two
+    protocol rows).  Read-only protocols use the compact path, while the
+    online protocol uses the ordinary causal path so its writes and usage
+    updates remain active across the sequences within one evaluation set.
+    """
+
+    variant = _canonical_variant(variant)
+    capture_event_rows = bool(
+        args.save_event_predictions or not variant.startswith("frozen/")
+    )
 
     cache = _batch_cache_dir(args.output_dir, checkpoint_task, variant)
     metrics_path = cache / "metrics.json"
     events_path = cache / "event_rows.json"
     meta_path = cache / "meta.json"
     expected_meta = {
-        "cache_format": "compact_batch_v1",
+        "cache_format": "protocol_eval_per_set_v2",
         "checkpoint": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
         "variant": variant,
         "sequence_batch_size": int(args.eval_batch_size),
         "save_event_predictions": bool(args.save_event_predictions),
+        "capture_event_rows": capture_event_rows,
         "evaluation_sets": [
             {
                 "name": evaluation_set.name,
@@ -374,6 +468,7 @@ def _load_or_run_batch(
                 "task_id": evaluation_set.task_id,
                 "regime_id": evaluation_set.regime_id,
                 "stage_label": evaluation_set.stage_label,
+                "evaluation_scope": evaluation_set.evaluation_scope,
                 "sequence_count": len(
                     evaluation_cache[evaluation_set.path]
                 ),
@@ -387,7 +482,7 @@ def _load_or_run_batch(
         and metrics_path.is_file()
         and meta_path.is_file()
         and (
-            not args.save_event_predictions
+            not capture_event_rows
             or events_path.is_file()
         )
     ):
@@ -402,31 +497,9 @@ def _load_or_run_batch(
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         events = (
             json.loads(events_path.read_text(encoding="utf-8"))
-            if args.save_event_predictions else []
+            if capture_event_rows else []
         )
         return metrics, events, 0.0, True
-
-    combined_sequences: list[dict[str, Any]] = []
-    for evaluation_set in evaluation_sets:
-        for sequence_position, sequence in enumerate(
-            evaluation_cache[evaluation_set.path]
-        ):
-            combined_sequences.append({
-                **dict(sequence),
-                # These fields are intentionally sequence metadata.  They are
-                # used only for post-batch aggregation and never enter model
-                # computation.
-                "eval_set_id": evaluation_set.name,
-                "eval_kind": evaluation_set.kind,
-                "eval_task": evaluation_set.task_id,
-                "regime_id": evaluation_set.regime_id,
-                "stage_label": evaluation_set.stage_label,
-                "_sequence_position": sequence_position,
-            })
-    if not combined_sequences:
-        raise ValueError(
-            f"no sequences available for checkpoint task_{checkpoint_task:02d}"
-        )
 
     progress_dir = None
     if args.resume:
@@ -436,25 +509,118 @@ def _load_or_run_batch(
             json.dumps(expected_meta, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    metrics, event_rows, _inference, elapsed = run_variant_compact(
-        checkpoint,
-        combined_sequences,
-        variant,
-        args.device,
-        sequence_batch_size=args.eval_batch_size,
-        progress_dir=progress_dir,
-        prototype_duplicate_threshold=args.prototype_duplicate_threshold,
-        prototype_mode_threshold=args.prototype_mode_threshold,
-        prototype_context_alias_capacity=args.prototype_context_alias_capacity,
-        capture_event_predictions=args.save_event_predictions,
-        verbose=args.verbose,
-    )
+    def aggregate_event_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        events = len(rows)
+        if not events:
+            return {
+                "events": 0,
+                "sequences": len({row.get("source_index") for row in rows}),
+                "nll_per_event": None,
+                "accuracy": None,
+                "local_time_mae": None,
+            }
+        return {
+            "events": events,
+            "sequences": len({row.get("source_index") for row in rows}),
+            "nll_per_event": _mean(float(row["nll"]) for row in rows),
+            "accuracy": _mean(
+                float(
+                    int(row.get("predicted_type_at_event_time", -1))
+                    == int(row.get("true_type", -2))
+                )
+                for row in rows
+            ),
+            "local_time_mae": _mean(
+                abs(float(row.get("predicted_time", 0.0))
+                    - float(row.get("true_time", 0.0)))
+                for row in rows
+            ),
+        }
+
+    metrics: dict[str, dict[str, Any]] = {}
+    event_rows: list[dict[str, Any]] = []
+    elapsed = 0.0
+    if not evaluation_sets:
+        raise ValueError(
+            f"no evaluation sets available for checkpoint task_{checkpoint_task:02d}"
+        )
+    for evaluation_set in evaluation_sets:
+        set_sequences = [
+            {
+                **dict(sequence),
+                # These fields are sequence metadata.  They are used for
+                # aggregation only and never enter model computation.
+                "eval_set_id": evaluation_set.name,
+                "eval_kind": evaluation_set.kind,
+                "eval_task": evaluation_set.task_id,
+                "regime_id": evaluation_set.regime_id,
+                "stage_label": evaluation_set.stage_label,
+                "_sequence_position": sequence_position,
+            }
+            for sequence_position, sequence in enumerate(
+                evaluation_cache[evaluation_set.path]
+            )
+        ]
+        if not set_sequences:
+            metrics[evaluation_set.name] = {
+                "events": 0,
+                "sequences": 0,
+                "nll_per_event": None,
+                "accuracy": None,
+                "local_time_mae": None,
+            }
+            continue
+        set_progress_dir = None
+        if progress_dir is not None:
+            set_progress_dir = progress_dir / _safe_name(evaluation_set.name)
+        if variant.startswith("online_write/"):
+            checkpoint_before = _sha256(checkpoint)
+            rows, _inference, set_elapsed = run_variant(
+                checkpoint,
+                set_sequences,
+                variant,
+                args.device,
+                progress_dir=set_progress_dir,
+                prototype_duplicate_threshold=args.prototype_duplicate_threshold,
+                prototype_mode_threshold=args.prototype_mode_threshold,
+                prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+                verbose=args.verbose,
+            )
+            if _sha256(checkpoint) != checkpoint_before:
+                raise RuntimeError(
+                    f"ONLINE_WRITE mutated checkpoint file {checkpoint}; "
+                    "writes must remain in the disposable inference object"
+                )
+            set_metrics = aggregate_event_rows(rows)
+            if capture_event_rows:
+                event_rows.extend(rows)
+        else:
+            set_metrics_by_group, set_events, _inference, set_elapsed = (
+                run_variant_compact(
+                    checkpoint,
+                    set_sequences,
+                    variant,
+                    args.device,
+                    sequence_batch_size=args.eval_batch_size,
+                    progress_dir=set_progress_dir,
+                    prototype_duplicate_threshold=args.prototype_duplicate_threshold,
+                    prototype_mode_threshold=args.prototype_mode_threshold,
+                    prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+                    capture_event_predictions=capture_event_rows,
+                    verbose=args.verbose,
+                )
+            )
+            set_metrics = set_metrics_by_group.get(evaluation_set.name, {})
+            if capture_event_rows:
+                event_rows.extend(set_events)
+        metrics[evaluation_set.name] = set_metrics
+        elapsed += float(set_elapsed)
     if args.resume:
         metrics_path.write_text(
             json.dumps(_jsonable(metrics), ensure_ascii=False),
             encoding="utf-8",
         )
-        if args.save_event_predictions:
+        if capture_event_rows:
             events_path.write_text(
                 json.dumps(_jsonable(event_rows), ensure_ascii=False),
                 encoding="utf-8",
@@ -474,6 +640,7 @@ def _metric_row(
     from_cache: bool,
     data_sha256: str,
 ) -> dict[str, Any]:
+    variant = _canonical_variant(variant)
     row: dict[str, Any] = {
         "checkpoint_task": checkpoint_task,
         "checkpoint": str(checkpoint.resolve()),
@@ -482,9 +649,12 @@ def _metric_row(
         "eval_task": evaluation_set.task_id,
         "regime_id": evaluation_set.regime_id,
         "stage_label": evaluation_set.stage_label,
+        "evaluation_scope": evaluation_set.evaluation_scope,
         "data_path": str(evaluation_set.path.resolve()),
         "data_sha256": data_sha256,
         "variant": variant,
+        "protocol": variant.split("/", 1)[0],
+        "memory_view": variant.split("/", 1)[1],
         "elapsed_seconds": elapsed,
         "from_cache": from_cache,
         "leaf_count": tree.get("leaf_count"),
@@ -515,6 +685,7 @@ def _decorate_event_rows(
         "eval_task": metric_row["eval_task"],
         "regime_id": metric_row["regime_id"],
         "stage_label": metric_row["stage_label"],
+        "evaluation_scope": metric_row.get("evaluation_scope"),
     }
     return [{**fields, **dict(row)} for row in rows]
 
@@ -605,104 +776,70 @@ def _law_metrics(
     checkpoint_tasks: Sequence[int],
     variants: Sequence[str],
     first_seen: Mapping[str, int],
+    protocol: CLProtocol | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Compute CLNLL, forgetting, and BWT on the frozen anchor matrix."""
+    """Compute CLNLL, forgetting, and BWT through the canonical engine."""
 
     anchors = [row for row in metric_rows if row["eval_kind"] == "anchor"]
-    regimes = sorted({
-        str(row["regime_id"])
-        for row in anchors
-        if row.get("regime_id") is not None
-    })
     law_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
     for variant in variants:
+        records = [
+            FrozenAnchorRecord(
+                checkpoint_task=int(row["checkpoint_task"]),
+                regime_id=str(row["regime_id"]),
+                nll_per_event=row.get("nll_per_event"),
+                num_events=int(row.get("events") or 0),
+                evaluation_scope=str(row.get("evaluation_scope", "persistent")),
+            )
+            for row in anchors
+            if row.get("variant") == variant and row.get("regime_id") is not None
+        ]
+        if protocol is None:
+            from Evaluation.core.cl_metrics import (
+                build_frozen_anchor_matrix,
+                compute_retention_metrics,
+            )
+            matrix = build_frozen_anchor_matrix(
+                records,
+                first_seen=first_seen,
+                persistent_regimes=first_seen,
+            )
+            raw_law_rows, raw_summary_rows = compute_retention_metrics(matrix)
+        else:
+            retention = CLMetricEngine(protocol).retention(records)
+            raw_law_rows = retention["law_rows"]
+            raw_summary_rows = retention["summary_rows"]
+        law_rows.extend({"variant": variant, **row} for row in raw_law_rows)
+        summary_rows.extend({"variant": variant, **row} for row in raw_summary_rows)
+        # Keep a stable row for a selected checkpoint whose anchors were not
+        # completed, while leaving all metric values explicitly unavailable.
+        existing = {int(row["checkpoint_task"]) for row in raw_summary_rows}
         for checkpoint_task in checkpoint_tasks:
-            current_rows = [
-                row for row in anchors
-                if row["variant"] == variant
-                and int(row["checkpoint_task"]) == checkpoint_task
-            ]
-            seen_current = [
-                row for row in current_rows
-                if row.get("regime_id") is not None
-                and first_seen.get(str(row["regime_id"]), math.inf) <= checkpoint_task
-            ]
-            for regime_id in regimes:
-                seen_task = first_seen.get(regime_id)
-                if seen_task is None or seen_task > checkpoint_task:
-                    continue
-                current = next(
-                    (
-                        row for row in current_rows
-                        if str(row.get("regime_id")) == regime_id
-                    ),
-                    None,
-                )
-                history = [
-                    row for row in anchors
-                    if row["variant"] == variant
-                    and str(row.get("regime_id")) == regime_id
-                    and seen_task <= int(row["checkpoint_task"]) <= checkpoint_task
-                    and row.get("nll_per_event") is not None
-                ]
-                if current is None or current.get("nll_per_event") is None or not history:
-                    continue
-                baseline = next(
-                    (
-                        row for row in history
-                        if int(row["checkpoint_task"]) == seen_task
-                    ),
-                    min(history, key=lambda row: int(row["checkpoint_task"])),
-                )
-                best_nll = min(float(row["nll_per_event"]) for row in history)
-                current_nll = float(current["nll_per_event"])
-                baseline_nll = (
-                    float(baseline["nll_per_event"])
-                    if baseline.get("nll_per_event") is not None
-                    else None
-                )
-                law_rows.append({
-                    "variant": variant,
-                    "checkpoint_task": checkpoint_task,
-                    "regime_id": regime_id,
-                    "first_seen_task": seen_task,
-                    "baseline_checkpoint_task": int(baseline["checkpoint_task"]),
-                    "baseline_nll_per_event": baseline_nll,
-                    "current_nll_per_event": current_nll,
-                    "best_nll_since_first_seen": best_nll,
-                    "forgetting_nll": current_nll - best_nll,
-                    "bwt_nll": (
-                        baseline_nll - current_nll
-                        if baseline_nll is not None else None
-                    ),
-                })
+            if checkpoint_task in existing:
+                continue
             summary_rows.append({
                 "variant": variant,
-                "checkpoint_task": checkpoint_task,
-                "seen_law_count": len(seen_current),
-                "clnll": _mean(
-                    row.get("nll_per_event") for row in seen_current
-                ),
-                "average_forgetting": _mean(
-                    row["forgetting_nll"] for row in law_rows
-                    if row["variant"] == variant
-                    and row["checkpoint_task"] == checkpoint_task
-                ),
-                "average_bwt": _mean(
-                    row["bwt_nll"] for row in law_rows
-                    if row["variant"] == variant
-                    and row["checkpoint_task"] == checkpoint_task
-                ),
+                "checkpoint_task": int(checkpoint_task),
+                "seen_law_count": 0,
+                "clnll": None,
+                "average_forgetting": None,
+                "average_bwt": None,
+                "bwt_law_count": 0,
             })
-    return law_rows, summary_rows
+    return (
+        law_rows,
+        sorted(summary_rows, key=lambda row: (row["variant"], row["checkpoint_task"])),
+    )
 
 
 def _stage_metrics(
     metric_rows: Sequence[Mapping[str, Any]],
     variants: Sequence[str],
+    protocol: CLProtocol | None = None,
+    scratch_nll_by_task: Mapping[int, float | None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Compute pre/post task-test adaptation gain for every available task."""
+    """Compute task-boundary fields through the canonical metric engine."""
 
     output: list[dict[str, Any]] = []
     task_ids = sorted({
@@ -712,6 +849,10 @@ def _stage_metrics(
         and row["eval_kind"] in {"task_test", "task_test_pre"}
     })
     for variant in variants:
+        records: list[TaskBoundaryRecord] = []
+        source_rows: dict[
+            int, tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]
+        ] = {}
         for task_id in task_ids:
             pre = next(
                 (
@@ -732,61 +873,414 @@ def _stage_metrics(
                 ),
                 None,
             )
-            if pre is None or post is None:
+            if pre is None and post is None:
                 continue
-            pre_nll = pre.get("nll_per_event") if pre else None
-            post_nll = post.get("nll_per_event") if post else None
+            spec = protocol.task(task_id) if protocol is not None else None
+            records.append(TaskBoundaryRecord(
+                task_id=task_id,
+                pre_nll=pre.get("nll_per_event") if pre else None,
+                post_nll=post.get("nll_per_event") if post else None,
+                scratch_nll=(
+                    scratch_nll_by_task.get(task_id)
+                    if scratch_nll_by_task is not None else None
+                ),
+                shift_type=spec.shift_type if spec else None,
+                recurrence_of=spec.recurrence_of if spec else None,
+            ))
+            source_rows[task_id] = (pre, post)
+        computed = (
+            CLMetricEngine(protocol).task_boundaries(records)
+            if protocol is not None
+            else compute_task_boundary_metrics(records)
+        )
+        for row in computed:
+            pre, post = source_rows[row["task_id"]]
+            source = post or pre or {}
             output.append({
-                "task_id": task_id,
+                "task_id": row["task_id"],
                 "variant": variant,
-                "stage_label": (post or pre).get("stage_label"),
-                "regime_id": (post or pre).get("regime_id"),
+                "stage_label": source.get("stage_label"),
+                "regime_id": source.get("regime_id"),
+                "shift_type": row["shift_type"],
+                "recurrence_of": row["recurrence_of"],
                 "pre_checkpoint_task": pre.get("checkpoint_task") if pre else None,
                 "post_checkpoint_task": post.get("checkpoint_task") if post else None,
-                "pre_nll_per_event": pre_nll,
-                "post_nll_per_event": post_nll,
-                "adaptation_gain_nll": (
-                    float(pre_nll) - float(post_nll)
-                    if pre_nll is not None and post_nll is not None else None
-                ),
+                "pre_nll_per_event": row["pre_nll"],
+                "post_nll_per_event": row["post_nll"],
+                "scratch_nll_per_event": row["scratch_nll"],
+                "adaptation_gain_nll": row["adaptation_gain_nll"],
+                "fwt_nll": row["fwt_nll"],
+                "fwt_eligible": row["fwt_eligible"],
+                "fwt_status": row["fwt_status"],
+                "new_persistent_regimes": row["new_persistent_regimes"],
             })
     return output
 
 
 def _anchor_nll_matrix(
     metric_rows: Sequence[Mapping[str, Any]],
+    persistent_regimes: Iterable[str] | None = None,
+    protocol: CLProtocol | None = None,
 ) -> list[dict[str, Any]]:
-    """Make the paper-style checkpoint × regime NLL matrix."""
+    """Make the paper-style checkpoint × persistent-regime NLL matrix.
 
-    anchors = [row for row in metric_rows if row["eval_kind"] == "anchor"]
-    regimes = sorted({
-        str(row["regime_id"])
-        for row in anchors
-        if row.get("regime_id") is not None
-    })
-    groups: dict[tuple[int, str], dict[str, Any]] = {}
-    for row in anchors:
-        if row.get("regime_id") is None:
+    Transient anchors can be useful diagnostics, but including them in the
+    CL matrix would let an intentionally unseen anomaly affect the persistent
+    law averages reported alongside it.
+    """
+
+    anchors = [
+        row
+        for row in metric_rows
+        if row["eval_kind"] == "anchor"
+        and row.get("regime_id") is not None
+    ]
+    output: list[dict[str, Any]] = []
+    for variant in sorted({str(row["variant"]) for row in anchors}):
+        records = [
+            FrozenAnchorRecord(
+                checkpoint_task=int(row["checkpoint_task"]),
+                regime_id=str(row["regime_id"]),
+                nll_per_event=row.get("nll_per_event"),
+                num_events=int(row.get("events") or 0),
+                evaluation_scope=str(row.get("evaluation_scope", "persistent")),
+            )
+            for row in anchors
+            if str(row["variant"]) == variant
+        ]
+        if protocol is not None:
+            matrix = CLMetricEngine(protocol).frozen_anchor_matrix(records)
+        else:
+            matrix = build_frozen_anchor_matrix(
+                records,
+                persistent_regimes=persistent_regimes,
+            )
+        output.extend({"variant": variant, **row} for row in matrix.to_rows())
+    return output
+
+
+def _frozen_anchor_records(
+    metric_rows: Sequence[Mapping[str, Any]],
+    *,
+    variant: str = "frozen/full",
+) -> list[FrozenAnchorRecord]:
+    """Reduce evaluator rows to the canonical persistent-anchor records."""
+
+    variant = _canonical_variant(variant)
+    return [
+        FrozenAnchorRecord(
+            checkpoint_task=int(row["checkpoint_task"]),
+            regime_id=str(row["regime_id"]),
+            nll_per_event=row.get("nll_per_event"),
+            num_events=int(row.get("events") or 0),
+            evaluation_scope=str(row.get("evaluation_scope", "persistent")),
+        )
+        for row in metric_rows
+        if row.get("eval_kind") == "anchor"
+        and row.get("variant") == variant
+        and row.get("regime_id") is not None
+    ]
+
+
+def _task_boundary_records(
+    metric_rows: Sequence[Mapping[str, Any]],
+    protocol: CLProtocol,
+    *,
+    variant: str = "frozen/full",
+    scratch_nll_by_task: Mapping[int, float | None] | None = None,
+) -> list[TaskBoundaryRecord]:
+    """Reduce task-test pre/post rows to one record per protocol task."""
+
+    variant = _canonical_variant(variant)
+    output: list[TaskBoundaryRecord] = []
+    for task_id in protocol.task_ids:
+        pre = next(
+            (
+                row for row in metric_rows
+                if row.get("variant") == variant
+                and row.get("eval_kind") == "task_test_pre"
+                and row.get("eval_task") is not None
+                and int(row["eval_task"]) == task_id
+            ),
+            None,
+        )
+        post = next(
+            (
+                row for row in metric_rows
+                if row.get("variant") == variant
+                and row.get("eval_kind") == "task_test"
+                and row.get("eval_task") is not None
+                and int(row["eval_task"]) == task_id
+                and int(row["checkpoint_task"]) == task_id
+            ),
+            None,
+        )
+        if pre is None and post is None:
             continue
-        key = (int(row["checkpoint_task"]), str(row["variant"]))
-        target = groups.setdefault(key, {
-            "checkpoint_task": key[0],
-            "variant": key[1],
-        })
-        target[str(row["regime_id"])] = row.get("nll_per_event")
-    # Insert all columns so the CSV has a stable schema even when a particular
-    # run is stopped before every anchor has been evaluated.
-    for target in groups.values():
-        for regime_id in regimes:
-            target.setdefault(regime_id, None)
-    return [groups[key] for key in sorted(groups)]
+        spec = protocol.task(task_id)
+        output.append(TaskBoundaryRecord(
+            task_id=task_id,
+            pre_nll=pre.get("nll_per_event") if pre else None,
+            post_nll=post.get("nll_per_event") if post else None,
+            scratch_nll=(
+                scratch_nll_by_task.get(task_id)
+                if scratch_nll_by_task is not None else None
+            ),
+            shift_type=spec.shift_type,
+            recurrence_of=spec.recurrence_of,
+        ))
+    return output
+
+
+def _read_topology_events(checkpoint_dir: Path) -> list[dict[str, Any]]:
+    """Read committed topology transactions emitted by the HM trainer."""
+
+    candidates = (
+        checkpoint_dir.parent / "topology_events.jsonl",
+        checkpoint_dir / "topology_events.jsonl",
+    )
+    path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if path is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                # Older runs may have used this path for plain-text
+                # diagnostics.  Those lines are not topology transactions.
+                continue
+            if not isinstance(value, dict):
+                continue
+            action = str(value.get("action", ""))
+            if action not in {"split", "merge", "topology_prune"}:
+                continue
+            try:
+                task_id = int(value["task_id"])
+                epoch = int(value["global_epoch"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            rows.append({
+                **value,
+                "task_id": task_id,
+                "global_epoch": epoch,
+                "action": action,
+                "committed": bool(value.get("committed", True)),
+            })
+    return rows
+
+
+def _hm_state_records(
+    checkpoint_tasks: Sequence[int],
+    tree_by_checkpoint: Mapping[int, Mapping[str, Any]],
+    topology_events: Sequence[Mapping[str, Any]],
+) -> list[HMStateRecord]:
+    """Attach cumulative committed topology counts to checkpoint state."""
+
+    rows: list[HMStateRecord] = []
+    for task_id in checkpoint_tasks:
+        events = [
+            row for row in topology_events
+            if bool(row.get("committed", True))
+            and int(row.get("task_id", task_id)) <= int(task_id)
+        ]
+        tree = tree_by_checkpoint.get(task_id, {})
+        rows.append(HMStateRecord(
+            task_id=int(task_id),
+            node_count=tree.get("node_count"),
+            leaf_count=tree.get("leaf_count"),
+            episodic_rows=tree.get("episodic_rows", tree.get("memory_rows")),
+            episodic_bytes=tree.get("episodic_bytes"),
+            semantic_bytes=tree.get("semantic_bytes"),
+            split_count=sum(row.get("action") == "split" for row in events),
+            merge_count=sum(row.get("action") == "merge" for row in events),
+            prune_count=sum(
+                row.get("action") == "topology_prune" for row in events
+            ),
+            nise=None,
+        ))
+    return rows
+
+
+def _concat_support_prefix(
+    support_sequences: Sequence[Mapping[str, Any]],
+    K: int,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Flatten the first K support events into one causal prefix."""
+
+    if K == 0:
+        return (
+            torch.empty(0, dtype=torch.float32),
+            torch.empty(0, dtype=torch.long),
+        )
+    times_parts: list[torch.Tensor] = []
+    type_parts: list[torch.Tensor] = []
+    remaining = int(K)
+    last_time = 0.0
+    for sequence in support_sequences:
+        times = torch.as_tensor(sequence["times"], dtype=torch.float32).reshape(-1)
+        types = torch.as_tensor(sequence["types"], dtype=torch.long).reshape(-1)
+        take = min(remaining, int(times.numel()))
+        if take <= 0:
+            break
+        local_times = times[:take]
+        shift = 0.0 if not times_parts else last_time + 1.0 - float(local_times[0])
+        local_times = local_times + shift
+        times_parts.append(local_times)
+        type_parts.append(types[:take])
+        last_time = float(local_times[-1])
+        remaining -= take
+        if remaining == 0:
+            break
+    if remaining:
+        return None
+    return torch.cat(times_parts), torch.cat(type_parts)
+
+
+def _adaptation_records(
+    protocol: CLProtocol,
+    checkpoint_paths: Mapping[int, Path],
+    selected_tasks: Sequence[int],
+    expected_types: int,
+    args: argparse.Namespace,
+    *,
+    variant: str = "fast_adapt/full",
+) -> list[AdaptationRecord]:
+    """Run independent K-indexed support/query evaluations from fresh clones."""
+
+    if getattr(args, "no_adaptation_evaluation", False):
+        return []
+    variant = _canonical_variant(variant)
+    records: list[AdaptationRecord] = []
+    for task_id in selected_tasks:
+        spec = protocol.adaptation(task_id)
+        if spec is None:
+            continue
+        previous_tasks = [
+            candidate for candidate in protocol.task_ids
+            if candidate < task_id and candidate in checkpoint_paths
+        ]
+        if not previous_tasks:
+            continue
+        checkpoint = checkpoint_paths[max(previous_tasks)]
+        support = _load_cl_dataset(
+            spec["support"], expected_types, args.max_sequences
+        )
+        query = _load_cl_dataset(
+            spec["query"], expected_types, args.max_sequences
+        )
+        for K in spec["K"]:
+            prefix = _concat_support_prefix(support, int(K))
+            if prefix is None:
+                records.append(AdaptationRecord(
+                    task_id=int(task_id),
+                    K=int(K),
+                    pre_nll=None,
+                    adapted_nll=None,
+                    protocol=variant.split("/", 1)[0],
+                ))
+                continue
+            support_times, support_types = prefix
+            combined: list[dict[str, Any]] = []
+            for query_index, sequence in enumerate(query):
+                query_times = torch.as_tensor(
+                    sequence["times"], dtype=torch.float32
+                ).reshape(-1)
+                query_types = torch.as_tensor(
+                    sequence["types"], dtype=torch.long
+                ).reshape(-1)
+                if support_times.numel():
+                    shift = float(support_times[-1]) + 1.0 - float(query_times[0])
+                else:
+                    shift = -float(query_times[0])
+                combined.append({
+                    "times": torch.cat((support_times, query_times + shift)),
+                    "types": torch.cat((support_types, query_types)),
+                    "source_index": (
+                        int(task_id) * 1_000_000
+                        + int(K) * 10_000
+                        + query_index
+                    ),
+                })
+            event_rows, _inference, _elapsed = run_variant(
+                checkpoint,
+                combined,
+                variant,
+                args.device,
+                verbose=args.verbose,
+            )
+            query_rows = [
+                row for row in event_rows
+                if int(row.get("event_index", -1)) >= int(K)
+            ]
+            adapted_nll = _mean(row.get("nll") for row in query_rows)
+            records.append(AdaptationRecord(
+                task_id=int(task_id),
+                K=int(K),
+                pre_nll=None,
+                adapted_nll=adapted_nll,
+                protocol=variant.split("/", 1)[0],
+            ))
+    return records
+
+
+def _fwt_scratch_nlls(
+    scratch_checkpoint: Path | None,
+    protocol: CLProtocol,
+    selected_tasks: Sequence[int],
+    evaluation_cache: Mapping[Path, Sequence[Mapping[str, Any]]],
+    expected_types: int,
+    args: argparse.Namespace,
+) -> dict[int, float | None]:
+    """Evaluate every task from the same saved C_init for protocol-scoped FWT."""
+
+    if scratch_checkpoint is None:
+        return {}
+    scratch_checkpoint = Path(scratch_checkpoint).expanduser().resolve()
+    if not scratch_checkpoint.is_file():
+        raise FileNotFoundError(
+            f"FWT scratch checkpoint does not exist: {scratch_checkpoint}"
+        )
+    output: dict[int, float | None] = {}
+    for task_id in selected_tasks:
+        path = protocol.split_path(task_id, "test")
+        sequences = evaluation_cache.get(path)
+        if not sequences:
+            continue
+        event_rows, _inference, _elapsed = run_variant(
+            scratch_checkpoint,
+            [
+                {
+                    **dict(sequence),
+                    "eval_set_id": f"task_{task_id:02d}_scratch",
+                    "eval_kind": "task_test",
+                    "eval_task": task_id,
+                    "regime_id": None,
+                    "stage_label": "fwt_scratch",
+                }
+                for sequence in sequences
+            ],
+            "frozen/full",
+            args.device,
+            verbose=args.verbose,
+        )
+        output[int(task_id)] = _mean(row.get("nll") for row in event_rows)
+    return output
 
 
 def _special_case_metrics(
     metric_rows: Sequence[Mapping[str, Any]],
-    variant: str = "full_frozen",
+    variant: str = "frozen/full",
+    protocol: CLProtocol | None = None,
 ) -> list[dict[str, Any]]:
-    """Compute recurrence, near-recurrence, and long-gap diagnostic gains."""
+    """Compute schedule-specific diagnostics from protocol task metadata."""
+
+    if protocol is None:
+        return []
+    variant = _canonical_variant(variant)
 
     lookup = {
         (int(row["checkpoint_task"]), str(row.get("regime_id"))): row.get("nll_per_event")
@@ -803,56 +1297,23 @@ def _special_case_metrics(
         if row.get("eval_task") is not None and row["variant"] == variant
     }
 
-    definitions = (
-        (
-            "A1_retention_before_task3",
-            "L_2,A_1 - L_0,A_1",
-            (2, "A_1", 0, "A_1"),
-            "near_zero_or_negative",
-        ),
-        (
-            "A1_recovery_task3",
-            "L_2,A_1 - L_3,A_1",
-            (2, "A_1", 3, "A_1"),
-            "positive",
-        ),
-        (
-            "A1_long_gap_reference",
-            "L_7,A_1 - L_0,A_1",
-            (7, "A_1", 0, "A_1"),
-            "near_zero_or_negative",
-        ),
-        (
-            "A1_long_gap_recovery_task8",
-            "L_7,A_1 - L_8,A_1",
-            (7, "A_1", 8, "A_1"),
-            "positive",
-        ),
-        (
-            "B1_near_recurrence_impact",
-            "L_5,B_1 - L_4,B_1",
-            (5, "B_1", 4, "B_1"),
-            "near_zero_or_negative",
-        ),
-        (
-            "Bprime1_recovery_task5",
-            "L_4,B_prime_1 - L_5,B_prime_1",
-            (4, "B_prime_1", 5, "B_prime_1"),
-            "positive",
-        ),
-        (
-            "A2_specialization_gain_task6",
-            "L_5,A_2 - L_6,A_2",
-            (5, "A_2", 6, "A_2"),
-            "positive",
-        ),
-    )
-    output = []
-    for name, formula, (left_task, left_regime, right_task, right_regime), expected in definitions:
-        left = lookup.get((left_task, left_regime))
-        right = lookup.get((right_task, right_regime))
+    tasks = [protocol.task(task_id) for task_id in protocol.task_ids]
+    task_ids = list(protocol.task_ids)
+    tasks_by_id = {task.task_id: task for task in tasks}
+    first_seen = dict(protocol.first_seen)
+    output: list[dict[str, Any]] = []
+
+    def add_metric(
+        name: str,
+        formula: str,
+        left_key: tuple[int, str],
+        right_key: tuple[int, str],
+        expected: str,
+    ) -> None:
+        left = lookup.get(left_key)
+        right = lookup.get(right_key)
         if left is None or right is None:
-            continue
+            return
         output.append({
             "metric": name,
             "variant": variant,
@@ -862,13 +1323,154 @@ def _special_case_metrics(
             "right_value": right,
             "expected": expected,
         })
-    mixture_pre = task_lookup.get((8, 9, "task_test_pre"))
-    mixture_post = task_lookup.get((9, 9, "task_test"))
-    if mixture_pre is not None and mixture_post is not None:
+
+    def add_task_difference(
+        name: str,
+        formula: str,
+        left_key: tuple[int, int, str],
+        right_key: tuple[int, int, str],
+        expected: str,
+    ) -> None:
+        left = task_lookup.get(left_key)
+        right = task_lookup.get(right_key)
+        if left is None or right is None:
+            return
         output.append({
-            "metric": "EB_mixture_adaptation_task9",
+            "metric": name,
             "variant": variant,
-            "formula": "P_9^pre - P_9^post",
+            "formula": formula,
+            "value": float(left) - float(right),
+            "left_value": left,
+            "right_value": right,
+            "expected": expected,
+        })
+
+    def previous_task(task_id: int) -> int | None:
+        prior = [candidate for candidate in task_ids if candidate < task_id]
+        return max(prior) if prior else None
+
+    def next_task(task_id: int) -> int | None:
+        later = [candidate for candidate in task_ids if candidate > task_id]
+        return min(later) if later else None
+
+    for task in tasks:
+        task_id = task.task_id
+        shift_type = task.shift_type
+        parent_id = task.recurrence_of
+        if shift_type in {"exact_recurrence", "long_gap_recurrence"} and parent_id:
+            prior_task = previous_task(task_id)
+            seen_task = first_seen.get(parent_id)
+            if prior_task is not None and seen_task is not None:
+                prefix = _safe_name(parent_id)
+                if shift_type == "exact_recurrence":
+                    add_metric(
+                        f"{prefix}_retention_before_task{task_id}",
+                        f"L_{prior_task},{parent_id} - L_{seen_task},{parent_id}",
+                        (prior_task, parent_id),
+                        (seen_task, parent_id),
+                        "near_zero_or_negative",
+                    )
+                else:
+                    add_metric(
+                        f"{prefix}_long_gap_reference_task{task_id}",
+                        f"L_{prior_task},{parent_id} - L_{seen_task},{parent_id}",
+                        (prior_task, parent_id),
+                        (seen_task, parent_id),
+                        "near_zero_or_negative",
+                    )
+                add_metric(
+                    f"{prefix}_{shift_type}_recovery_task{task_id}",
+                    f"L_{prior_task},{parent_id} - L_{task_id},{parent_id}",
+                    (prior_task, parent_id),
+                    (task_id, parent_id),
+                    "positive",
+                )
+
+        if shift_type in {"near_recurrence", "specialization", "new_specialization"}:
+            later_task = next_task(task_id)
+            if later_task is not None:
+                regime_ids = list(task.regime_weights)
+                if parent_id and parent_id in first_seen:
+                    add_metric(
+                        f"{_safe_name(parent_id)}_{shift_type}_impact_task{later_task}",
+                        f"L_{later_task},{parent_id} - L_{task_id},{parent_id}",
+                        (later_task, parent_id),
+                        (task_id, parent_id),
+                        "near_zero_or_negative",
+                    )
+                for regime_id in regime_ids:
+                    if regime_id == parent_id:
+                        continue
+                    add_metric(
+                        f"{_safe_name(regime_id)}_{shift_type}_gain_task{later_task}",
+                        f"L_{task_id},{regime_id} - L_{later_task},{regime_id}",
+                        (task_id, regime_id),
+                        (later_task, regime_id),
+                        "positive",
+                    )
+
+        if shift_type in {"transient", "transient_anomaly"}:
+            prior_task = previous_task(task_id)
+            if prior_task is None or task.paired_control is None:
+                continue
+            control_prefix = _safe_name(task.paired_control)
+            add_task_difference(
+                f"{control_prefix}_transient_control_adaptation_task{task_id}",
+                f"L_{{{prior_task},{task_id}}}^control - "
+                f"L_{{{task_id},{task_id}}}^control",
+                (prior_task, task_id, "matched_control_pre"),
+                (task_id, task_id, "matched_control"),
+                "positive",
+            )
+            stream_pre = task_lookup.get(
+                (prior_task, task_id, "task_test_pre")
+            )
+            stream_post = task_lookup.get(
+                (task_id, task_id, "task_test")
+            )
+            control_pre = task_lookup.get(
+                (prior_task, task_id, "matched_control_pre")
+            )
+            control_post = task_lookup.get(
+                (task_id, task_id, "matched_control")
+            )
+            if all(value is not None for value in (
+                stream_pre, stream_post, control_pre, control_post
+            )):
+                stream_gain = float(stream_pre) - float(stream_post)
+                control_gain = float(control_pre) - float(control_post)
+                output.append({
+                    "metric": f"{control_prefix}_transient_excess_adaptation_task{task_id}",
+                    "variant": variant,
+                    "formula": (
+                        f"(L_{{{prior_task},{task_id}}} - L_{{{task_id},{task_id}}})"
+                        f" - (L_{{{prior_task},{task_id}}}^control - "
+                        f"L_{{{task_id},{task_id}}}^control)"
+                    ),
+                    "value": stream_gain - control_gain,
+                    "left_value": stream_gain,
+                    "right_value": control_gain,
+                    "expected": "near_zero_or_negative",
+                })
+    mixture_tasks = [
+        task.task_id
+        for task in tasks
+        if task.shift_type == "mixture"
+    ]
+    for task_id in mixture_tasks:
+        prior_task = previous_task(task_id)
+        if prior_task is None:
+            continue
+        mixture_pre = task_lookup.get((prior_task, task_id, "task_test_pre"))
+        mixture_post = task_lookup.get((task_id, task_id, "task_test"))
+        if mixture_pre is None or mixture_post is None:
+            continue
+        weights = tasks_by_id[task_id].regime_weights
+        label = "_".join(str(regime_id) for regime_id in weights)
+        output.append({
+            "metric": f"{_safe_name(label)}_mixture_adaptation_task{task_id}",
+            "variant": variant,
+            "formula": f"P_{task_id}^pre - P_{task_id}^post",
             "value": float(mixture_pre) - float(mixture_post),
             "left_value": mixture_pre,
             "right_value": mixture_post,
@@ -1373,10 +1975,8 @@ def _law_inference(
     inference = MemoryTreeInference.from_checkpoint(
         checkpoint,
         device=args.device,
-        inference_config=InferenceConfig(
-            adapt_working_memory=False,
-            allow_memory_writes=False,
-            update_memory_usage=False,
+        inference_config=inference_config_for_protocol(
+            EvaluationProtocol.FROZEN,
             probe_write_counterfactuals=False,
             write_probe_seed=42,
             prototype_duplicate_threshold=args.prototype_duplicate_threshold,
@@ -1397,6 +1997,7 @@ def _hawkes_law_evaluation(
     regime_first_seen: Mapping[str, int],
     args: argparse.Namespace,
     expected_types: int,
+    transient_regimes: Iterable[str] = (),
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -1406,8 +2007,9 @@ def _hawkes_law_evaluation(
     if not anchors or not ground_truth:
         return [], []
 
-    variant = "full_frozen"
+    variant = "frozen/full"
     expected_basis = len(next(iter(ground_truth.values())).betas)
+    diagnostic_regimes = {str(regime_id) for regime_id in transient_regimes}
     intensity_rows: list[dict[str, Any]] = []
     for checkpoint_task in checkpoint_tasks:
         checkpoint = checkpoint_paths[checkpoint_task]
@@ -1472,10 +2074,15 @@ def _hawkes_law_evaluation(
                         intensity_samples=args.intensity_samples,
                     )
                 )
+                first_seen_task = regime_first_seen.get(regime_id)
                 scope = (
                     "ood_unseen"
-                    if law.kind == "transient"
-                    or regime_id not in regime_first_seen
+                    if (
+                        law.kind == "transient"
+                        or regime_id in diagnostic_regimes
+                        or first_seen_task is None
+                        or first_seen_task > checkpoint_task
+                    )
                     else "seen_law"
                 )
                 for offset, sequence in enumerate(batch):
@@ -1516,7 +2123,7 @@ def _hawkes_law_evaluation(
                         "anchor_index": anchor_index,
                         "events": int(len(event_times)),
                         "evaluation_scope": scope,
-                        "first_seen_task": regime_first_seen.get(regime_id),
+                        "first_seen_task": first_seen_task,
                         "nise": nise_value,
                         "plot_path": plot_path,
                     }
@@ -1584,13 +2191,25 @@ def _ood_metrics(
         law = ground_truth.get(regime_id)
         if law is None:
             continue
-        if law.kind != "transient" and regime_id in regime_first_seen:
+        is_persistent_anchor = (
+            row.get("evaluation_scope") == "persistent"
+            or (
+                row.get("evaluation_scope") is None
+                and law.kind != "transient"
+            )
+        )
+        first_seen_task = regime_first_seen.get(regime_id)
+        if is_persistent_anchor and (
+            first_seen_task is not None
+            and first_seen_task <= int(row.get("checkpoint_task", -1))
+        ):
             continue
         output.append({
             "checkpoint_task": row.get("checkpoint_task"),
             "variant": row.get("variant"),
             "regime_id": regime_id,
             "evaluation_scope": "ood_unseen",
+            "first_seen_task": first_seen_task,
             "nll_per_event": row.get("nll_per_event"),
             "accuracy": row.get("accuracy"),
             "local_time_mae": row.get("local_time_mae"),
@@ -1715,7 +2334,7 @@ def _plot_summary_figures(
     # Frozen-anchor checkpoint x law matrix. Prefer the paper's main variant.
     matrix_variants = sorted({str(row.get("variant")) for row in anchor_matrix_rows})
     matrix_variant = (
-        "full_frozen" if "full_frozen" in matrix_variants
+        "frozen/full" if "frozen/full" in matrix_variants
         else (matrix_variants[0] if matrix_variants else None)
     )
     matrix_rows = sorted(
@@ -1781,7 +2400,7 @@ def _plot_summary_figures(
     # Plasticity of each stage before versus after learning the current task.
     stage_variants = sorted({str(row.get("variant")) for row in stage_rows})
     stage_variant = (
-        "full_frozen" if "full_frozen" in stage_variants
+        "frozen/full" if "frozen/full" in stage_variants
         else (stage_variants[0] if stage_variants else None)
     )
     stage_points = sorted(
@@ -1802,9 +2421,20 @@ def _plot_summary_figures(
             color=["#2a9d8f" if value >= 0.0 else "#e76f51" for value in values],
         )
         axis.axhline(0.0, color="0.25", linewidth=0.9)
-        axis.set_xlabel("task")
+        stage_by_task = {
+            int(row["task_id"]): row for row in stage_rows
+            if str(row.get("variant")) == stage_variant
+        }
+        axis.set_xticks(
+            [point[0] for point in stage_points],
+            labels=[
+                f"{task_id}\n{stage_by_task.get(task_id, {}).get('shift_type') or 'stage'}"
+                for task_id, _ in stage_points
+            ],
+        )
+        axis.set_xlabel("task / shift type")
         axis.set_ylabel("pre NLL - post NLL")
-        axis.set_title(f"Stage adaptation gain — {stage_variant} (positive is better)")
+        axis.set_title(f"Stage adaptation gain by protocol shift — {stage_variant} (positive is better)")
         axis.grid(axis="y", alpha=0.25)
         save(figure, "stage_adaptation_gain.png")
 
@@ -1813,7 +2443,7 @@ def _plot_summary_figures(
         str(row.get("variant")) for row in intensity_summary_rows
     })
     law_variant = (
-        "full_frozen" if "full_frozen" in law_variants
+        "frozen/full" if "frozen/full" in law_variants
         else (law_variants[0] if law_variants else None)
     )
     seen_intensity = [
@@ -1919,7 +2549,7 @@ def _plot_summary_figures(
             ha="right",
         )
         axis.set_ylabel("NLL difference / gain")
-        axis.set_title("Recurrence, near-recurrence, specialization, and mixture cases")
+        axis.set_title("Protocol shift diagnostics")
         axis.grid(axis="y", alpha=0.25)
         save(figure, "special_case_metrics.png")
 
@@ -1945,6 +2575,7 @@ def _write_report(
     tree_by_checkpoint: Mapping[int, Mapping[str, Any]],
     skipped_tasks: Sequence[int],
     anchors_enabled: bool,
+    metric_report: Mapping[str, Any] | None = None,
 ) -> None:
     def fmt(value: Any, digits: int = 4) -> str:
         if value is None:
@@ -1959,10 +2590,12 @@ def _write_report(
         "# Hawkes Memory Tree CL Evaluation",
         "",
         f"- Data root: `{data_root.resolve()}`",
+        f"- Benchmark manifest: `{(data_root / 'benchmark_manifest.json').resolve()}`",
+        "- Persistent-law averages follow `persistent_regimes`; diagnostic transient anchors are reported in the OOD section.",
         f"- Checkpoints: `{checkpoint_dir.resolve()}`",
         f"- Checkpoint tasks: `{list(checkpoint_tasks)}`",
         f"- Variants: `{list(variants)}`",
-        "- Task-test protocol: checkpoint `task_k` is evaluated on `D_k^test`; "
+        "- Task-test protocol: checkpoint `task_k_best` is evaluated on `D_k^test`; "
         "`D_{k+1}^test` is also evaluated before learning when available.",
         f"- Frozen anchors: `{'enabled' if anchors_enabled else 'disabled'}`.",
         "",
@@ -1974,7 +2607,7 @@ def _write_report(
     for task_id in checkpoint_tasks:
         tree = tree_by_checkpoint[task_id]
         lines.append(
-            f"| task_{task_id:02d} | {tree.get('node_count')} | "
+            f"| task_{task_id:02d}_best | {tree.get('node_count')} | "
             f"{tree.get('leaf_count')} | {tree.get('max_depth')} | "
             f"{tree.get('memory_rows')} |"
         )
@@ -1990,7 +2623,7 @@ def _write_report(
         if row["eval_kind"] != "task_test" or row["eval_task"] != row["checkpoint_task"]:
             continue
         lines.append(
-            f"| task_{int(row['checkpoint_task']):02d} | {row['variant']} | "
+            f"| task_{int(row['checkpoint_task']):02d}_best | {row['variant']} | "
             f"{fmt(row.get('nll_per_event'), 6)} | {fmt(row.get('accuracy'))} | "
             f"{fmt(row.get('local_time_mae'))} |"
         )
@@ -2007,7 +2640,7 @@ def _write_report(
     ])
     for row in continual_rows:
         lines.append(
-            f"| task_{int(row['checkpoint_task']):02d} | {row['variant']} | "
+            f"| task_{int(row['checkpoint_task']):02d}_best | {row['variant']} | "
             f"{fmt(row.get('clnll'), 6)} | "
             f"{fmt(row.get('average_forgetting'), 6)} | "
             f"{fmt(row.get('seen_law_count'), 0)} |"
@@ -2019,22 +2652,78 @@ def _write_report(
         "",
         "`adaptation_gain_nll = pre_nll - post_nll`; positive means the current task improved after training.",
         "",
-        "| task | variant | pre NLL | post NLL | adaptation gain |",
-        "|---:|---|---:|---:|---:|",
+        "| task | shift type | variant | pre NLL | post NLL | adaptation gain |",
+        "|---:|---|---|---:|---:|---:|",
     ])
     for row in stage_rows:
         lines.append(
-            f"| task_{int(row['task_id']):02d} | {row['variant']} | "
+            f"| task_{int(row['task_id']):02d} | {row.get('shift_type') or 'NA'} | {row['variant']} | "
             f"{fmt(row.get('pre_nll_per_event'), 6)} | "
             f"{fmt(row.get('post_nll_per_event'), 6)} | "
             f"{fmt(row.get('adaptation_gain_nll'), 6)} |"
         )
 
+    if metric_report is not None:
+        fwt = metric_report.get("fwt", {})
+        adaptation = metric_report.get("adaptation", {})
+        rrr = metric_report.get("rrr", {})
+        lines.extend([
+            "",
+            "## Transfer and adaptation contract",
+            "",
+            "FWT compares the same task test set from the fixed C_init and the pre-task checkpoint. "
+            "Only genuinely unseen persistent-law tasks enter the average; recurrence tasks remain diagnostics.",
+            "",
+            f"- Average FWT: `{fmt(fwt.get('average_fwt'), 6)}` "
+            f"({fwt.get('status', 'not_available')}).",
+            "",
+            "| protocol | task | K min | K max | adaptation AUC | status |",
+            "|---|---:|---:|---:|---:|---|",
+        ])
+        for row in adaptation.get("summary", ()):
+            lines.append(
+                f"| {row.get('protocol') or 'default'} | {row.get('task_id')} | "
+                f"{fmt(row.get('K_min'), 0)} | {fmt(row.get('K_max'), 0)} | "
+                f"{fmt(row.get('adaptation_auc'), 6)} | {row.get('status')} |"
+            )
+        if rrr.get("rows"):
+            lines.extend([
+                "",
+                "| returned law | first task | return task | shift | RRR | status |",
+                "|---|---:|---:|---|---:|---|",
+            ])
+            for row in rrr["rows"]:
+                lines.append(
+                    f"| {row.get('regime_id')} | {row.get('first_task')} | "
+                    f"{row.get('return_task')} | {row.get('shift_type')} | "
+                    f"{fmt(row.get('rrr'), 6)} | {row.get('status')} |"
+                )
+
+        hm_state = metric_report.get("hm_state", ())
+        if hm_state:
+            lines.extend([
+                "",
+                "## HM-specific state",
+                "",
+                "Topology action counts come from committed transaction events; no leaf-count difference is inferred.",
+                "",
+                "| task | nodes | leaves | episodic rows | episodic bytes | semantic bytes | split | merge | prune | NISE |",
+                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ])
+            for row in hm_state:
+                lines.append(
+                    f"| {row.get('task_id')} | {row.get('node_count')} | "
+                    f"{row.get('leaf_count')} | {row.get('episodic_rows')} | "
+                    f"{row.get('episodic_bytes')} | {row.get('semantic_bytes')} | "
+                    f"{row.get('split_count')} | {row.get('merge_count')} | "
+                    f"{row.get('prune_count')} | {fmt(row.get('nise'), 6)} |"
+                )
+
     lines.extend([
         "",
-        "## Special recurrence diagnostics",
+        "## Schedule-driven diagnostics",
         "",
-        "For NLL differences, positive values mean the right-hand condition has lower NLL.",
+        "For NLL differences, positive values mean the right-hand condition has lower NLL; definitions come from task shift_type and paired controls in the protocol.",
         "",
         "| metric | formula | value | expected |",
         "|---|---|---:|---|",
@@ -2062,7 +2751,7 @@ def _write_report(
         ])
         for row in seen_intensity:
             lines.append(
-                f"| task_{int(row['checkpoint_task']):02d} | {row['variant']} | "
+                f"| task_{int(row['checkpoint_task']):02d}_best | {row['variant']} | "
                 f"{row['regime_id']} | {fmt(row.get('nise_mean'), 6)} | "
                 f"{fmt(row.get('sequence_count'), 0)} |"
             )
@@ -2080,7 +2769,7 @@ def _write_report(
         ])
         for row in ood_rows:
             lines.append(
-                f"| task_{int(row['checkpoint_task']):02d} | {row['variant']} | "
+                f"| task_{int(row['checkpoint_task']):02d}_best | {row['variant']} | "
                 f"{row['regime_id']} | {fmt(row.get('nll_per_event'), 6)} | "
                 f"{fmt(row.get('accuracy'))} | "
                 f"{fmt(row.get('local_time_mae'))} |"
@@ -2120,12 +2809,18 @@ def _write_report(
         "## Output files",
         "",
         "- `task_metrics.csv`: checkpoint × task-test × variant metrics.",
+        "- `control_metrics.csv`: checkpoint × manifest-declared matched-control metrics.",
         "- `anchor_metrics.csv`: checkpoint × frozen-anchor × variant metrics.",
         "- `continual_summary.csv`: current quality, CLNLL, forgetting, and checkpoint topology.",
         "- `law_metrics.csv`: per-law CLNLL support, forgetting, and BWT terms.",
         "- `stage_metrics.csv`: pre/post task-test adaptation gains.",
+        "- `fwt_metrics.csv`: protocol-scoped forward transfer with fixed scratch baseline when supplied.",
+        "- `adaptation_points.csv` / `adaptation_summary.csv`: fixed-query K-indexed adaptation curves and normalized AUC.",
+        "- `rrr_metrics.csv`: protocol-driven exact/long-gap recurrence retention ratios.",
+        "- `hm_state.csv`: HM-only memory, topology transaction counts, and NISE.",
+        "- `cl_metrics.json`: canonical CL metric contract shared with baseline runners.",
         "- `anchor_nll_matrix.csv`: paper-style wide checkpoint × regime NLL matrix.",
-        "- `special_case_metrics.csv`: A_1 recurrence, B'_1 near-recurrence, and long-gap diagnostics.",
+        "- `special_case_metrics.csv`: schedule-driven recurrence, near-recurrence, specialization, mixture, and transient diagnostics.",
         "- `intensity_metrics.csv` / `intensity_summary.csv`: causal intensity-curve NISE and checkpoint summaries.",
         "- `ood_metrics.csv`: transient/unseen-anchor novelty control, excluded from CL averages.",
         "- `intensity_curves/`: optional total-plus-representative-type GT/prediction plots.",
@@ -2133,8 +2828,160 @@ def _write_report(
         "- `checkpoint_tree.csv`: leaf/node counts and checkpoint memory sizes.",
         "- `summary.json`: machine-readable copy of the complete evaluation manifest.",
         "- `event_predictions.csv`: written only when `--save-event-predictions` is supplied.",
+        "- `protocol_comparison.csv`: one comparison table across the selected protocols.",
+        "- `frozen/`: strict frozen anchor matrix, CLNLL, forgetting, BWT, and law metrics.",
+        "- `fast_adapt/`: official fixed-query adaptation curve plus event-exposure diagnostics; it is excluded from CL aggregates.",
+        "- `online_write/`: independent fixed-query write curve plus event-exposure diagnostics; each eval set starts from a fresh checkpoint load.",
     ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_protocol_outputs(
+    output_dir: Path,
+    metric_rows: Sequence[Mapping[str, Any]],
+    event_rows: Sequence[Mapping[str, Any]],
+    continual_rows: Sequence[Mapping[str, Any]],
+    law_rows: Sequence[Mapping[str, Any]],
+    anchor_matrix_rows: Sequence[Mapping[str, Any]],
+    adaptation_points: Sequence[Mapping[str, Any]] = (),
+    adaptation_summary: Sequence[Mapping[str, Any]] = (),
+) -> None:
+    """Materialize the protocol × memory-view output contract."""
+
+    task_fields = (
+        "checkpoint_task", "checkpoint", "eval_name", "eval_kind", "eval_task",
+        "regime_id", "stage_label", "variant", "protocol", "memory_view",
+        "nll_per_event", "accuracy", "local_time_mae", "events",
+    )
+    anchor_fields = (
+        "checkpoint_task", "checkpoint", "eval_name", "regime_id", "variant",
+        "protocol", "memory_view", "nll_per_event", "accuracy", "local_time_mae",
+    )
+    curve_fields = (
+        "checkpoint_task", "eval_task", "eval_set_id", "regime", "source_index",
+        "protocol", "memory_view", "K", "exposure_events", "nll", "accuracy",
+        "time_MAE", "retrieval_hit", "working_norm", "write_count",
+    )
+    curve_summary_fields = (
+        "protocol", "K", "exposure_events", "events", "nll", "accuracy",
+        "time_MAE", "retrieval_hit", "working_norm", "write_count",
+    )
+    adaptation_fields = (
+        "protocol", "task_id", "K", "pre_nll", "adapted_nll", "gain_nll",
+    )
+    adaptation_summary_fields = (
+        "protocol", "task_id", "K_min", "K_max", "K_count",
+        "adaptation_auc", "status",
+    )
+    anchor_matrix_fields = (
+        "checkpoint_task", "variant",
+        *sorted({
+            key
+            for row in anchor_matrix_rows
+            for key in row
+            if key not in {"checkpoint_task", "variant"}
+        }),
+    )
+    comparison_rows = [
+        {
+            "checkpoint_task": row.get("checkpoint_task"),
+            "eval_task": row.get("eval_task"),
+            "eval_name": row.get("eval_name"),
+            "protocol": row.get("protocol", str(row.get("variant", "")).split("/", 1)[0]),
+            "memory_view": row.get("memory_view", "full"),
+            "variant": row.get("variant"),
+            "nll_per_event": row.get("nll_per_event"),
+            "accuracy": row.get("accuracy"),
+            "local_time_mae": row.get("local_time_mae"),
+            "events": row.get("events"),
+        }
+        for row in metric_rows
+    ]
+    write_csv(
+        output_dir / "protocol_comparison.csv",
+        comparison_rows,
+        fieldnames=(
+            "checkpoint_task", "eval_task", "eval_name", "protocol", "memory_view",
+            "variant", "nll_per_event", "accuracy", "local_time_mae", "events",
+        ),
+    )
+
+    for protocol_name in ("frozen", "fast_adapt", "online_write"):
+        variant = f"{protocol_name}/full"
+        protocol_dir = output_dir / protocol_name
+        protocol_dir.mkdir(parents=True, exist_ok=True)
+        selected_metrics = [
+            row for row in metric_rows if row.get("variant") == variant
+        ]
+        write_csv(
+            protocol_dir / "task_metrics.csv",
+            [
+                row for row in selected_metrics
+                if row.get("eval_kind") in {"task_test", "task_test_pre"}
+            ],
+            fieldnames=task_fields,
+        )
+        write_csv(
+            protocol_dir / "anchor_metrics.csv",
+            [row for row in selected_metrics if row.get("eval_kind") == "anchor"],
+            fieldnames=anchor_fields,
+        )
+        if protocol_name == "frozen":
+            write_csv(
+                protocol_dir / "anchor_nll_matrix.csv",
+                anchor_matrix_rows,
+                fieldnames=anchor_matrix_fields,
+            )
+            write_csv(
+                protocol_dir / "continual_summary.csv",
+                continual_rows,
+                fieldnames=(
+                    "checkpoint_task", "variant", "current_nll_per_event",
+                    "current_accuracy", "clnll", "average_forgetting", "average_bwt",
+                ),
+            )
+            write_csv(
+                protocol_dir / "law_metrics.csv",
+                law_rows,
+                fieldnames=(
+                    "checkpoint_task", "variant", "regime_id", "forgetting_nll", "bwt_nll",
+                ),
+            )
+            continue
+
+        selected_events = [
+            row for row in event_rows if row.get("variant") == variant
+        ]
+        curve = adaptation_curve_rows(
+            selected_events, protocol=protocol_name, memory_view="full"
+        )
+        # Keep the event-index exposure diagnostic separate from the official
+        # task-level K curve.  The latter uses a fixed query set and a fresh
+        # pre-task clone for every K.
+        write_csv(protocol_dir / "exposure_curve.csv", curve, fieldnames=curve_fields)
+        summary_name = (
+            "reaccess_summary.csv"
+            if protocol_name == "fast_adapt" else "online_summary.csv"
+        )
+        write_csv(
+            protocol_dir / summary_name,
+            _curve_summary(curve),
+            fieldnames=curve_summary_fields,
+        )
+        write_csv(
+            protocol_dir / "adaptation_curve.csv",
+            [row for row in adaptation_points
+             if row.get("protocol") == protocol_name],
+            fieldnames=adaptation_fields,
+        )
+        write_csv(
+            protocol_dir / "adaptation_summary.csv",
+            [row for row in adaptation_summary
+             if row.get("protocol") == protocol_name],
+            fieldnames=adaptation_summary_fields,
+        )
+        if protocol_name == "online_write":
+            write_csv(protocol_dir / "write_metrics.csv", curve, fieldnames=curve_fields)
 
 
 def parse_args() -> argparse.Namespace:
@@ -2144,6 +2991,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--protocol",
+        choices=("frozen", "fast_adapt", "online_write", "all"),
+        default="all",
+        help="protocol selection; each selected protocol reloads every checkpoint",
+    )
+    parser.add_argument(
+        "--variants", nargs="+",
+        choices=CL_PROTOCOL_VARIANTS + tuple(LEGACY_CL_VARIANT_MAP),
+        default=None,
+        help="canonical protocol/full keys; legacy names are accepted as aliases",
+    )
     parser.add_argument("--task-start", type=int, default=None)
     parser.add_argument("--task-end", type=int, default=None)
     parser.add_argument(
@@ -2195,6 +3054,20 @@ def parse_args() -> argparse.Namespace:
         help="skip automatic plots derived from the aggregate CL metrics",
     )
     parser.add_argument(
+        "--no-adaptation-evaluation",
+        action="store_true",
+        help="skip independent support/query adaptation curves",
+    )
+    parser.add_argument(
+        "--fwt-scratch-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "fixed C_init checkpoint for protocol-scoped FWT; when omitted, "
+            "FWT is reported as unavailable rather than inferred from C_0"
+        ),
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="print per-sequence progress from the underlying evaluator",
     )
@@ -2227,20 +3100,22 @@ def main() -> None:
     args.checkpoint_dir = args.checkpoint_dir.expanduser()
     args.output_dir = args.output_dir.expanduser()
     data_root = _normalise_data_root(args.data_root)
-    task_sets = _discover_task_sets(data_root)
+    protocol = CLProtocol.load(data_root)
+    task_sets = _discover_task_sets(data_root, protocol)
     checkpoint_paths = _discover_checkpoints(args.checkpoint_dir)
     if not task_sets:
         raise FileNotFoundError(f"no task_XX/test.csv files found below {data_root}")
     if not checkpoint_paths:
         raise FileNotFoundError(
-            f"no task_XX.pt checkpoints found below {args.checkpoint_dir}"
+            f"no task_XX_best.pt (or legacy task_XX.pt) checkpoints found "
+            f"below {args.checkpoint_dir}"
         )
 
     available_ids = sorted(set(task_sets).intersection(checkpoint_paths))
+    range_start, range_end = protocol.resolve_range(args.task_start, args.task_end)
     selected_ids = [
         task_id for task_id in available_ids
-        if (args.task_start is None or task_id >= args.task_start)
-        and (args.task_end is None or task_id <= args.task_end)
+        if range_start <= task_id <= range_end
     ]
     if not selected_ids:
         raise ValueError(
@@ -2249,7 +3124,7 @@ def main() -> None:
         )
     skipped_ids = sorted(set(task_sets).symmetric_difference(checkpoint_paths))
 
-    stage_metadata = _read_stage_metadata(data_root)
+    stage_metadata = _read_stage_metadata(protocol)
     for task_id, evaluation_set in list(task_sets.items()):
         metadata = stage_metadata.get(task_id, {})
         task_sets[task_id] = EvaluationSet(
@@ -2259,18 +3134,35 @@ def main() -> None:
             task_id=task_id,
             regime_id=metadata.get("regime_id"),
             stage_label=metadata.get("stage_label"),
+            evaluation_scope="persistent",
         )
-    regime_first_seen = _first_seen_regimes(stage_metadata)
-    if not regime_first_seen:
-        for task_id in sorted(task_sets):
-            regime_id = task_sets[task_id].regime_id
-            if regime_id:
-                regime_first_seen.setdefault(str(regime_id), task_id)
+    # Persistent-law metrics are deliberately scoped by the protocol.  The
+    # manifest may list transient diagnostic laws in first_seen, but they must
+    # not enter CL-NLL, average forgetting, or BWT averages.
+    regime_first_seen = {
+        regime_id: protocol.first_seen[regime_id]
+        for regime_id in protocol.persistent_regimes
+        if regime_id in protocol.first_seen
+    }
+    all_regime_first_seen = dict(protocol.first_seen)
 
-    # The CL benchmark has one primary protocol: frozen full-memory inference.
-    # Mechanism ablations and online write/read behavior are evaluated elsewhere.
-    variants = ["full_frozen"]
-    anchors = [] if args.no_anchors else _discover_anchors(data_root)
+    if args.variants is not None:
+        variants = list(dict.fromkeys(
+            _canonical_variant(variant) for variant in args.variants
+        ))
+    else:
+        variants_by_protocol = {
+            "frozen": ["frozen/full"],
+            "fast_adapt": ["fast_adapt/full"],
+            "online_write": ["online_write/full"],
+            "all": list(CL_PROTOCOL_VARIANTS),
+        }
+        variants = variants_by_protocol[args.protocol]
+    anchors = (
+        []
+        if args.no_anchors
+        else _discover_anchors(data_root, protocol)
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     print(
         f"[CL Eval] data={data_root} checkpoints={args.checkpoint_dir} "
@@ -2280,12 +3172,29 @@ def main() -> None:
 
     checkpoint_meta: dict[int, dict[str, Any]] = {}
     checkpoint_sha: dict[int, str] = {}
+    benchmark_manifest_sha = _sha256(protocol.manifest_path)
     expected_types: int | None = None
     expected_basis: int | None = None
     tree_by_checkpoint: dict[int, dict[str, Any]] = {}
     for task_id in selected_ids:
         checkpoint = checkpoint_paths[task_id]
         metadata = _checkpoint_meta(checkpoint)
+        protocol_metadata = metadata.get("cl_protocol", {})
+        saved_manifest_sha = protocol_metadata.get("benchmark_sha256")
+        if (
+            saved_manifest_sha is not None
+            and saved_manifest_sha != benchmark_manifest_sha
+        ):
+            raise ValueError(
+                f"checkpoint task_{task_id:02d} was created from a different "
+                "benchmark_manifest.json"
+            )
+        saved_task_id = protocol_metadata.get("task_id")
+        if saved_task_id is not None and int(saved_task_id) != int(task_id):
+            raise ValueError(
+                f"checkpoint task_{task_id:02d} declares cl task "
+                f"{saved_task_id}"
+            )
         checkpoint_meta[task_id] = metadata
         checkpoint_sha[task_id] = _sha256(checkpoint)
         current_types = int(metadata["model_config"]["num_event_types"])
@@ -2311,16 +3220,30 @@ def main() -> None:
         tree_by_checkpoint[task_id] = _tree_health(checkpoint)
     assert expected_types is not None
     assert expected_basis is not None
+    if expected_types != protocol.event_dim:
+        raise ValueError(
+            f"checkpoint event dimension {expected_types} disagrees with "
+            f"protocol event_dim {protocol.event_dim}"
+        )
+    if expected_basis != len(protocol.betas):
+        raise ValueError(
+            f"checkpoint basis count {expected_basis} disagrees with "
+            f"protocol betas {len(protocol.betas)}"
+        )
     ground_truth: dict[str, GroundTruthLaw] = {}
     ground_truth_meta: dict[str, Any] = {"available": False, "disabled": True}
-    if not args.no_hawkes_law_evaluation and anchors:
+    if (
+        not args.no_hawkes_law_evaluation
+        and anchors
+        and "frozen/full" in variants
+    ):
         ground_truth, ground_truth_meta = _load_ground_truth(
             data_root, expected_types, expected_basis
         )
         if ground_truth:
             print(
                 f"[CL Eval] Hawkes law layer: regimes={len(ground_truth)} "
-                "variant=full_frozen "
+                "variant=frozen/full "
                 f"grid={args.intensity_samples}",
                 flush=True,
             )
@@ -2336,11 +3259,14 @@ def main() -> None:
     metric_rows: list[dict[str, Any]] = []
     task_matrix_rows: list[dict[str, Any]] = []
     anchor_matrix_rows: list[dict[str, Any]] = []
+    control_matrix_rows: list[dict[str, Any]] = []
+    protocol_event_rows: list[dict[str, Any]] = []
     event_writer = (
         _EventPredictionWriter(args.output_dir / "event_predictions.csv")
         if args.save_event_predictions
         else None
     )
+    protocol_task_ids = list(protocol.task_ids)
     for checkpoint_task in selected_ids:
         checkpoint = checkpoint_paths[checkpoint_task]
         evaluation_sets: list[EvaluationSet] = []
@@ -2348,8 +3274,11 @@ def main() -> None:
             evaluation_sets.append(task_sets[checkpoint_task])
         else:
             evaluation_sets.append(task_sets[checkpoint_task])
-            next_task = checkpoint_task + 1
-            if next_task in task_sets:
+            next_task = next(
+                (task_id for task_id in protocol_task_ids if task_id > checkpoint_task),
+                None,
+            )
+            if next_task is not None and next_task in task_sets:
                 next_set = task_sets[next_task]
                 evaluation_sets.append(EvaluationSet(
                     name=f"{next_set.name}_pre",
@@ -2358,7 +3287,18 @@ def main() -> None:
                     task_id=next_set.task_id,
                     regime_id=next_set.regime_id,
                     stage_label=next_set.stage_label,
+                    evaluation_scope=next_set.evaluation_scope,
                 ))
+                next_control = _paired_control_set(
+                    protocol, next_task, pre_update=True
+                )
+                if next_control is not None:
+                    evaluation_sets.append(next_control)
+        current_control = _paired_control_set(
+            protocol, checkpoint_task, pre_update=False
+        )
+        if current_control is not None:
+            evaluation_sets.append(current_control)
         evaluation_sets.extend(anchors)
         for evaluation_set in evaluation_sets:
             if evaluation_set.path not in evaluation_cache:
@@ -2373,7 +3313,7 @@ def main() -> None:
         for variant in variants:
             print(
                 f"[CL Eval] checkpoint=task_{checkpoint_task:02d} "
-                f"batched_sets={[item.name for item in evaluation_sets]} "
+                f"sets={[item.name for item in evaluation_sets]} "
                 f"variant={variant} "
                 f"sequences={sum(len(evaluation_cache[item.path]) for item in evaluation_sets)} "
                 f"batch_size={args.eval_batch_size}",
@@ -2407,23 +3347,95 @@ def main() -> None:
                 metric_rows.append(current_metric_row)
                 if evaluation_set.kind in {"task_test", "task_test_pre"}:
                     task_matrix_rows.append(current_metric_row)
+                elif evaluation_set.kind in {"matched_control", "matched_control_pre"}:
+                    control_matrix_rows.append(current_metric_row)
                 else:
                     anchor_matrix_rows.append(current_metric_row)
+                selected_event_rows = [
+                    row for row in event_rows
+                    if row.get("eval_set_id") == evaluation_set.name
+                ]
+                protocol_event_rows.extend(
+                    _decorate_event_rows(selected_event_rows, current_metric_row)
+                )
                 if event_writer is not None:
-                    event_writer.write(
-                        [
-                            row for row in event_rows
-                            if row.get("eval_set_id") == evaluation_set.name
-                        ],
-                        current_metric_row,
-                    )
+                    event_writer.write(selected_event_rows, current_metric_row)
 
+    # Reduce all raw observations to the canonical CL contract.  Retention,
+    # forgetting, and BWT are defined on the frozen checkpoint matrix.  The
+    # adaptation curves use independent support/query files and a fresh
+    # pre-task clone for every K; they never enter the frozen CL aggregates.
+    frozen_metric_rows = [
+        row for row in metric_rows if row.get("variant") == "frozen/full"
+    ]
+    scratch_nll_by_task = _fwt_scratch_nlls(
+        getattr(args, "fwt_scratch_checkpoint", None),
+        protocol,
+        selected_ids,
+        evaluation_cache,
+        expected_types,
+        args,
+    )
+    frozen_records = _frozen_anchor_records(frozen_metric_rows)
+    boundary_records = _task_boundary_records(
+        frozen_metric_rows,
+        protocol,
+        scratch_nll_by_task=scratch_nll_by_task,
+    )
+    adaptation_records: list[AdaptationRecord] = []
+    for adaptation_variant in ("fast_adapt/full", "online_write/full"):
+        if adaptation_variant not in variants:
+            continue
+        adaptation_records.extend(_adaptation_records(
+            protocol,
+            checkpoint_paths,
+            selected_ids,
+            expected_types,
+            args,
+            variant=adaptation_variant,
+        ))
+    topology_events = _read_topology_events(args.checkpoint_dir)
+    hm_state_records = _hm_state_records(
+        selected_ids,
+        tree_by_checkpoint,
+        topology_events,
+    )
+    metric_engine = CLMetricEngine(protocol)
+    metric_report = metric_engine.evaluate(
+        frozen_anchor_records=frozen_records,
+        task_boundary_records=boundary_records,
+        adaptation_records=adaptation_records,
+        hm_state_records=hm_state_records,
+    )
+
+    frozen_variants = ["frozen/full"] if frozen_metric_rows else []
     continual_rows = _continual_summary(
-        metric_rows, selected_ids, variants, tree_by_checkpoint
+        frozen_metric_rows, selected_ids, frozen_variants, tree_by_checkpoint
     )
-    law_rows, law_summary_rows = _law_metrics(
-        metric_rows, selected_ids, variants, regime_first_seen
-    )
+    law_rows = [
+        {"variant": "frozen/full", **row}
+        for row in metric_report["law_metrics"]
+    ]
+    law_summary_rows = [
+        {"variant": "frozen/full", **row}
+        for row in metric_report["continual_summary"]
+    ]
+    existing_summary_tasks = {
+        int(row["checkpoint_task"]) for row in law_summary_rows
+    }
+    for checkpoint_task in selected_ids:
+        if checkpoint_task in existing_summary_tasks:
+            continue
+        law_summary_rows.append({
+            "variant": "frozen/full",
+            "checkpoint_task": int(checkpoint_task),
+            "seen_law_count": 0,
+            "clnll": None,
+            "average_forgetting": None,
+            "average_bwt": None,
+            "bwt_law_count": 0,
+        })
+    law_summary_rows.sort(key=lambda row: int(row["checkpoint_task"]))
     law_summary_by_key = {
         (row["variant"], row["checkpoint_task"]): row
         for row in law_summary_rows
@@ -2433,21 +3445,57 @@ def main() -> None:
             (row["variant"], row["checkpoint_task"]),
             {},
         ))
-    stage_rows = _stage_metrics(metric_rows, variants)
-    anchor_matrix_rows_wide = _anchor_nll_matrix(metric_rows)
-    special_rows = _special_case_metrics(metric_rows)
+    stage_rows = _stage_metrics(
+        frozen_metric_rows,
+        frozen_variants,
+        protocol=protocol,
+        scratch_nll_by_task=scratch_nll_by_task,
+    )
+    anchor_matrix_rows_wide = [
+        {"variant": "frozen/full", **row}
+        for row in metric_report["frozen_anchor_matrix"]
+    ]
+    special_rows = _special_case_metrics(
+        frozen_metric_rows, variant="frozen/full", protocol=protocol
+    )
+    for row in metric_report["rrr"]["rows"]:
+        special_rows.append({
+            "metric": f"{_safe_name(row['regime_id'])}_rrr_task{row['return_task']}",
+            "variant": "frozen/full",
+            "formula": (
+                "(L_first_pre - L_return_pre) / "
+                "(L_first_pre - L_first_post)"
+            ),
+            "value": row.get("rrr"),
+            "left_value": row.get("first_pre_nll"),
+            "right_value": row.get("return_pre_nll"),
+            "expected": row.get("status", "diagnostic"),
+        })
+    hm_state_rows = metric_report["hm_state"]
+    hm_state_by_task = {
+        int(row["task_id"]): row for row in hm_state_rows
+    }
     checkpoint_rows = []
     for task_id in selected_ids:
+        hm_state = hm_state_by_task.get(task_id, {})
         checkpoint_rows.append({
             "checkpoint_task": task_id,
             "checkpoint": str(checkpoint_paths[task_id].resolve()),
             "checkpoint_sha256": checkpoint_sha[task_id],
             **tree_by_checkpoint[task_id],
+            "episodic_rows": hm_state.get("episodic_rows"),
+            "episodic_bytes": hm_state.get("episodic_bytes"),
+            "semantic_bytes": hm_state.get("semantic_bytes"),
+            "split_count": hm_state.get("split_count"),
+            "merge_count": hm_state.get("merge_count"),
+            "prune_count": hm_state.get("prune_count"),
+            "nise": hm_state.get("nise"),
             "history_epochs": len(checkpoint_meta[task_id].get("history", [])),
         })
 
     write_csv(args.output_dir / "all_metrics.csv", metric_rows)
     write_csv(args.output_dir / "task_metrics.csv", task_matrix_rows)
+    write_csv(args.output_dir / "control_metrics.csv", control_matrix_rows)
     write_csv(args.output_dir / "anchor_metrics.csv", anchor_matrix_rows)
     write_csv(args.output_dir / "continual_summary.csv", continual_rows)
     write_csv(args.output_dir / "law_metrics.csv", law_rows)
@@ -2458,24 +3506,94 @@ def main() -> None:
     if event_writer is not None:
         event_writer.close()
 
-    intensity_rows, intensity_summary_rows = (
-        _hawkes_law_evaluation(
+    if "frozen/full" in variants:
+        intensity_rows, intensity_summary_rows = _hawkes_law_evaluation(
             checkpoint_paths=checkpoint_paths,
             checkpoint_tasks=selected_ids,
             anchors=anchors,
             evaluation_cache=evaluation_cache,
             ground_truth=ground_truth,
-            regime_first_seen=regime_first_seen,
+            regime_first_seen=all_regime_first_seen,
             args=args,
             expected_types=expected_types,
+            transient_regimes=protocol.transient_regimes,
         )
-    )
+    else:
+        intensity_rows, intensity_summary_rows = [], []
     ood_rows = _ood_metrics(
-        metric_rows, ground_truth, regime_first_seen
+        frozen_metric_rows, ground_truth, regime_first_seen
     )
+    nise_by_task: dict[int, float | None] = {}
+    for task_id in selected_ids:
+        values = []
+        for row in intensity_summary_rows:
+            if (
+                row.get("evaluation_scope") != "seen_law"
+                or row.get("variant") != "frozen/full"
+            ):
+                continue
+            try:
+                row_task = int(row.get("checkpoint_task"))
+            except (TypeError, ValueError):
+                continue
+            if row_task == int(task_id):
+                values.append(row.get("nise_mean"))
+        nise_by_task[int(task_id)] = _mean(values)
+    for row in hm_state_rows:
+        row["nise"] = nise_by_task.get(int(row["task_id"]))
+    for row in checkpoint_rows:
+        row["nise"] = nise_by_task.get(int(row["checkpoint_task"]))
     write_csv(args.output_dir / "intensity_metrics.csv", intensity_rows)
     write_csv(args.output_dir / "intensity_summary.csv", intensity_summary_rows)
     write_csv(args.output_dir / "ood_metrics.csv", ood_rows)
+    write_csv(
+        args.output_dir / "fwt_metrics.csv",
+        metric_report["fwt"]["rows"],
+        fieldnames=(
+            "task_id", "pre_nll", "post_nll", "scratch_nll", "shift_type",
+            "recurrence_of", "new_persistent_regimes", "adaptation_gain_nll",
+            "fwt_nll", "fwt_eligible", "fwt_status",
+        ),
+    )
+    write_csv(
+        args.output_dir / "adaptation_points.csv",
+        metric_report["adaptation"]["points"],
+        fieldnames=(
+            "protocol", "task_id", "K", "pre_nll", "adapted_nll", "gain_nll",
+        ),
+    )
+    write_csv(
+        args.output_dir / "adaptation_summary.csv",
+        metric_report["adaptation"]["summary"],
+        fieldnames=(
+            "protocol", "task_id", "K_min", "K_max", "K_count",
+            "adaptation_auc", "status",
+        ),
+    )
+    write_csv(
+        args.output_dir / "rrr_metrics.csv",
+        metric_report["rrr"]["rows"],
+        fieldnames=(
+            "regime_id", "first_task", "return_task", "shift_type",
+            "first_pre_nll", "first_post_nll", "return_pre_nll",
+            "first_gain_nll", "rrr", "status",
+        ),
+    )
+    write_csv(args.output_dir / "hm_state.csv", hm_state_rows)
+    (args.output_dir / "cl_metrics.json").write_text(
+        json.dumps(_jsonable(metric_report), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _write_protocol_outputs(
+        args.output_dir,
+        metric_rows,
+        protocol_event_rows,
+        continual_rows,
+        law_rows,
+        anchor_matrix_rows_wide,
+        metric_report["adaptation"]["points"],
+        metric_report["adaptation"]["summary"],
+    )
 
     summary_plot_paths = (
         []
@@ -2493,9 +3611,19 @@ def main() -> None:
 
     summary = {
         "data_root": str(data_root.resolve()),
+        "benchmark_manifest": str(
+            protocol.manifest_path.resolve()
+        ),
+        "benchmark": protocol.benchmark_id,
+        "benchmark_version": protocol.version,
+        "persistent_regimes": sorted(protocol.persistent_regimes),
+        "transient_regimes": sorted(protocol.transient_regimes),
         "checkpoint_dir": str(args.checkpoint_dir.resolve()),
         "output_dir": str(args.output_dir.resolve()),
         "protocol": "frozen",
+        "protocols": variants,
+        "primary_protocol": "frozen",
+        "memory_view": "full",
         "variants": variants,
         "task_ids": selected_ids,
         "available_data_task_ids": sorted(task_sets),
@@ -2504,6 +3632,7 @@ def main() -> None:
         "current_only": bool(args.current_only),
         "anchors_enabled": not args.no_anchors,
         "anchor_files": [str(item.path.resolve()) for item in anchors],
+        "controls": list(protocol.controls),
         "tasks": [
             {
                 "task_id": task_id,
@@ -2516,18 +3645,35 @@ def main() -> None:
         ],
         "tree": tree_by_checkpoint,
         "regime_first_seen": regime_first_seen,
+        "all_regime_first_seen": all_regime_first_seen,
         "ground_truth": ground_truth_meta,
         "hawkes_law_evaluation": {
-            "enabled": not args.no_hawkes_law_evaluation and bool(anchors),
-            "variant": "full_frozen",
+            "enabled": (
+                not args.no_hawkes_law_evaluation
+                and bool(anchors)
+                and "frozen/full" in variants
+            ),
+            "variant": "frozen/full",
             "intensity_samples": args.intensity_samples,
             "intensity_plot_anchors": args.intensity_plot_anchors,
         },
         "metrics": metric_rows,
+        "control_metrics": control_matrix_rows,
         "continual_summary": continual_rows,
         "law_metrics": law_rows,
         "stage_metrics": stage_rows,
         "anchor_nll_matrix": anchor_matrix_rows_wide,
+        "cl_metrics": metric_report,
+        "fwt": metric_report["fwt"],
+        "adaptation": metric_report["adaptation"],
+        "rrr": metric_report["rrr"],
+        "hm_state": hm_state_rows,
+        "topology_events": [dict(row) for row in topology_events],
+        "fwt_scratch_checkpoint": (
+            None
+            if getattr(args, "fwt_scratch_checkpoint", None) is None
+            else str(Path(args.fwt_scratch_checkpoint).expanduser().resolve())
+        ),
         "special_case_metrics": special_rows,
         "intensity_metrics": intensity_rows,
         "intensity_summary": intensity_summary_rows,
@@ -2560,6 +3706,7 @@ def main() -> None:
         tree_by_checkpoint=tree_by_checkpoint,
         skipped_tasks=skipped_ids,
         anchors_enabled=not args.no_anchors,
+        metric_report=metric_report,
     )
     print(f"[Done] CL report: {args.output_dir / 'report.md'}", flush=True)
 

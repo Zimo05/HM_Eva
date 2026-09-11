@@ -520,6 +520,7 @@ class TrainingLifecycleMixin:
             base_group["group_name"] = "base"
         base_group["params"] = base_parameters
         base_group["lr"] = self.training_config.learning_rate
+        base_group["weight_decay"] = self.training_config.weight_decay
 
         router_group = groups_by_name.get("router")
         if router_group is None:
@@ -532,6 +533,7 @@ class TrainingLifecycleMixin:
             self.training_config.learning_rate
             * self.training_config.router_lr_scale
         )
+        router_group["weight_decay"] = self.training_config.weight_decay
         self.optimizer.param_groups = [base_group, router_group]
 
     def _restore_optimizer(
@@ -949,6 +951,17 @@ class TrainingLifecycleMixin:
         trainer._reconcile_optimizer_parameters()
         trainer.history = list(checkpoint.get("history", []))
         trainer.completed_epochs = int(checkpoint.get("epoch", 0))
+        validation_selection = checkpoint.get("validation_selection", {})
+        if isinstance(validation_selection, Mapping):
+            trainer.validation_history = list(
+                validation_selection.get("history", []) or []
+            )
+            saved_best = validation_selection.get("best")
+            trainer.best_validation = (
+                dict(saved_best)
+                if isinstance(saved_best, Mapping)
+                else None
+            )
         rng_state = checkpoint.get("rng_state", {})
         if "torch" in rng_state:
             torch.set_rng_state(rng_state["torch"].cpu())

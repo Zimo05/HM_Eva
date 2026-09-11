@@ -95,13 +95,20 @@ def stationary_args(*, dws: bool = False) -> argparse.Namespace:
 def continual_args(*, replay: bool = False) -> argparse.Namespace:
     parser = common_parser("Run one continual-learning evaluation cell")
     parser.add_argument("--task-start", type=int, default=0)
-    parser.add_argument("--task-end", type=int, default=9)
+    parser.add_argument(
+        "--task-end",
+        type=int,
+        default=None,
+        help="last task; resolved from the loaded benchmark protocol when omitted",
+    )
     parser.add_argument("--data-root", type=Path, default=None)
     if replay:
         parser.add_argument("--hm-resource-root", type=Path, required=True)
     args = _parse(parser)
-    if not 0 <= args.task_start <= args.task_end <= 9:
-        parser.error("task range must satisfy 0 <= start <= end <= 9")
+    if args.task_start < 0:
+        parser.error("--task-start must be non-negative")
+    if args.task_end is not None and args.task_end < args.task_start:
+        parser.error("--task-end must be greater than or equal to --task-start")
     return args
 
 
@@ -113,6 +120,20 @@ def diagnostic_args(kind: str) -> argparse.Namespace:
         parser.add_argument("--rank", required=True, choices=("0", "1", "2", "4", "8", "D"))
     if kind in {"timescales", "consolidation", "tree_growth"}:
         parser.add_argument("--task-start", type=int, default=0)
-        parser.add_argument("--task-end", type=int, default=9)
+        parser.add_argument(
+            "--task-end",
+            type=int,
+            default=None,
+            help="last task; resolved from the loaded benchmark protocol when omitted",
+        )
         parser.add_argument("--data-root", type=Path, default=None)
-    return _parse(parser)
+    args = _parse(parser)
+    if hasattr(args, "task_start") and args.task_start < 0:
+        parser.error("--task-start must be non-negative")
+    if (
+        hasattr(args, "task_end")
+        and args.task_end is not None
+        and args.task_end < args.task_start
+    ):
+        parser.error("--task-end must be greater than or equal to --task-start")
+    return args

@@ -5,6 +5,8 @@ import random
 from collections import Counter
 from typing import Iterable, Mapping, Sequence
 
+from .cl_metrics import compute_retention_metrics
+
 
 def mean(values: Iterable[float]) -> float:
     values = list(values)
@@ -61,24 +63,41 @@ def paired_permutation_test(left: Sequence[float], right: Sequence[float], seed:
 
 
 def adaptation_auc(points: Mapping[int, float]) -> float:
+    """Return normalized adaptation AUC over the actual K span.
+
+    ``K`` is the number of support events, so every curve must include its
+    ``K=0`` pre-adaptation baseline.  Keeping this compatibility wrapper here
+    lets older callers use the same contract as the canonical CL engine.
+    """
+
     ordered = sorted((int(k), float(v)) for k, v in points.items())
-    if len(ordered) < 2 or ordered[-1][0] <= 0:
-        raise ValueError("adaptation AUC needs at least two K values and Kmax > 0")
-    area = sum((b_k - a_k) * (a_v + b_v) / 2 for (a_k, a_v), (b_k, b_v) in zip(ordered, ordered[1:]))
-    return area / ordered[-1][0]
+    if len(ordered) < 2 or ordered[0][0] != 0:
+        raise ValueError("adaptation AUC requires at least two K values including K=0")
+    span = ordered[-1][0] - ordered[0][0]
+    if span <= 0:
+        raise ValueError("adaptation AUC requires a positive K span")
+    area = sum(
+        (b_k - a_k) * (a_v + b_v) / 2
+        for (a_k, a_v), (b_k, b_v) in zip(ordered, ordered[1:])
+    )
+    return area / span
 
 
 def continual_metrics(matrix: Mapping[int, Mapping[str, float]], first_seen: Mapping[str, int]) -> list[dict]:
-    output = []
-    for task in sorted(matrix):
-        seen = [law for law, start in first_seen.items() if start <= task and law in matrix[task]]
-        forgetting = []
-        bwt = []
-        for law in seen:
-            start = first_seen[law]
-            history = [matrix[t][law] for t in sorted(matrix) if start <= t <= task and law in matrix[t]]
-            forgetting.append(matrix[task][law] - min(history))
-            if start < task and law in matrix.get(start, {}):
-                bwt.append(matrix[start][law] - matrix[task][law])
-        output.append({"task": task, "clnll": mean(matrix[task][law] for law in seen), "average_forgetting": mean(forgetting), "average_bwt": mean(bwt), "seen_laws": len(seen)})
-    return output
+    """Compatibility view over the canonical frozen-anchor contract."""
+
+    _, summaries = compute_retention_metrics(
+        matrix,
+        first_seen=first_seen,
+        persistent_regimes=first_seen,
+    )
+    return [
+        {
+            "task": row["checkpoint_task"],
+            "clnll": row["clnll"],
+            "average_forgetting": row["average_forgetting"],
+            "average_bwt": row["average_bwt"],
+            "seen_laws": row["seen_law_count"],
+        }
+        for row in summaries
+    ]

@@ -1,0 +1,110 @@
+{
+  "seed": 7,
+  "event_dim": 8,
+  "num_basis": 2,
+  "betas": [
+    0.5,
+    1.5
+  ],
+  "regimes": {
+    "A_1": {
+      "array_key": "A_1",
+      "parent_regime": "",
+      "kind": "base",
+      "parameter_distance": 0.0,
+      "spectral_radius": 0.7651462569731126,
+      "metadata": {
+        "motif": "A",
+        "spectral_radius": 0.7651462569731126
+      }
+    },
+    "B_1": {
+      "array_key": "B_1",
+      "parent_regime": "",
+      "kind": "base",
+      "parameter_distance": 0.0,
+      "spectral_radius": 0.7013052800395231,
+      "metadata": {
+        "motif": "B",
+        "spectral_radius": 0.7013052800395231
+      }
+    },
+    "C_1": {
+      "array_key": "C_1",
+      "parent_regime": "",
+      "kind": "base",
+      "parameter_distance": 0.0,
+      "spectral_radius": 0.7578307533594058,
+      "metadata": {
+        "motif": "C",
+        "spectral_radius": 0.7578307533594058
+      }
+    },
+    "B_prime_1": {
+      "array_key": "B_prime_1",
+      "parent_regime": "B_1",
+      "kind": "near_recurrence",
+      "parameter_distance": 0.08417032986813534,
+      "spectral_radius": 0.7497997875477503,
+      "metadata": {
+        "motif": "B",
+        "spectral_radius": 0.7497997875477503,
+        "parent": "B_1"
+      }
+    },
+    "A_2": {
+      "array_key": "A_2",
+      "parent_regime": "A_1",
+      "kind": "specialization",
+      "parameter_distance": 0.12175143297091023,
+      "spectral_radius": 0.722795864395931,
+      "metadata": {
+        "motif": "A",
+        "spectral_radius": 0.722795864395931,
+        "parent": "A_1"
+      }
+    },
+    "X_transient": {
+      "array_key": "X_transient",
+      "parent_regime": "",
+      "kind": "transient",
+      "parameter_distance": 0.0,
+      "spectral_radius": 0.6799999999999998,
+      "metadata": {
+        "motif": "E",
+        "spectral_radius": 0.6799999999999998,
+        "transient": true,
+        "never_reappears": true
+      }
+    },
+    "A_merge": {
+      "array_key": "A_merge",
+      "parent_regime": "A_1|A_2",
+      "kind": "merge",
+      "parameter_distance": 0.060875716485455166,
+      "spectral_radius": 0.7441042070064489,
+      "metadata": {
+        "from": "A_1",
+        "to": "A_2",
+        "alpha": 0.5,
+        "spectral_radius": 0.7441042070064489,
+        "parents": [
+          "A_1",
+          "A_2"
+        ],
+        "merge_target": true
+      }
+    },
+    "E_1": {
+      "array_key": "E_1",
+      "parent_regime": "",
+      "kind": "base",
+      "parameter_distance": 0.0,
+      "spectral_radius": 0.7223417783853432,
+      "metadata": {
+        "motif": "E",
+        "spectral_radius": 0.7223417783853432
+      }
+    }
+  }
+}

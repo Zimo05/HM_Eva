@@ -14,6 +14,7 @@ import json
 import math
 import os
 import random
+import re
 import statistics
 import time
 from collections import Counter, defaultdict
@@ -23,23 +24,127 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 import torch
 
-from Train.Inference import InferenceConfig, MemoryTreeInference
+from Train.Inference import (
+    EvaluationProtocol,
+    InferenceConfig,
+    MemoryTreeInference,
+    inference_config_for_protocol,
+)
 from DataSplit import load_split_manifest
 from ControllerIsolation import head_policy_sha256
 
 
-VARIANTS = {
-    "full_frozen": dict(episodic=True, working=True, online=False),
-    "no_episodic": dict(episodic=False, working=True, online=False),
-    "no_working": dict(episodic=True, working=False, online=False),
-    "semantic_only": dict(episodic=False, working=False, online=False),
-    "full_online": dict(episodic=True, working=True, online=True),
-    # Keeps online usage/working-state behavior but prohibits physical writes.
-    # This avoids deriving a threshold-1.01 checkpoint merely for ablation.
-    "full_online_no_write": dict(
-        episodic=True, working=True, online=True, writes=False
-    ),
+PROTOCOLS = {
+    "frozen": EvaluationProtocol.FROZEN,
+    "fast_adapt": EvaluationProtocol.FAST_ADAPT,
+    "online_write": EvaluationProtocol.ONLINE_WRITE,
 }
+
+# A memory view is orthogonal to the state transition protocol.  In
+# particular, ``frozen/full`` still retrieves the checkpoint's episodic bank;
+# ``semantic_only`` is a mechanism ablation and is not a fourth protocol.
+MEMORY_VIEWS = {
+    "full": dict(episodic=True, working_override=None),
+    "no_episodic": dict(episodic=False, working_override=None),
+    "semantic_only": dict(episodic=False, working_override=False),
+}
+
+LEGACY_VARIANT_MAP = {
+    # The old name enabled working-memory adaptation and therefore meant
+    # fast-adapt, despite its name.
+    "full_frozen": "fast_adapt/full",
+    "full_online": "online_write/full",
+    "no_working": "frozen/full",
+    "no_episodic": "frozen/no_episodic",
+    "semantic_only": "frozen/semantic_only",
+}
+
+
+def _variant_spec(protocol_name: str, memory_view: str) -> dict[str, Any]:
+    protocol = PROTOCOLS[protocol_name]
+    config = inference_config_for_protocol(protocol)
+    view = MEMORY_VIEWS[memory_view]
+    working = config.adapt_working_memory
+    if view["working_override"] is not None:
+        working = bool(view["working_override"])
+    return {
+        "protocol": protocol_name,
+        "memory_view": memory_view,
+        "episodic": bool(view["episodic"]),
+        "working": working,
+        "online": config.update_memory_usage,
+        "writes": config.allow_memory_writes,
+    }
+
+
+# Canonical keys are always ``protocol/memory_view``.  The aliases remain in
+# the accepted input map so old experiment scripts can be resumed, but all
+# newly written rows and summaries use canonical keys.
+VARIANTS = {
+    f"{protocol}/{memory_view}": _variant_spec(protocol, memory_view)
+    for protocol in PROTOCOLS
+    for memory_view in MEMORY_VIEWS
+}
+VARIANTS.update({
+    alias: dict(VARIANTS[canonical], legacy_alias=alias, canonical=canonical)
+    for alias, canonical in LEGACY_VARIANT_MAP.items()
+})
+# Diagnostic write probes used by the controller report historically kept
+# online usage/working state while suppressing physical writes.
+VARIANTS["full_online_no_write"] = {
+    **_variant_spec("online_write", "full"),
+    "writes": False,
+    "legacy_alias": "full_online_no_write",
+    "canonical": "online_write/full_no_write",
+}
+
+
+def _evaluation_spec(variant: str) -> tuple[str, EvaluationProtocol, str, dict[str, Any]]:
+    """Resolve a canonical or legacy evaluator name."""
+
+    canonical = LEGACY_VARIANT_MAP.get(variant, variant)
+    if variant == "full_online_no_write":
+        canonical = "online_write/full_no_write"
+    if canonical in VARIANTS and "/" not in canonical:
+        # A legacy alias that is not in LEGACY_VARIANT_MAP would be a bug in
+        # this table, but retaining this branch makes external callers get a
+        # useful error instead of an opaque tuple-unpacking failure.
+        canonical = VARIANTS[canonical].get("canonical", canonical)
+    if "/" not in canonical:
+        raise KeyError(f"unknown evaluation variant: {variant}")
+    protocol_name, memory_view = canonical.split("/", 1)
+    if protocol_name not in PROTOCOLS:
+        raise KeyError(f"unknown evaluation protocol: {protocol_name}")
+    if memory_view == "full_no_write":
+        settings = dict(VARIANTS["full_online_no_write"])
+    elif memory_view in MEMORY_VIEWS:
+        settings = _variant_spec(protocol_name, memory_view)
+    else:
+        raise KeyError(f"unknown memory view: {memory_view}")
+    return canonical, PROTOCOLS[protocol_name], memory_view, settings
+
+
+def run_protocol(
+    checkpoint: Path,
+    sequences: Sequence[Mapping[str, Any]],
+    protocol: EvaluationProtocol | str,
+    device: str | None,
+    *,
+    memory_view: str = "full",
+    **kwargs: Any,
+) -> tuple[list[dict], MemoryTreeInference, float]:
+    """Evaluate a checkpoint under one explicit protocol and memory view."""
+
+    protocol_name = (
+        protocol.value if isinstance(protocol, EvaluationProtocol) else str(protocol)
+    )
+    return run_variant(
+        checkpoint,
+        sequences,
+        f"{protocol_name}/{memory_view}",
+        device,
+        **kwargs,
+    )
 
 SUPPORTED_ROUTER_KINDS = {
     "node_semantic_compat_v1",
@@ -453,17 +558,21 @@ def run_variant(
     prototype_context_alias_capacity: int | None = None,
     verbose: bool = True,
 ) -> tuple[list[dict], MemoryTreeInference, float]:
-    settings = VARIANTS[variant]
+    canonical, protocol, memory_view, settings = _evaluation_spec(variant)
+    protocol_name = protocol.value
+    probe_writes = (
+        protocol is EvaluationProtocol.ONLINE_WRITE
+        and memory_view in {"full", "full_no_write"}
+    )
     inference = MemoryTreeInference.from_checkpoint(
         checkpoint,
         device=device,
-        inference_config=InferenceConfig(
+        inference_config=inference_config_for_protocol(
+            protocol,
             adapt_working_memory=settings["working"],
-            allow_memory_writes=settings.get("writes", settings["online"]),
+            allow_memory_writes=settings["writes"],
             update_memory_usage=settings["online"],
-            probe_write_counterfactuals=(
-                variant in {"full_online", "full_online_no_write"}
-            ),
+            probe_write_counterfactuals=probe_writes,
             write_probe_seed=42,
             prototype_duplicate_threshold=prototype_duplicate_threshold,
             prototype_mode_threshold=prototype_mode_threshold,
@@ -474,7 +583,7 @@ def run_variant(
     if not settings["episodic"]:
         clear_episodic_memory(inference)
     partial_path = (
-        None if progress_dir is None else progress_dir / f"{variant}.partial.json"
+        None if progress_dir is None else progress_dir / f"{canonical.replace('/', '_')}.partial.json"
     )
     rows: list[dict] = []
     start_position = 0
@@ -487,7 +596,7 @@ def run_variant(
         partial = json.loads(partial_path.read_text(encoding="utf-8"))
         rows = list(partial.get("rows", ()))
         start_position = int(partial.get("completed_sequences", 0))
-        print(f"[Resume] {variant} continuing at sequence {start_position + 1}")
+        print(f"[Resume] {canonical} continuing at sequence {start_position + 1}")
     start = time.perf_counter()
     for sequence_position, sequence in enumerate(sequences[start_position:], start=start_position):
         result = inference.run_sequence(sequence)
@@ -508,10 +617,17 @@ def run_variant(
                 "visited_bank_count", len(event["frontier_node_ids"])
             ))
             rows.append({
-                "variant": variant,
+                "variant": canonical,
+                "protocol": protocol_name,
+                "memory_view": memory_view,
                 "sequence_position": sequence_position,
                 "source_index": int(sequence["source_index"]),
                 "cluster_id": cluster_id,
+                "eval_set_id": sequence.get("eval_set_id"),
+                "eval_kind": sequence.get("eval_kind"),
+                "eval_task": sequence.get("eval_task"),
+                "regime_id": sequence.get("regime_id"),
+                "stage_label": sequence.get("stage_label"),
                 "event_index": int(event["event_index"]),
                 "true_type": int(event["true_type"]),
                 "predicted_type_at_event_time": int(event["predicted_type"]),
@@ -610,21 +726,24 @@ def run_variant(
                 "write_virtual_candidate_alpha": event.get(
                     "write_virtual_candidate_alpha"
                 ),
+                "working_norm": float(event.get("working_norm", 0.0)),
             })
         completed = sequence_position + 1
         elapsed_now = time.perf_counter() - start
         eta = elapsed_now / completed * (len(sequences) - completed)
         if verbose:
             print(
-                f"[Evaluate] {variant} {completed}/{len(sequences)} "
+                f"[Evaluate] {canonical} {completed}/{len(sequences)} "
                 f"elapsed={elapsed_now:.1f}s eta={eta:.1f}s",
                 flush=True,
             )
         if progress_dir is not None:
             progress_dir.mkdir(parents=True, exist_ok=True)
-            (progress_dir / f"{variant}.progress.json").write_text(
+            (progress_dir / f"{canonical.replace('/', '_')}.progress.json").write_text(
                 json.dumps({
-                    "variant": variant,
+                    "variant": canonical,
+                    "protocol": protocol_name,
+                    "memory_view": memory_view,
                     "completed_sequences": completed,
                     "total_sequences": len(sequences),
                     "elapsed_seconds": elapsed_now,
@@ -654,7 +773,7 @@ def run_variant_compact(
     capture_event_predictions: bool = False,
     verbose: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], MemoryTreeInference, float]:
-    """Evaluate frozen sequences with device-side scalar accumulation.
+    """Evaluate read-only-persistent sequences with scalar accumulation.
 
     This is deliberately separate from :func:`run_variant`, whose large event
     rows are still required by the generic ablation/diagnostic evaluator.  The
@@ -662,13 +781,11 @@ def run_variant_compact(
     from padded ``[B, L_max]`` batches, static routing tables are shared, and
     each sequence then keeps its original causal Working Memory recurrence.
     """
-    if variant not in VARIANTS:
-        raise KeyError(f"unknown evaluation variant: {variant}")
+    canonical, protocol, memory_view, settings = _evaluation_spec(variant)
     if not sequences:
         raise ValueError("compact evaluation requires at least one sequence")
     if sequence_batch_size <= 0:
         raise ValueError("sequence_batch_size must be positive")
-    settings = VARIANTS[variant]
     if settings["online"] or settings.get("writes", settings["online"]):
         raise ValueError(
             "compact evaluation is restricted to frozen read-only variants"
@@ -677,7 +794,8 @@ def run_variant_compact(
     inference = MemoryTreeInference.from_checkpoint(
         checkpoint,
         device=device,
-        inference_config=InferenceConfig(
+        inference_config=inference_config_for_protocol(
+            protocol,
             adapt_working_memory=settings["working"],
             allow_memory_writes=False,
             update_memory_usage=False,
@@ -754,7 +872,9 @@ def run_variant_compact(
             if capture_event_predictions:
                 for event in result.get("events", ()):
                     event_rows.append({
-                        "variant": variant,
+                        "variant": canonical,
+                        "protocol": protocol.value,
+                        "memory_view": memory_view,
                         "eval_set_id": group_id,
                         "sequence_position": int(
                             source_sequence.get(
@@ -763,6 +883,10 @@ def run_variant_compact(
                         ),
                         "source_index": int(source_sequence["source_index"]),
                         "cluster_id": source_sequence.get("cluster_id"),
+                        "eval_kind": source_sequence.get("eval_kind"),
+                        "eval_task": source_sequence.get("eval_task"),
+                        "regime_id": source_sequence.get("regime_id"),
+                        "stage_label": source_sequence.get("stage_label"),
                         "event_index": int(event["event_index"]),
                         "true_type": int(event["true_type"]),
                         "predicted_type_at_event_time": int(
@@ -782,6 +906,43 @@ def run_variant_compact(
                         "true_time": float(event["true_time"]),
                         "predicted_time": float(event["predicted_time"]),
                         "predicted_delta": float(event["predicted_delta"]),
+                        "retrieval_hit": bool(event.get(
+                            "retrieval_hit",
+                            float(event.get("retrieval_alpha_mass", 0.0))
+                            > 1e-6,
+                        )),
+                        "retrieval_alpha_mass": float(event.get(
+                            "retrieval_alpha_mass", 0.0
+                        )),
+                        "retrieval_alpha_per_visited_node": float(event.get(
+                            "retrieval_alpha_per_visited_node", 0.0
+                        )),
+                        "retrieval_similarity": float(event.get(
+                            "retrieval_similarity", -1.0
+                        )),
+                        "retrieval_effective_k": int(event.get(
+                            "retrieval_effective_k", 0
+                        )),
+                        "retrieval_null_alpha": float(event.get(
+                            "retrieval_null_alpha", 1.0
+                        )),
+                        "visited_bank_count": int(event.get(
+                            "visited_bank_count", 0
+                        )),
+                        "visited_nonempty_bank_count": int(event.get(
+                            "visited_nonempty_bank_count", 0
+                        )),
+                        "raw_episodic_residual_norm": float(event.get(
+                            "raw_episodic_residual_norm", 0.0
+                        )),
+                        "episodic_residual_norm": float(event.get(
+                            "episodic_residual_norm", 0.0
+                        )),
+                        "retrieve_gate": float(event.get(
+                            "retrieve_gate", 0.0
+                        )),
+                        "working_norm": float(event.get("working_norm", 0.0)),
+                        "write_count": 0,
                     })
 
             completed = sequence_position + 1
@@ -789,15 +950,17 @@ def run_variant_compact(
             if verbose:
                 eta = elapsed_now / completed * (len(sequences) - completed)
                 print(
-                    f"[Evaluate compact] {variant} {completed}/{len(sequences)} "
+                    f"[Evaluate compact] {canonical} {completed}/{len(sequences)} "
                     f"elapsed={elapsed_now:.1f}s eta={eta:.1f}s",
                     flush=True,
                 )
             if progress_dir is not None:
                 progress_dir.mkdir(parents=True, exist_ok=True)
-                (progress_dir / f"{variant}.progress.json").write_text(
+                (progress_dir / f"{canonical.replace('/', '_')}.progress.json").write_text(
                     json.dumps({
-                        "variant": variant,
+                        "variant": canonical,
+                        "protocol": protocol.value,
+                        "memory_view": memory_view,
                         "completed_sequences": completed,
                         "total_sequences": len(sequences),
                         "elapsed_seconds": elapsed_now,
@@ -834,10 +997,8 @@ def preflight_checkpoint(
     inference = MemoryTreeInference.from_checkpoint(
         checkpoint,
         device=device,
-        inference_config=InferenceConfig(
-            adapt_working_memory=True,
-            allow_memory_writes=False,
-            update_memory_usage=False,
+        inference_config=inference_config_for_protocol(
+            EvaluationProtocol.FROZEN,
             prototype_duplicate_threshold=prototype_duplicate_threshold,
             prototype_mode_threshold=prototype_mode_threshold,
             prototype_context_alias_capacity=prototype_context_alias_capacity,
@@ -866,6 +1027,29 @@ def preflight_checkpoint(
     )
     if not all(math.isfinite(value) for value in numeric):
         raise FloatingPointError("preflight produced non-finite event NLL")
+
+
+def run_protocol_compact(
+    checkpoint: Path,
+    sequences: Sequence[Mapping[str, Any]],
+    protocol: EvaluationProtocol | str,
+    device: str | None,
+    *,
+    memory_view: str = "full",
+    **kwargs: Any,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], MemoryTreeInference, float]:
+    """Compact counterpart to :func:`run_protocol` for read-only protocols."""
+
+    protocol_name = (
+        protocol.value if isinstance(protocol, EvaluationProtocol) else str(protocol)
+    )
+    return run_variant_compact(
+        checkpoint,
+        sequences,
+        f"{protocol_name}/{memory_view}",
+        device,
+        **kwargs,
+    )
 
 
 def tree_metrics(inference: MemoryTreeInference, rows: Sequence[Mapping[str, Any]]) -> tuple[dict, list[dict]]:
@@ -1003,13 +1187,28 @@ def ablation_metrics(all_rows: Mapping[str, Sequence[Mapping[str, Any]]], seed: 
         variant: {(int(row["source_index"]), int(row["event_index"])): row for row in rows}
         for variant, rows in all_rows.items()
     }
-    comparisons = [
-        ("episodic_gain", "no_episodic", "full_frozen"),
-        ("working_gain", "no_working", "full_frozen"),
-        ("total_memory_gain", "semantic_only", "full_frozen"),
-        ("online_vs_frozen_gain", "full_frozen", "full_online"),
-        ("realized_write_gain", "full_online_no_write", "full_online"),
-    ]
+    legacy_mode = any(
+        name in keyed
+        for name in (
+            "full_frozen", "no_episodic", "no_working", "semantic_only",
+            "full_online", "full_online_no_write",
+        )
+    )
+    comparisons = (
+        [
+            ("episodic_gain", "no_episodic", "full_frozen"),
+            ("working_gain", "no_working", "full_frozen"),
+            ("total_memory_gain", "semantic_only", "full_frozen"),
+            # These are retained for historical summaries only.  The new
+            # evaluator reports protocol transitions as adaptation curves.
+            ("online_vs_frozen_gain", "full_frozen", "full_online"),
+            ("realized_write_gain", "full_online_no_write", "full_online"),
+        ]
+        if legacy_mode else [
+            ("episodic_gain", "frozen/no_episodic", "frozen/full"),
+            ("total_memory_gain", "frozen/semantic_only", "frozen/full"),
+        ]
+    )
     output = []
     for name, baseline, target in comparisons:
         if baseline not in keyed or target not in keyed:
@@ -1027,7 +1226,7 @@ def ablation_metrics(all_rows: Mapping[str, Sequence[Mapping[str, Any]]], seed: 
             "negative_gain_fraction": _mean(float(value < 0) for value in gains),
             "bootstrap_95ci": bootstrap_ci(gains, seed),
         }
-        if target == "full_frozen":
+        if target in {"full_frozen", "frozen/full"}:
             diagnostic_fields = {
                 "alpha_mass": "retrieval_alpha_mass",
                 "alpha_per_visited_node": "retrieval_alpha_per_visited_node",
@@ -1058,17 +1257,17 @@ def annotate_retrieval_counterfactual_gain(
     all_rows: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> dict[str, Any]:
     """Attach paired no-episodic gains without fabricating missing values."""
-    target = all_rows.get("full_frozen")
-    baseline = all_rows.get("no_episodic")
+    target = all_rows.get("frozen/full") or all_rows.get("full_frozen")
+    baseline = all_rows.get("frozen/no_episodic") or all_rows.get("no_episodic")
     if target is None or baseline is None:
         for row in target or ():
             row["retrieval_counterfactual_gain"] = None
             row["retrieval_counterfactual_unavailable_reason"] = (
-                "requires both full_frozen and no_episodic variants"
+                "requires frozen/full and frozen/no_episodic evaluations"
             )
         return {
             "available": False,
-            "reason": "requires both full_frozen and no_episodic variants",
+            "reason": "requires frozen/full and frozen/no_episodic evaluations",
         }
     baseline_by_key = {
         (int(row["source_index"]), int(row["event_index"])): row
@@ -1156,6 +1355,21 @@ def controller_metrics(
         }
         for variant, rows in all_rows.items()
     }
+    if "full_frozen" not in keyed:
+        # Present the new two-dimensional names to the existing controller
+        # diagnostics through their historical roles.  This keeps controller
+        # calibration reports readable while the benchmark metrics remain
+        # explicitly separated by protocol.
+        compatibility = {
+            "full_frozen": "fast_adapt/full",
+            "no_working": "frozen/full",
+            "no_episodic": "fast_adapt/no_episodic",
+            "semantic_only": "frozen/semantic_only",
+            "full_online": "online_write/full",
+        }
+        for legacy, canonical in compatibility.items():
+            if legacy not in keyed and canonical in keyed:
+                keyed[legacy] = keyed[canonical]
     specifications = {
         "retrieve": (1, "no_episodic", "full_frozen", 0.5),
         "adapt": (0, "no_working", "full_frozen", 0.5),
@@ -1304,7 +1518,15 @@ def controller_metrics(
         if not metrics.get("available", False):
             continue
         elapsed_variant = "full_online" if action == "write" else "full_frozen"
-        elapsed = float(variant_metrics.get(elapsed_variant, {}).get("elapsed_seconds", 0.0))
+        canonical_elapsed_variant = (
+            "online_write/full" if action == "write" else "fast_adapt/full"
+        )
+        elapsed = float(
+            variant_metrics.get(
+                elapsed_variant,
+                variant_metrics.get(canonical_elapsed_variant, {}),
+            ).get("elapsed_seconds", 0.0)
+        )
         metrics["gain_per_second"] = metrics["selected_total_gain"] / max(elapsed, 1e-12)
     return output
 
@@ -1436,15 +1658,217 @@ def warnings_for(summary: Mapping[str, Any]) -> list[str]:
     return warnings
 
 
-def write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    if not rows:
+def write_csv(
+    path: Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    fieldnames: Sequence[str] | None = None,
+) -> None:
+    if not rows and not fieldnames:
         return
-    keys = sorted({key for row in rows for key in row})
+    keys = list(fieldnames) if fieldnames else sorted({key for row in rows for key in row})
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=keys)
         writer.writeheader()
         for row in rows:
             writer.writerow({key: json.dumps(_jsonable(row.get(key)), ensure_ascii=False) if isinstance(row.get(key), (list, dict, tuple)) else row.get(key) for key in keys})
+
+
+ADAPTATION_K_VALUES = (0, 1, 2, 4, 8, 16, 32)
+
+
+def adaptation_curve_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    protocol: str,
+    memory_view: str = "full",
+) -> list[dict[str, Any]]:
+    """Select causal exposure checkpoints for FAST_ADAPT/ONLINE_WRITE curves."""
+
+    output: list[dict[str, Any]] = []
+    write_count_by_sequence: dict[tuple[Any, int], int] = {}
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            int(row.get("sequence_position", 0)),
+            int(row.get("source_index", 0)),
+            int(row.get("event_index", 0)),
+        ),
+    )
+    checkpoint_match = re.compile(r"task_(\d+)")
+    for row in ordered:
+        sequence_key = (
+            row.get("eval_set_id", "all"),
+            int(row.get("source_index", 0)),
+        )
+        write_count = write_count_by_sequence.get(sequence_key, 0)
+        if bool(row.get("write_accepted", False)):
+            write_count += 1
+        write_count_by_sequence[sequence_key] = write_count
+        exposure_events = int(row.get("event_index", 0))
+        if exposure_events not in ADAPTATION_K_VALUES:
+            continue
+        checkpoint_task = row.get("checkpoint_task")
+        if checkpoint_task is None:
+            match = checkpoint_match.search(str(row.get("checkpoint", "")))
+            checkpoint_task = int(match.group(1)) if match else None
+        retrieval_hit = float(
+            bool(row["retrieval_hit"])
+            if "retrieval_hit" in row
+            else float(row.get("retrieval_alpha_mass", 0.0)) > 1e-6
+        )
+        output.append({
+            "checkpoint_task": checkpoint_task,
+            "eval_task": row.get("eval_task"),
+            "eval_set_id": row.get("eval_set_id"),
+            "regime": row.get("regime_id"),
+            "source_index": row.get("source_index"),
+            "protocol": protocol,
+            "memory_view": memory_view,
+            "K": exposure_events,
+            "exposure_events": exposure_events,
+            "nll": row.get("nll"),
+            "accuracy": float(
+                int(row.get("predicted_type_at_event_time", -1))
+                == int(row.get("true_type", -2))
+            ),
+            "time_MAE": (
+                abs(float(row.get("predicted_time", 0.0))
+                    - float(row.get("true_time", 0.0)))
+            ),
+            "retrieval_hit": retrieval_hit,
+            "working_norm": float(row.get("working_norm", 0.0) or 0.0),
+            "write_count": write_count,
+        })
+    return output
+
+
+def _curve_summary(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[Any, Any], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[(row.get("protocol"), row.get("K"))].append(row)
+    output = []
+    for (protocol, k), group in sorted(groups.items(), key=lambda item: (str(item[0][0]), int(item[0][1]))):
+        output.append({
+            "protocol": protocol,
+            "K": k,
+            "exposure_events": k,
+            "events": len(group),
+            "nll": _mean(float(row["nll"]) for row in group),
+            "accuracy": _mean(float(row["accuracy"]) for row in group),
+            "time_MAE": _mean(float(row["time_MAE"]) for row in group),
+            "retrieval_hit": _mean(float(row["retrieval_hit"]) for row in group),
+            "working_norm": _mean(float(row["working_norm"]) for row in group),
+            "write_count": _mean(float(row["write_count"]) for row in group),
+        })
+    return output
+
+
+CURVE_SUMMARY_FIELDS = (
+    "protocol", "K", "exposure_events", "events", "nll", "accuracy",
+    "time_MAE", "retrieval_hit", "working_norm", "write_count",
+)
+
+
+def write_protocol_artifacts(
+    output_dir: Path,
+    all_rows: Mapping[str, Sequence[Mapping[str, Any]]],
+    variant_metrics: Mapping[str, Mapping[str, Any]],
+    sequence_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Write protocol-separated metrics and the cross-protocol comparison."""
+
+    comparison_rows = []
+    for variant, metrics in variant_metrics.items():
+        protocol, memory_view = variant.split("/", 1)
+        comparison_rows.append({
+            "variant": variant,
+            "protocol": protocol,
+            "memory_view": memory_view,
+            "nll_per_event": metrics.get("nll_per_event"),
+            "accuracy": metrics.get("accuracy"),
+            "macro_f1": metrics.get("macro_f1"),
+            "time_MAE": metrics.get("local_time_mae"),
+            "num_events": metrics.get("events"),
+        })
+    write_csv(
+        output_dir / "protocol_comparison.csv",
+        comparison_rows,
+        fieldnames=(
+            "variant", "protocol", "memory_view", "nll_per_event", "accuracy",
+            "macro_f1", "time_MAE", "num_events",
+        ),
+    )
+
+    for protocol in PROTOCOLS:
+        protocol_dir = output_dir / protocol
+        protocol_dir.mkdir(parents=True, exist_ok=True)
+        protocol_rows = [
+            row for variant, rows in all_rows.items()
+            if variant.startswith(f"{protocol}/")
+            for row in rows
+        ]
+        protocol_sequence_rows = [
+            row for row in sequence_rows if str(row.get("variant", "")).startswith(f"{protocol}/")
+        ]
+        write_csv(
+            protocol_dir / "task_metrics.csv",
+            protocol_sequence_rows,
+            fieldnames=(
+                "variant", "source_index", "cluster_id", "events",
+                "nll_per_event", "accuracy", "local_time_mae",
+            ),
+        )
+        write_csv(
+            protocol_dir / "anchor_metrics.csv", [],
+            fieldnames=("variant", "source_index", "regime", "nll_per_event"),
+        )
+        if protocol == "frozen":
+            write_csv(
+                protocol_dir / "anchor_nll_matrix.csv", [],
+                fieldnames=("checkpoint_task", "variant", "regime"),
+            )
+            write_csv(
+                protocol_dir / "continual_summary.csv", [],
+                fieldnames=("checkpoint_task", "variant", "clnll", "forgetting"),
+            )
+            write_csv(
+                protocol_dir / "law_metrics.csv", [],
+                fieldnames=("checkpoint_task", "variant", "regime", "forgetting_nll", "bwt_nll"),
+            )
+        if protocol in {"fast_adapt", "online_write"}:
+            # The primary curve is defined on the full memory view.  Explicit
+            # no-episodic/semantic-only runs remain available as ablations in
+            # their own task metrics and must not be relabeled as ``full``.
+            curve_rows = [
+                row for row in protocol_rows
+                if row.get("variant") == f"{protocol}/full"
+            ]
+            curve = adaptation_curve_rows(
+                curve_rows, protocol=protocol, memory_view="full"
+            )
+            write_csv(
+                protocol_dir / "adaptation_curve.csv", curve,
+                fieldnames=(
+                    "checkpoint_task", "eval_task", "eval_set_id", "regime",
+                    "source_index", "protocol", "memory_view", "K",
+                    "exposure_events", "nll", "accuracy", "time_MAE",
+                    "retrieval_hit", "working_norm", "write_count",
+                ),
+            )
+            summary = _curve_summary(curve)
+            summary_name = (
+                "reaccess_summary.csv" if protocol == "fast_adapt"
+                else "online_summary.csv"
+            )
+            write_csv(
+                protocol_dir / summary_name,
+                summary,
+                fieldnames=CURVE_SUMMARY_FIELDS,
+            )
+            if protocol == "online_write":
+                write_csv(protocol_dir / "write_metrics.csv", curve)
 
 
 def write_report(path: Path, summary: Mapping[str, Any]) -> None:
@@ -1493,7 +1917,10 @@ def write_report(path: Path, summary: Mapping[str, Any]) -> None:
             f"- Research thresholds overall: **{'PASS' if acceptance.get('passed') else 'FAIL'}**; "
             f"details: `{acceptance.get('checks')}`."
         )
-    full = summary.get("variants", {}).get("full_frozen", {})
+    full = summary.get("variants", {}).get(
+        "frozen/full",
+        summary.get("variants", {}).get("full_frozen", {}),
+    )
     if full:
         funnel = full.get("write_funnel", {})
         episodic_diagnostics = next((
@@ -1591,7 +2018,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--data-path", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--protocol", choices=("frozen", "online", "both"), default="both")
+    parser.add_argument(
+        "--protocol",
+        choices=("frozen", "fast_adapt", "online_write", "online", "both", "all"),
+        default="all",
+        help="protocol selection; 'all' runs frozen, fast_adapt, and online_write",
+    )
     parser.add_argument("--test-ratio", type=float, default=0.2)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -1606,7 +2038,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-test-sequences", type=int, default=None)
     parser.add_argument("--split-manifest", type=Path, default=None)
     parser.add_argument("--quick-per-cluster", type=int, default=None)
-    parser.add_argument("--variants", nargs="+", choices=tuple(VARIANTS), default=None)
+    parser.add_argument(
+        "--variants", nargs="+", choices=tuple(VARIANTS), default=None,
+        help="canonical protocol/memory-view keys; legacy names are accepted as aliases",
+    )
     parser.add_argument("--resume", action="store_true", help="Reuse completed variant row files")
     parser.add_argument(
         "--save-event-predictions", action="store_true",
@@ -1697,18 +2132,28 @@ def main() -> None:
     print("[Preflight] passed")
     variants = args.variants
     if variants is None:
-        variants = ["full_frozen", "no_episodic", "no_working", "semantic_only"]
-        if args.protocol == "online":
-            variants = ["full_online"]
-        elif args.protocol == "both":
-            variants.append("full_online")
+        variants_by_protocol = {
+            "frozen": ["frozen/full"],
+            "fast_adapt": ["fast_adapt/full"],
+            "online_write": ["online_write/full"],
+            "online": ["online_write/full"],
+            "both": ["frozen/full", "online_write/full"],
+            "all": ["frozen/full", "fast_adapt/full", "online_write/full"],
+        }
+        variants = variants_by_protocol[args.protocol]
+    else:
+        variants = list(dict.fromkeys(
+            _evaluation_spec(variant)[0] for variant in variants
+        ))
 
     all_rows: dict[str, list[dict]] = {}
     variant_metrics = {}
     final_inference = None
     for variant in variants:
-        print(f"[Evaluate] {variant}: {len(sequences)} sequences")
-        completed_path = args.output_dir / f"{variant}.rows.json"
+        canonical, protocol, memory_view, settings = _evaluation_spec(variant)
+        file_key = canonical.replace("/", "_")
+        print(f"[Evaluate] {canonical}: {len(sequences)} sequences")
+        completed_path = args.output_dir / f"{file_key}.rows.json"
         # Inference is still loaded for tree diagnostics. Completed rows can
         # be reused safely because each variant starts from the same checkpoint.
         if args.resume and completed_path.is_file():
@@ -1716,15 +2161,25 @@ def main() -> None:
             inference = MemoryTreeInference.from_checkpoint(
                 args.checkpoint,
                 device=args.device,
-                inference_config=InferenceConfig(
+                inference_config=inference_config_for_protocol(
+                    protocol,
+                    adapt_working_memory=settings["working"],
+                    allow_memory_writes=settings["writes"],
+                    update_memory_usage=settings["online"],
+                    probe_write_counterfactuals=(
+                        protocol is EvaluationProtocol.ONLINE_WRITE
+                        and memory_view in {"full", "full_no_write"}
+                    ),
                     prototype_duplicate_threshold=args.prototype_duplicate_threshold,
                     prototype_mode_threshold=args.prototype_mode_threshold,
                     prototype_context_alias_capacity=args.prototype_context_alias_capacity,
                 ),
             )
             inference = _configure_evaluation_frontier(inference)
+            if not settings["episodic"]:
+                clear_episodic_memory(inference)
             elapsed = 0.0
-            print(f"[Resume] reused completed variant {variant}")
+            print(f"[Resume] reused completed variant {canonical}")
         else:
             rows, inference, elapsed = run_variant(
                 args.checkpoint, sequences, variant, args.device, args.output_dir,
@@ -1734,7 +2189,7 @@ def main() -> None:
                 prototype_context_alias_capacity=args.prototype_context_alias_capacity,
             )
             completed_path.write_text(json.dumps(_jsonable(rows)), encoding="utf-8")
-        all_rows[variant] = rows
+        all_rows[canonical] = rows
         metrics = aggregate_metrics(
             rows,
             expected_types,
@@ -1745,16 +2200,16 @@ def main() -> None:
             "elapsed_seconds": elapsed,
             "events_per_second": len(rows) / max(elapsed, 1e-12),
         })
-        variant_metrics[variant] = metrics
-        if final_inference is None or variant == "full_frozen":
+        variant_metrics[canonical] = metrics
+        if final_inference is None or canonical == "frozen/full":
             final_inference = inference
     assert final_inference is not None
     retrieval_counterfactual = annotate_retrieval_counterfactual_gain(all_rows)
-    if "full_frozen" in all_rows:
-        (args.output_dir / "full_frozen.rows.json").write_text(
-            json.dumps(_jsonable(all_rows["full_frozen"])), encoding="utf-8"
+    if "frozen/full" in all_rows:
+        (args.output_dir / "frozen_full.rows.json").write_text(
+            json.dumps(_jsonable(all_rows["frozen/full"])), encoding="utf-8"
         )
-    diagnostic_rows = all_rows.get("full_frozen", all_rows[variants[0]])
+    diagnostic_rows = all_rows.get("frozen/full", all_rows[variants[0]])
     tree, node_rows = tree_metrics(final_inference, diagnostic_rows)
     ablations = ablation_metrics(all_rows, args.seed)
     controller = controller_metrics(all_rows, variant_metrics, checkpoint_meta)
@@ -1767,6 +2222,9 @@ def main() -> None:
         "split_seed": args.seed,
         "test_source_indices": [int(sequence["source_index"]) for sequence in sequences],
         "type_map": type_map,
+        "protocols": list(PROTOCOLS),
+        "memory_views": list(MEMORY_VIEWS),
+        "primary_protocol": "frozen",
         "variants": variant_metrics,
         "ablations": ablations,
         "controller": controller,
@@ -1784,7 +2242,7 @@ def main() -> None:
             "Transductive upstream artifacts: this report does not claim strict held-out evaluation."
         ),
     }
-    frozen_rows = all_rows.get("full_frozen", ())
+    frozen_rows = all_rows.get("frozen/full", ())
     frozen_actual_sha = frozen_event_sha256(frozen_rows) if frozen_rows else None
     rollout_meta = checkpoint_meta.get("write_rollout_calibration", {})
     expected_frozen_sha = rollout_meta.get("frozen_event_sha256")
@@ -1820,7 +2278,7 @@ def main() -> None:
         base_rows, _, _ = run_variant(
             frozen_base_path,
             sequences,
-            "full_frozen",
+            "frozen/full",
             args.device,
             prototype_duplicate_threshold=args.prototype_duplicate_threshold,
             prototype_mode_threshold=args.prototype_mode_threshold,
@@ -1876,17 +2334,26 @@ def main() -> None:
         baseline_summary = json.loads(
             args.write_baseline_summary.read_text(encoding="utf-8")
         )
-        current_online = variant_metrics.get("full_online", {})
-        baseline_online = baseline_summary.get("variants", {}).get("full_online", {})
+        current_online = variant_metrics.get(
+            "online_write/full", variant_metrics.get("full_online", {})
+        )
+        baseline_online = baseline_summary.get("variants", {}).get(
+            "online_write/full",
+            baseline_summary.get("variants", {}).get("full_online", {}),
+        )
         current_write = controller.get("write", {}).get("ranking", {})
         baseline_write = baseline_summary.get("controller", {}).get("write", {}).get(
             "ranking", {}
         )
         if not baseline_write:
-            baseline_rows_path = (
-                args.write_baseline_summary.parent
-                / "full_online_no_write.rows.json"
+            baseline_rows_path = args.write_baseline_summary.parent / (
+                "online_write_full_no_write.rows.json"
             )
+            if not baseline_rows_path.is_file():
+                baseline_rows_path = (
+                    args.write_baseline_summary.parent
+                    / "full_online_no_write.rows.json"
+                )
             if baseline_rows_path.is_file():
                 baseline_probe_rows = [
                     row for row in json.loads(
@@ -1942,11 +2409,16 @@ def main() -> None:
     reference_note = "ACC/Macro-F1 v4 reference summary was not supplied."
     if args.reference_summary is not None:
         reference = json.loads(args.reference_summary.read_text(encoding="utf-8"))
-        current_frozen = variant_metrics.get("full_frozen", {})
-        reference_frozen = reference.get("variants", {}).get("full_frozen", {})
+        current_frozen = variant_metrics.get(
+            "frozen/full", variant_metrics.get("full_frozen", {})
+        )
+        reference_frozen = reference.get("variants", {}).get(
+            "frozen/full",
+            reference.get("variants", {}).get("full_frozen", {}),
+        )
         required = ("accuracy", "macro_f1")
         if not all(key in current_frozen and key in reference_frozen for key in required):
-            raise ValueError("reference summary lacks full_frozen accuracy/macro_f1")
+            raise ValueError("reference summary lacks frozen/full accuracy/macro_f1")
         reference_check = all(
             float(current_frozen[key]) >= float(reference_frozen[key]) - 1e-12
             for key in required
@@ -2075,6 +2547,12 @@ def main() -> None:
                 "local_time_mae": _mean(abs(float(row["predicted_time"]) - float(row["true_time"])) for row in group),
             })
     write_csv(args.output_dir / "sequence_metrics.csv", sequence_rows)
+    write_protocol_artifacts(
+        args.output_dir,
+        all_rows,
+        variant_metrics,
+        sequence_rows,
+    )
     write_report(args.output_dir / "report.md", summary)
     if not args.no_plots:
         make_plots(args.output_dir, summary, ablations, history_rows)

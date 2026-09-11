@@ -124,7 +124,10 @@ def normalize_native_metrics(spec, result_dir: Path) -> dict[str, Any]:
         if not summary.exists():
             return {"state": "trained", "evaluation_pending": True}
         payload = json.loads(summary.read_text(encoding="utf-8"))
-        return payload.get("variants", {}).get("full_frozen", payload)
+        return payload.get("variants", {}).get(
+            "frozen/full",
+            payload.get("variants", {}).get("full_frozen", payload),
+        )
     if spec.model == "TPP_LLM":
         path = native / "metrics.json"
         if not path.exists():
@@ -173,7 +176,10 @@ def evaluate_hm(spec, args, result_dir: Path, env: dict[str, str]) -> None:
     if not checkpoint.exists():
         checkpoint = result_dir / "checkpoint" / "model.pt"
     memory = MODELS_ROOT / "HawkesMemory" / "Memory"
-    variants = {"no_working": "no_working", "no_episodic": "no_episodic"}
+    variants = {
+        "no_working": "frozen/full",
+        "no_episodic": "frozen/no_episodic",
+    }
     command = [python_for(args), "-m", "Evaluate", "--checkpoint", str(checkpoint), "--data-path", str(data_path), "--split-manifest", str(split_manifest), "--output-dir", str(result_dir / "native"), "--protocol", "both", "--seed", str(args.seed), "--device", resolved_device(args.device), "--resume", "--save-event-predictions"]
     if spec.condition in variants:
         command += ["--variants", variants[spec.condition]]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -31,6 +32,55 @@ from Train.Train import (
 )
 from Wake.HawkesParams import HawkesParams
 from Wake.SequentialController import Action, Controller
+
+
+class EvaluationProtocol(str, Enum):
+    """The state transition allowed during evaluation.
+
+    Episodic retrieval is part of the frozen learner state.  The protocol
+    controls which state is allowed to change while a sequence is evaluated;
+    memory-view ablations are layered on top by the evaluator.
+    """
+
+    FROZEN = "frozen"
+    FAST_ADAPT = "fast_adapt"
+    ONLINE_WRITE = "online_write"
+
+
+def inference_config_for_protocol(
+    protocol: EvaluationProtocol | str,
+    **overrides: Any,
+) -> "InferenceConfig":
+    """Return the one canonical inference configuration for ``protocol``.
+
+    The optional keyword overrides are intentionally limited to fields on
+    :class:`InferenceConfig` that do not redefine the protocol state machine
+    in normal evaluator use (for example diagnostic write probes).  Callers
+    that need a memory-view ablation may override ``adapt_working_memory`` or
+    clear episodic banks after loading the checkpoint.
+    """
+
+    if isinstance(protocol, str):
+        protocol = EvaluationProtocol(protocol)
+    settings = {
+        EvaluationProtocol.FROZEN: {
+            "adapt_working_memory": False,
+            "allow_memory_writes": False,
+            "update_memory_usage": False,
+        },
+        EvaluationProtocol.FAST_ADAPT: {
+            "adapt_working_memory": True,
+            "allow_memory_writes": False,
+            "update_memory_usage": False,
+        },
+        EvaluationProtocol.ONLINE_WRITE: {
+            "adapt_working_memory": True,
+            "allow_memory_writes": True,
+            "update_memory_usage": True,
+        },
+    }[protocol]
+    settings.update(overrides)
+    return InferenceConfig(**settings)
 
 
 @dataclass
@@ -757,6 +807,118 @@ class MemoryTreeInference:
         )
         return owner_indices, frontier_id_rows
 
+    @staticmethod
+    def _packed_retrieval_diagnostics(
+        memory_output: Mapping[str, Any],
+    ) -> dict[str, Tensor]:
+        """Summarize packed retrieval without materializing Python diagnostics.
+
+        The compact evaluator still needs a causal ``retrieval_hit`` signal
+        for FAST_ADAPT/ONLINE_WRITE curves.  ``materialize_diagnostics=False``
+        intentionally leaves ``memory_info`` empty, but the packed alpha,
+        similarity, and validity tensors are already part of the hot path.
+        Reduce those tensors here so compact evaluation retains the same
+        retrieval semantics as the ordinary event-row path.
+        """
+        frontier_mass = memory_output["frontier_mass"]
+        batch_size = frontier_mass.size(0)
+        device = frontier_mass.device
+        dtype = frontier_mass.dtype
+        packed = memory_output.get("packed_memory_info") or {}
+        alpha = packed.get("alpha")
+        visited_mask = memory_output.get("visited_node_mask")
+        if alpha is None or visited_mask is None:
+            return {
+                "retrieval_alpha_mass": torch.zeros(
+                    batch_size, device=device, dtype=dtype
+                ),
+                "retrieval_similarity": torch.full(
+                    (batch_size,), -1.0, device=device, dtype=dtype
+                ),
+                "retrieval_effective_k": torch.zeros(
+                    batch_size, device=device, dtype=torch.long
+                ),
+                "retrieval_null_alpha": torch.ones(
+                    batch_size, device=device, dtype=dtype
+                ),
+                "visited_bank_count": torch.zeros(
+                    batch_size, device=device, dtype=torch.long
+                ),
+                "visited_nonempty_bank_count": torch.zeros(
+                    batch_size, device=device, dtype=torch.long
+                ),
+            }
+
+        visited_mask = visited_mask.to(device=device, dtype=torch.bool)
+        active = visited_mask.unsqueeze(-1)
+        alpha = alpha.to(device=device)
+        active_alpha = alpha.masked_fill(~active, 0.0)
+        alpha_mass = active_alpha.sum(dim=(-2, -1))
+
+        similarity = packed.get("similarity")
+        if similarity is None:
+            retrieval_similarity = torch.full(
+                (batch_size,), -1.0, device=device, dtype=dtype
+            )
+        else:
+            similarity = similarity.to(device=device, dtype=alpha.dtype)
+            retrieval_similarity = (
+                (active_alpha * similarity).sum(dim=(-2, -1))
+                / alpha_mass.clamp_min(1e-12)
+            )
+            retrieval_similarity = torch.where(
+                alpha_mass > 1e-6,
+                retrieval_similarity,
+                retrieval_similarity.new_full((), -1.0),
+            )
+
+        effective_k = packed.get("effective_k")
+        if effective_k is None:
+            retrieval_effective_k = torch.zeros(
+                batch_size, device=device, dtype=torch.long
+            )
+        else:
+            retrieval_effective_k = (
+                effective_k.to(device=device, dtype=torch.long)
+                .masked_fill(~visited_mask, 0)
+                .sum(dim=-1)
+            )
+
+        null_alpha = packed.get("null_alpha")
+        if null_alpha is None:
+            retrieval_null_alpha = torch.ones(
+                batch_size, device=device, dtype=dtype
+            )
+        else:
+            null_alpha = null_alpha.to(device=device, dtype=alpha.dtype)
+            visited_count = visited_mask.sum(dim=-1)
+            retrieval_null_alpha = (
+                null_alpha.masked_fill(~visited_mask, 0.0).sum(dim=-1)
+                / visited_count.clamp_min(1).to(null_alpha.dtype)
+            )
+            retrieval_null_alpha = torch.where(
+                visited_count > 0,
+                retrieval_null_alpha,
+                retrieval_null_alpha.new_ones(()),
+            )
+
+        valid_mask = packed.get("valid_mask")
+        if valid_mask is None:
+            nonempty = visited_mask
+        else:
+            nonempty = valid_mask.to(device=device, dtype=torch.bool).any(
+                dim=-1
+            ) & visited_mask
+
+        return {
+            "retrieval_alpha_mass": alpha_mass,
+            "retrieval_similarity": retrieval_similarity,
+            "retrieval_effective_k": retrieval_effective_k,
+            "retrieval_null_alpha": retrieval_null_alpha,
+            "visited_bank_count": visited_mask.sum(dim=-1),
+            "visited_nonempty_bank_count": nonempty.sum(dim=-1),
+        }
+
     def run_sequence_batch_compact(
         self,
         prepared_sequences: Sequence[Mapping[str, Any]],
@@ -765,13 +927,16 @@ class MemoryTreeInference:
         capture_event_predictions: bool = False,
         capture_prediction_theta: bool = False,
     ) -> list[Dict[str, Any]]:
-        """Run frozen read-only inference as a causal GPU wavefront.
+        """Run read-only-persistent inference as a causal GPU wavefront.
 
         ``prepared_sequences`` must come from :meth:`prepare_sequence_batch`.
         Prefix encoding, routing, retrieval, Hawkes likelihood terms, and the
         row-wise Working Memory recurrence are batched over all sequences that
-        are still active at each time position.  No persistent memory state is
-        changed, so rows remain independent despite sharing the wavefront.
+        are still active at each time position.  The caller's protocol controls
+        whether the transient Working Memory recurrence is enabled; episodic
+        memory usage and writes are always disabled on this path.  No persistent
+        memory state is changed, so rows remain independent despite sharing the
+        wavefront.
         """
         if not prepared_sequences:
             raise ValueError("sequence batches cannot be empty")
@@ -887,6 +1052,9 @@ class MemoryTreeInference:
                     durations,
                     pre_action_params,
                 )
+            retrieval_diagnostics = self._packed_retrieval_diagnostics(
+                memory_output
+            )
 
             with torch.no_grad():
                 frontier_energy = self._batched_frontier_event_energy(
@@ -1022,6 +1190,82 @@ class MemoryTreeInference:
                     for local_index, sequence_index in enumerate(active_rows):
                         event: Dict[str, Any] = {
                             "event_index": int(event_index),
+                            "retrieval_alpha_mass": float(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][local_index].detach().cpu()
+                            ),
+                            "retrieval_alpha_per_visited_node": float(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][local_index].detach().cpu()
+                            ) / max(
+                                int(
+                                    retrieval_diagnostics[
+                                        "visited_bank_count"
+                                    ][local_index].detach().cpu()
+                                ),
+                                1,
+                            ),
+                            "retrieval_similarity": float(
+                                retrieval_diagnostics[
+                                    "retrieval_similarity"
+                                ][local_index].detach().cpu()
+                            ),
+                            "retrieval_effective_k": int(
+                                retrieval_diagnostics[
+                                    "retrieval_effective_k"
+                                ][local_index].detach().cpu()
+                            ),
+                            "retrieval_null_alpha": float(
+                                retrieval_diagnostics[
+                                    "retrieval_null_alpha"
+                                ][local_index].detach().cpu()
+                            ),
+                            "visited_bank_count": int(
+                                retrieval_diagnostics["visited_bank_count"][
+                                    local_index
+                                ].detach().cpu()
+                            ),
+                            "visited_nonempty_bank_count": int(
+                                retrieval_diagnostics[
+                                    "visited_nonempty_bank_count"
+                                ][local_index].detach().cpu()
+                            ),
+                            "retrieval_hit": bool(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][local_index].detach().cpu()
+                                > 1e-6
+                            ),
+                            "working_norm": float(
+                                working_state[sequence_index]
+                                .detach()
+                                .norm()
+                                .cpu()
+                            ),
+                            "raw_episodic_residual_norm": float(
+                                memory_output[
+                                    "frontier_episodic_delta"
+                                ][local_index]
+                                .detach()
+                                .norm(dim=-1)
+                                .mean()
+                                .cpu()
+                            ),
+                            "episodic_residual_norm": float(
+                                memory_output["episodic_delta"][local_index]
+                                .detach()
+                                .norm(dim=-1)
+                                .mean()
+                                .cpu()
+                            ),
+                            "retrieve_gate": float(
+                                action_probabilities[local_index, 1]
+                                .detach()
+                                .cpu()
+                            ),
+                            "write_count": 0,
                             "nll": (
                                 float(nll[local_index].detach().cpu())
                                 if capture_event_predictions else None
@@ -1992,6 +2236,9 @@ class MemoryTreeInference:
                 )
                 # The working-memory gradient is evaluated after the retrieval
                 # gate has recomposed the final effective parameters below.
+            retrieval_diagnostics = self._packed_retrieval_diagnostics(
+                memory_output
+            )
             if self.config.update_memory_usage:
                 # Retrieval uses age in its differentiable scores; mutate it
                 # only after the event's working-memory gradient is complete.
@@ -2063,6 +2310,9 @@ class MemoryTreeInference:
                         working_grad,
                         adaptation_probability=action_probabilities[0],
                     )
+                working_norm = float(
+                    self.tree.working_memory.delta.detach().norm().cpu()
+                )
                 if self.config.update_memory_usage:
                     self.tree.episodic_memory.credit_retrieval(
                         info_by_batch=memory_output["memory_info"],
@@ -2088,6 +2338,75 @@ class MemoryTreeInference:
                     if capture_event_predictions or capture_prediction_theta:
                         compact_event: Dict[str, Any] = {
                             "event_index": int(event_index),
+                            "retrieval_alpha_mass": float(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][0].detach().cpu()
+                            ),
+                            "retrieval_alpha_per_visited_node": float(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][0].detach().cpu()
+                            ) / max(
+                                int(
+                                    retrieval_diagnostics[
+                                        "visited_bank_count"
+                                    ][0].detach().cpu()
+                                ),
+                                1,
+                            ),
+                            "retrieval_similarity": float(
+                                retrieval_diagnostics[
+                                    "retrieval_similarity"
+                                ][0].detach().cpu()
+                            ),
+                            "retrieval_effective_k": int(
+                                retrieval_diagnostics[
+                                    "retrieval_effective_k"
+                                ][0].detach().cpu()
+                            ),
+                            "retrieval_null_alpha": float(
+                                retrieval_diagnostics[
+                                    "retrieval_null_alpha"
+                                ][0].detach().cpu()
+                            ),
+                            "visited_bank_count": int(
+                                retrieval_diagnostics["visited_bank_count"][
+                                    0
+                                ].detach().cpu()
+                            ),
+                            "visited_nonempty_bank_count": int(
+                                retrieval_diagnostics[
+                                    "visited_nonempty_bank_count"
+                                ][0].detach().cpu()
+                            ),
+                            "retrieval_hit": bool(
+                                retrieval_diagnostics[
+                                    "retrieval_alpha_mass"
+                                ][0].detach().cpu()
+                                > 1e-6
+                            ),
+                            "working_norm": working_norm,
+                            "raw_episodic_residual_norm": float(
+                                memory_output[
+                                    "frontier_episodic_delta"
+                                ][0]
+                                .detach()
+                                .norm(dim=-1)
+                                .mean()
+                                .cpu()
+                            ),
+                            "episodic_residual_norm": float(
+                                memory_output["episodic_delta"][0]
+                                .detach()
+                                .norm(dim=-1)
+                                .mean()
+                                .cpu()
+                            ),
+                            "retrieve_gate": float(
+                                action_probabilities[1].detach().cpu()
+                            ),
+                            "write_count": 0,
                             "nll": (
                                 float(nll.detach().cpu())
                                 if capture_event_predictions else None
@@ -2330,6 +2649,7 @@ class MemoryTreeInference:
                 "retrieval_counterfactual_unavailable_reason": (
                     "requires paired no_episodic evaluation"
                 ),
+                "working_norm": working_norm,
                 "episodic_residual_norm": float(
                     memory_output["episodic_delta"][0]
                     .detach().norm().cpu()

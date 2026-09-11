@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 
 def jsonable(value: Any) -> Any:
@@ -35,17 +35,28 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def write_csv(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
+def write_csv(
+    path: Path,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    fieldnames: Sequence[str] | None = None,
+) -> None:
     materialized = list(rows)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not materialized:
+    if not materialized and not fieldnames:
         path.write_text("", encoding="utf-8")
         return
-    fields = list(materialized[0])
+    fields = list(fieldnames) if fieldnames else list(materialized[0])
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(materialized)
+        for row in materialized:
+            writer.writerow({
+                key: json.dumps(jsonable(row.get(key)), ensure_ascii=False)
+                if isinstance(row.get(key), (list, tuple, dict))
+                else row.get(key)
+                for key in fields
+            })
 
 
 def write_jsonl_gz(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:

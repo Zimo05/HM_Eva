@@ -1,25 +1,36 @@
 # Continual Hawkes benchmark
 
-Benchmark: `recurrence`
-Event dimension: `8`; exponential decay bases: `[0.5, 1.5]`
+`hm_continual_v2` is the canonical `CL-core-v2` paper benchmark. Generate it
+from the repository root with:
 
-Model-facing files contain only `event_times,event_types`; do not use the oracle manifest for initialization.
-Initialize the model on `task_00`, train each later task while retaining model/tree/memory/optimizer state, and evaluate all frozen anchors after every task.
+```bash
+python Datasets/CL/generate_continual_hawkes.py \
+  --benchmark unified \
+  --output Datasets/CL/hm_continual_v2 \
+  --seed 7
+```
 
-## Stage schedule
+The ten-stage protocol is:
 
-| task_id | stage | regime mixture | shift | recurrence_of |
-|---:|---|---|---|---|
-| 0 | A_1_initial | A_1:1 | initial |  |
-| 1 | B_1_novel | B_1:1 | novel |  |
-| 2 | C_1_novel | C_1:1 | novel |  |
-| 3 | A_1_exact_recurrence | A_1:1 | exact_recurrence | A_1 |
-| 4 | D_1_novel | D_1:1 | novel |  |
-| 5 | B_prime_1_near_recurrence | B_prime_1:1 | near_recurrence | B_1 |
-| 6 | A_2_specialization | A_2:1 | specialization | A_1 |
-| 7 | E_1_novel | E_1:1 | novel |  |
-| 8 | A_1_long_gap_recurrence | A_1:1 | long_gap_recurrence | A_1 |
-| 9 | E_B_mixture | E_1:0.7, B_1:0.3 | mixture |  |
+```text
+A_1 -> B_1 -> C_1 -> A_1 -> B_prime_1 -> A_2
+    -> (C_1 + X_transient) -> A_merge -> A_1 -> (E_1 + B_1)
+```
 
-`stream_manifest.csv` and `ground_truth/regimes.*` are oracle-only artifacts for evaluation and plotting.
-Frozen anchor banks under `anchors/` are newly sampled from the same law, not copies of stream sequences.
+`benchmark_manifest.json` is the protocol source of truth. It records task
+semantics, regime weights, first-seen tasks, persistent versus diagnostic
+regimes, frozen anchors, matched controls, and the adaptation support/query
+files with their fixed `K={0,1,2,4,8,16,32}` values. Task CSVs contain only
+`event_times,event_types`; every adaptation curve starts from the same fresh
+pre-task checkpoint clone and scores the same query file.
+
+HM continual training writes `checkpoint/task_XX_last.pt` for the final
+state and `checkpoint/task_XX_best.pt` for the task-local validation choice.
+The evaluator consumes the `*_best.pt` files, while the next task resumes
+from the preceding task's best checkpoint. `train.csv` is used for updates,
+`val.csv` only for checkpoint selection, and `test.csv` only for reporting.
+
+The old recurrence-only suite is retained under
+`legacy/recurrence_v1/` when present and remains available through
+`--benchmark recurrence`. The existing drift, hierarchy, and transient
+generators remain auxiliary stress tests.

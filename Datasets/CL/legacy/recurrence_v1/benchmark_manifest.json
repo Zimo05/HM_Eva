@@ -1,0 +1,167 @@
+{
+  "benchmark": "CL-recurrence-v1",
+  "version": 1,
+  "protocol": "continual_hawkes",
+  "schedule_name": "recurrence",
+  "seed": 7,
+  "event_dim": 8,
+  "betas": [0.5, 1.5],
+  "num_tasks": 10,
+  "persistent_regimes": [
+    "A_1",
+    "B_1",
+    "C_1",
+    "D_1",
+    "B_prime_1",
+    "A_2",
+    "E_1"
+  ],
+  "transient_regimes": ["X_transient"],
+  "first_seen": {
+    "A_1": 0,
+    "B_1": 1,
+    "C_1": 2,
+    "D_1": 4,
+    "B_prime_1": 5,
+    "A_2": 6,
+    "E_1": 7
+  },
+  "tasks": [
+    {
+      "task_id": 0,
+      "stage_label": "A_1_initial",
+      "regime_weights": {"A_1": 1.0},
+      "shift_type": "initial",
+      "recurrence_of": null,
+      "splits": {
+        "train": "task_00/train.csv",
+        "validation": "task_00/val.csv",
+        "test": "task_00/test.csv"
+      }
+    },
+    {
+      "task_id": 1,
+      "stage_label": "B_1_novel",
+      "regime_weights": {"B_1": 1.0},
+      "shift_type": "novel",
+      "recurrence_of": null,
+      "splits": {
+        "train": "task_01/train.csv",
+        "validation": "task_01/val.csv",
+        "test": "task_01/test.csv"
+      }
+    },
+    {
+      "task_id": 2,
+      "stage_label": "C_1_novel",
+      "regime_weights": {"C_1": 1.0},
+      "shift_type": "novel",
+      "recurrence_of": null,
+      "splits": {
+        "train": "task_02/train.csv",
+        "validation": "task_02/val.csv",
+        "test": "task_02/test.csv"
+      }
+    },
+    {
+      "task_id": 3,
+      "stage_label": "A_1_exact_recurrence",
+      "regime_weights": {"A_1": 1.0},
+      "shift_type": "exact_recurrence",
+      "recurrence_of": "A_1",
+      "splits": {
+        "train": "task_03/train.csv",
+        "validation": "task_03/val.csv",
+        "test": "task_03/test.csv"
+      }
+    },
+    {
+      "task_id": 4,
+      "stage_label": "D_1_novel",
+      "regime_weights": {"D_1": 1.0},
+      "shift_type": "novel",
+      "recurrence_of": null,
+      "splits": {
+        "train": "task_04/train.csv",
+        "validation": "task_04/val.csv",
+        "test": "task_04/test.csv"
+      }
+    },
+    {
+      "task_id": 5,
+      "stage_label": "B_prime_1_near_recurrence",
+      "regime_weights": {"B_prime_1": 1.0},
+      "shift_type": "near_recurrence",
+      "recurrence_of": "B_1",
+      "splits": {
+        "train": "task_05/train.csv",
+        "validation": "task_05/val.csv",
+        "test": "task_05/test.csv"
+      }
+    },
+    {
+      "task_id": 6,
+      "stage_label": "A_2_specialization",
+      "regime_weights": {"A_2": 1.0},
+      "shift_type": "specialization",
+      "recurrence_of": "A_1",
+      "splits": {
+        "train": "task_06/train.csv",
+        "validation": "task_06/val.csv",
+        "test": "task_06/test.csv"
+      }
+    },
+    {
+      "task_id": 7,
+      "stage_label": "E_1_novel",
+      "regime_weights": {"E_1": 1.0},
+      "shift_type": "novel",
+      "recurrence_of": null,
+      "splits": {
+        "train": "task_07/train.csv",
+        "validation": "task_07/val.csv",
+        "test": "task_07/test.csv"
+      }
+    },
+    {
+      "task_id": 8,
+      "stage_label": "A_1_long_gap_recurrence",
+      "regime_weights": {"A_1": 1.0},
+      "shift_type": "long_gap_recurrence",
+      "recurrence_of": "A_1",
+      "splits": {
+        "train": "task_08/train.csv",
+        "validation": "task_08/val.csv",
+        "test": "task_08/test.csv"
+      }
+    },
+    {
+      "task_id": 9,
+      "stage_label": "E_B_mixture",
+      "regime_weights": {"E_1": 0.7, "B_1": 0.3},
+      "shift_type": "mixture",
+      "recurrence_of": null,
+      "splits": {
+        "train": "task_09/train.csv",
+        "validation": "task_09/val.csv",
+        "test": "task_09/test.csv"
+      }
+    }
+  ],
+  "anchors": [
+    {"regime_id": "A_1", "path": "anchors/A_1.csv", "evaluation_scope": "persistent"},
+    {"regime_id": "B_1", "path": "anchors/B_1.csv", "evaluation_scope": "persistent"},
+    {"regime_id": "C_1", "path": "anchors/C_1.csv", "evaluation_scope": "persistent"},
+    {"regime_id": "D_1", "path": "anchors/D_1.csv", "evaluation_scope": "persistent"},
+    {"regime_id": "B_prime_1", "path": "anchors/B_prime_1.csv", "evaluation_scope": "persistent"},
+    {"regime_id": "A_2", "path": "anchors/A_2.csv", "evaluation_scope": "persistent"},
+    {"regime_id": "E_1", "path": "anchors/E_1.csv", "evaluation_scope": "persistent"},
+    {"regime_id": "X_transient", "path": "anchors/X_transient.csv", "evaluation_scope": "diagnostic_only"}
+  ],
+  "controls": [],
+  "oracle_files": {
+    "stream_manifest": "stream_manifest.csv",
+    "ground_truth_manifest": "ground_truth_manifest.csv",
+    "ground_truth": "ground_truth"
+  }
+}

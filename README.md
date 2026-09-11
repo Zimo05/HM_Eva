@@ -118,7 +118,7 @@ python evaluate_dws_HM.py --variant 13 --seed 42 --device cuda:0 --smoke --run-i
 | `--max-trials` | 实验预算元数据 | 当前入口不会自动发起超参数搜索 |
 | `--max-gpu-hours` | GPU 预算元数据 | 当前不会在超时后自动终止进程 |
 
-DWS 入口额外支持 `--variant 8|13|20`；continual 入口支持 `--task-start 0..9`、`--task-end 0..9` 和 `--data-root`；rank 入口支持 `--rank 0|1|2|4|8|D`，其中 `D` 表示 full rank。
+DWS 入口额外支持 `--variant 8|13|20`；continual 入口支持非负的 `--task-start`、可选的 `--task-end` 和 `--data-root`，省略上界时由 benchmark protocol 解析；rank 入口支持 `--rank 0|1|2|4|8|D`，其中 `D` 表示 full rank。
 
 ## 5. 标准预测实验
 
@@ -218,7 +218,7 @@ LAMP 依赖外部 causal-event 生成和额外 ranking model，不进入主 regi
 
 ### 6.1 数据与实验故事
 
-持续学习数据默认位于 `Datasets/Data/CL/hm_continual_v1`。十个阶段依次为：
+论文主线持续学习数据默认位于 `Datasets/CL/hm_continual_v2`。十个阶段依次为：
 
 | Task | 动态 | 作用 |
 |---|---|---|
@@ -235,17 +235,17 @@ LAMP 依赖外部 causal-event 生成和额外 ranking model，不进入主 regi
 
 Task 6 同时包含 paired no-X control，用于区分正常结构变化和 transient X 引发的持久变化。
 
-如果数据缺失，可重新生成：
+如果数据缺失，可重新生成统一协议：
 
 ```bash
-python ../Datasets/Data/CL/generate_continual_hawkes.py --benchmark unified --output ../Datasets/Data/CL/hm_continual_v1 --seed 7
+python Datasets/CL/generate_continual_hawkes.py --benchmark unified --output Datasets/CL/hm_continual_v2 --seed 7
 ```
 
-除非要创建新版本数据，否则不要覆盖统一数据目录。所有模型和训练种子应使用同一份 `hm_continual_v1`。
+`Datasets/CL/hm_continual_v2/benchmark_manifest.json` 是 schedule、first_seen、anchors 和 controls 的唯一协议来源。原 recurrence-only 数据保留在 `Datasets/CL/legacy/recurrence_v1`，作为辅助 stress test；所有主线模型和训练种子应使用同一份 `hm_continual_v2`。
 
 ### 6.2 每个阶段做什么
 
-每个 continual 脚本会在当前 task 学习前做 pre-update，训练并保存独立 checkpoint，随后做 post-update，并在所有 frozen anchors 上评估。由此构建 checkpoint × law 矩阵。
+每个 continual 脚本会在当前 task 学习前做 pre-update，训练并保存独立的 `task_XX_last.pt` 与 `task_XX_best.pt`，随后由 `best` checkpoint 做 post-update，并在所有 frozen anchors 上评估。`train.csv` 只用于更新，`val.csv` 只用于 checkpoint selection，`test.csv` 只用于最终报告；由此构建 checkpoint × law 矩阵。
 
 主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。
 
@@ -294,10 +294,10 @@ python evaluate_continual_RMTPP_replay.py --seed 7 --task-start 0 --task-end 9 -
 
 ### 6.7 从中间 checkpoint 继续
 
-如果 task 0–4 已在另一台机器完成，可以把 `task_04.pt` 复制过来，再将 task 5–9 作为独立结果包运行：
+如果 task 0–4 已在另一台机器完成，可以把 `task_04_best.pt` 复制过来，再将 task 5–9 作为独立结果包运行：
 
 ```bash
-python evaluate_continual_HM.py --seed 7 --task-start 5 --task-end 9 --checkpoint D:/shared/task_04.pt --run-id tasks_05_09 --device cuda:0
+python evaluate_continual_HM.py --seed 7 --task-start 5 --task-end 9 --checkpoint D:/shared/task_04_best.pt --run-id tasks_05_09 --device cuda:0
 ```
 
 RMTPP、THP 和 TPP-LLM continual 入口同样支持这种方式。请保证 checkpoint 的模型、策略、seed 和超参数与前半段一致。

@@ -427,6 +427,15 @@ class TrainingConfig:
     # Named paper ablation. Stored in checkpoints so evaluation cannot confuse
     # an ablated run with the full model.
     evaluation_ablation: str = "full"
+    # Continual-learning protocol provenance.  These fields are appended so
+    # older positional construction of TrainingConfig remains valid.
+    cl_config_path: Optional[str] = None
+    cl_config_sha256: Optional[str] = None
+    benchmark_manifest_path: Optional[str] = None
+    benchmark_manifest_sha256: Optional[str] = None
+    cl_task_id: Optional[int] = None
+    cl_previous_checkpoint: Optional[str] = None
+    cl_config_override: bool = False
 
 
 def _differentiable_merge_settings(

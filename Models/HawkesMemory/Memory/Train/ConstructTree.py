@@ -1,6 +1,6 @@
 import argparse
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Mapping, Optional
 
 import pandas as pd
 import torch
@@ -94,8 +94,17 @@ class ConstructMemoryTree:
 
         return {"times": times, "types": event_types}
 
-    def load_sequences(self) -> List[Dict[str, torch.Tensor]]:
-        """加载数据，并将原始事件标签映射为 [0, D-1]。"""
+    def load_sequences(
+        self,
+        type_to_index: Optional[Mapping[int, int]] = None,
+    ) -> List[Dict[str, torch.Tensor]]:
+        """Load sequences using one stable raw-event-to-index mapping.
+
+        A validation CSV is a separate file, so inferring its mapping again
+        can silently relabel events when a type is absent from that split.
+        Training and validation callers therefore share the training mapping.
+        The default remains backwards compatible for standalone training.
+        """
         if not self.data_path.is_file():
             raise FileNotFoundError(f"数据文件不存在: {self.data_path}")
 
@@ -131,27 +140,45 @@ class ConstructMemoryTree:
         if not raw_data:
             raise ValueError("数据集中没有有效事件序列")
 
-        self.event_types = sorted({
-            event_type
-            for sequence in raw_data
-            for event_type in sequence["types"]
-        })
-        self.type_to_index = {
-            event_type: index
-            for index, event_type in enumerate(self.event_types)
-        }
+        if type_to_index is None:
+            self.event_types = sorted({
+                event_type
+                for sequence in raw_data
+                for event_type in sequence["types"]
+            })
+            self.type_to_index = {
+                event_type: index
+                for index, event_type in enumerate(self.event_types)
+            }
+        else:
+            self.type_to_index = {
+                int(event_type): int(index)
+                for event_type, index in type_to_index.items()
+            }
+            if (
+                not self.type_to_index
+                or sorted(self.type_to_index.values())
+                != list(range(len(self.type_to_index)))
+            ):
+                raise ValueError(
+                    "type_to_index must map event labels to contiguous indices"
+                )
+            self.event_types = sorted(self.type_to_index)
 
         # 数据保存在 CPU；训练时逐条送入设备，避免大型数据集占满显存。
         self.data = []
         for sequence in raw_data:
             times = torch.tensor(sequence["times"], dtype=torch.float32)
-            types = torch.tensor(
-                [
+            try:
+                mapped_types = [
                     self.type_to_index[event_type]
                     for event_type in sequence["types"]
-                ],
-                dtype=torch.long,
-            )
+                ]
+            except KeyError as error:
+                raise ValueError(
+                    f"event type {error.args[0]!r} is absent from the shared mapping"
+                ) from error
+            types = torch.tensor(mapped_types, dtype=torch.long)
             loaded = {
                 "times": times,
                 "types": types,

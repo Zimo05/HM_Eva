@@ -114,6 +114,24 @@ class TrainingCheckpointMixin:
                     else "last"
                 ),
             },
+            "cl_protocol": {
+                "task_id": self.training_config.cl_task_id,
+                "config_path": self.training_config.cl_config_path,
+                "config_sha256": self.training_config.cl_config_sha256,
+                "benchmark_manifest": self.training_config.benchmark_manifest_path,
+                "benchmark_sha256": self.training_config.benchmark_manifest_sha256,
+                "previous_checkpoint": self.training_config.cl_previous_checkpoint,
+                "checkpoint_role": (
+                    "best"
+                    if self.training_config.best_checkpoint_path
+                    and output_path.resolve() == Path(
+                        self.training_config.best_checkpoint_path
+                    ).resolve()
+                    else "last"
+                ),
+                "completed_epoch": epoch,
+                "config_override": bool(self.training_config.cl_config_override),
+            },
             "tree_state_dict": self.tree.state_dict(),
             "hawkes_state_dict": self.hawkes.state_dict(),
             "encoder_state_dict": self.encoder.state_dict(),

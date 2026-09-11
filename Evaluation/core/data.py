@@ -5,8 +5,9 @@ import json
 import pickle
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
+from .cl_protocol import CLProtocol
 from .io import sha256, write_json
 from .paths import DATASETS_ROOT
 
@@ -95,11 +96,62 @@ def dataset_inputs(dataset: str, variant: str | None = None) -> list[Path]:
 
 
 def continual_root(value: Path | None = None) -> Path:
-    root = value or DATASETS_ROOT / "Data" / "CL" / "hm_continual_v1"
+    root = value or DATASETS_ROOT / "CL" / "hm_continual_v2"
     return root.expanduser().resolve()
 
 
-def _read_continual_csv(path: Path) -> list[dict[str, Any]]:
+def benchmark_manifest_path(data_root: Path) -> Path:
+    """Return the immutable protocol manifest for a continual benchmark."""
+
+    return Path(data_root).expanduser().resolve() / "benchmark_manifest.json"
+
+
+def continual_protocol(value: Path | None = None) -> CLProtocol:
+    """Load the canonical continual benchmark protocol."""
+
+    return CLProtocol.load(continual_root(value))
+
+
+def load_benchmark_manifest(data_root: Path) -> dict[str, Any]:
+    """Compatibility view backed by :class:`CLProtocol`."""
+
+    return continual_protocol(data_root).raw_manifest
+
+
+def benchmark_first_seen(
+    manifest: Mapping[str, Any] | CLProtocol, *, persistent_only: bool = True
+) -> dict[str, int]:
+    """Return manifest first-seen tasks, optionally excluding diagnostics."""
+
+    if isinstance(manifest, CLProtocol):
+        regime_ids = (
+            manifest.persistent_regimes if persistent_only else manifest.first_seen.keys()
+        )
+        return {
+            str(regime_id): int(manifest.first_seen[regime_id])
+            for regime_id in regime_ids
+            if regime_id in manifest.first_seen
+        }
+    first_seen = manifest.get("first_seen", {})
+    if not isinstance(first_seen, Mapping):
+        raise ValueError("benchmark manifest first_seen must be an object")
+    if persistent_only:
+        regime_ids = manifest.get("persistent_regimes", ())
+    else:
+        regime_ids = first_seen.keys()
+    return {str(regime_id): int(first_seen[regime_id]) for regime_id in regime_ids}
+
+
+def _continual_split_path(
+    data_root: Path,
+    task: int,
+    split: str,
+    protocol: CLProtocol,
+) -> Path:
+    return protocol.split_path(task, split)
+
+
+def _read_continual_csv(path: Path, event_dim: int) -> list[dict[str, Any]]:
     records = []
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
         for index, row in enumerate(csv.DictReader(handle)):
@@ -107,9 +159,14 @@ def _read_continual_csv(path: Path) -> list[dict[str, Any]]:
             types = [int(value) for value in json.loads(row["event_types"])]
             if len(times) != len(types) or len(times) < 2:
                 raise ValueError(f"invalid continual sequence in {path} row {index + 2}")
+            if any(event_type < 0 or event_type >= event_dim for event_type in types):
+                raise ValueError(
+                    f"continual sequence in {path} row {index + 2} contains an "
+                    f"event type outside [0, {event_dim - 1}]"
+                )
             deltas = [0.0] + [right - left for left, right in zip(times, times[1:])]
             records.append({
-                "dim_process": 8,
+                "dim_process": event_dim,
                 "seq_idx": index,
                 "time_since_start": times,
                 "time_since_last_event": deltas,
@@ -121,19 +178,42 @@ def _read_continual_csv(path: Path) -> list[dict[str, Any]]:
 
 
 def prepare_continual_baseline_dataset(
-        model: str, data_root: Path, output: Path, train_tasks: list[int],
-        eval_csv: Path | None = None, replay_csvs: list[Path] | None = None,
+    model: str,
+    data_root: Path,
+    output: Path,
+    train_tasks: list[int],
+    eval_csv: Path | None = None,
+    replay_csvs: list[Path] | None = None,
+    protocol: CLProtocol | None = None,
 ) -> Path:
     """Create private task data in each baseline's native on-disk schema."""
+    if protocol is None:
+        protocol = continual_protocol(data_root)
+    event_dim = protocol.event_dim
     output.mkdir(parents=True, exist_ok=True)
     train = []
     for task in train_tasks:
-        train.extend(_read_continual_csv(data_root / f"task_{task:02d}" / "train.csv"))
+        train.extend(_read_continual_csv(
+            _continual_split_path(
+                data_root, task, "train", protocol
+            ),
+            event_dim,
+        ))
     for replay_path in replay_csvs or []:
-        train.extend(_read_continual_csv(replay_path))
+        train.extend(_read_continual_csv(replay_path, event_dim))
     current = train_tasks[-1]
-    dev = _read_continual_csv(data_root / f"task_{current:02d}" / "val.csv")
-    test = _read_continual_csv(eval_csv or data_root / f"task_{current:02d}" / "test.csv")
+    dev = _read_continual_csv(
+        _continual_split_path(
+            data_root, current, "val", protocol
+        ),
+        event_dim,
+    )
+    test = _read_continual_csv(
+        eval_csv or _continual_split_path(
+            data_root, current, "test", protocol
+        ),
+        event_dim,
+    )
     for split_records in (train, dev, test):
         for index, record in enumerate(split_records):
             record["seq_idx"] = index
@@ -161,7 +241,7 @@ def prepare_continual_baseline_dataset(
                     record["type_event"],
                 )])
             with (output / f"{split}.pkl").open("wb") as handle:
-                pickle.dump({"dim_process": 8, split: streams}, handle)
+                pickle.dump({"dim_process": event_dim, split: streams}, handle)
     else:
         raise KeyError(model)
     return output

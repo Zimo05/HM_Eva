@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
+import json
+from pathlib import Path
+import sys
 
 from Train.TrainingComponents import *  # noqa: F403
 
@@ -10,15 +14,487 @@ from Train.TrainingComponents import *  # noqa: F403
 from Train.TrainingTrainer import MemoryTreeTrainer
 from DataSplit import file_sha256, load_split_manifest, select_sequences
 
-def _parse_args():
+
+# These values describe the learner and must survive a continual-learning
+# stage boundary.  They are temporarily parsed with a ``None`` default so a
+# resume can distinguish an omitted option from an explicit override.
+_PERSISTENT_CONFIG_DESTS = frozenset({
+    "seed",
+    "learning_rate",
+    "weight_decay",
+    "grad_clip",
+    "sleep_every",
+    "evaluation_ablation",
+    "controller_target_version",
+    "controller_heads",
+    "controller_write_ranking",
+    "prototype_duplicate_threshold",
+    "prototype_duplicate_quantile",
+    "prototype_mode_threshold",
+    "prototype_mode_capacity",
+    "prototype_context_alias_capacity",
+    "count_similarity_low",
+    "count_similarity_high",
+    "count_exponent",
+    "count_saturation",
+    "count_topk",
+    "route_mi_weight",
+    "route_posterior_weight",
+    "route_distill_weight",
+    "route_mix_weight",
+    "route_energy_temperature",
+    "route_encoder_warmup_epochs",
+    "route_encoder_grad_scale",
+    "route_encoder_reliability_decay",
+    "route_teacher_temperature",
+    "route_probe_weight",
+    "route_probe_leaves",
+    "route_probe_leaf_smoothing",
+    "route_probe_residual_temperature",
+    "route_probe_gain_temperature",
+    "route_probe_complexity_weight",
+    "route_balance_weight",
+    "route_balance_batch_size",
+    "wake_wavefront_batch_size",
+    "retrieval_microbatch",
+    "route_balance_max_steps",
+    "route_balance_target_kl",
+    "router_lr_scale",
+    "router_init_gain",
+    "semantic_blend",
+    "leaf_symmetry_scale",
+    "residual_init_scale",
+    "residual_init_rank",
+    "residual_init_grad_clip",
+    "alignment_epochs",
+    "alignment_batch_size",
+    "alignment_lr",
+    "alignment_weight_decay",
+    "alignment_temperature",
+    "alignment_grad_clip",
+    "allow_root_only_alignment",
+    "prune_warmup_epochs",
+    "merge_min_replay",
+    "merge_stale_weight",
+    "merge_dynamics_weight",
+    "merge_loss_weight",
+    "merge_gate_temperature",
+    "merge_budget_ratio",
+    "merge_dual_lr",
+    "merge_dual_initial",
+    "light_replay_budget",
+    "split_min_structural_strength",
+    "split_min_effective_sample_size",
+    "split_route_loss_weight",
+    "split_anchor_weight",
+    "deep_availability_tau",
+    "deep_probe_interval",
+    "deep_computation_cost",
+    "deep_prior_probability",
+    "deep_prior_weight",
+    "deep_evidence_budget",
+    "topology_inertia_strength",
+    "topology_inertia_tau",
+    "z_dim",
+    "node_dim",
+    "memory_key_dim",
+    "frontier_budget",
+    "frontier_min_experts",
+    "frontier_routing_temperature",
+    "frontier_exploration",
+    "frontier_confidence_weight",
+    "frontier_compute_cost",
+    "frontier_posterior_temperature",
+    "frontier_credible_mass",
+    "frontier_owner_confidence",
+    "max_writes_per_sequence",
+    "num_basis",
+    "decays",
+})
+
+
+def _normalise_config_value(value):
+    """Make checkpoint/config values directly comparable and JSON-friendly."""
+
+    if torch.is_tensor(value):
+        return _normalise_config_value(value.detach().cpu().tolist())
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalise_config_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_normalise_config_value(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _load_json_object(path: str | Path) -> dict:
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"configuration file does not exist: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"configuration file must contain an object: {path}")
+    return payload
+
+
+def _load_checkpoint_payload(path: str | Path) -> dict:
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"checkpoint does not exist: {path}")
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise ValueError(f"checkpoint must contain a mapping: {path}")
+    return payload
+
+
+_WAKE_ARG_TO_CHECKPOINT = {
+    "route_mi_weight": "lambda_route_mi",
+    "route_posterior_weight": "lambda_route_posterior",
+    "route_distill_weight": "lambda_route_distill",
+    "route_mix_weight": "lambda_route_mix",
+    "route_probe_weight": "lambda_route_probe",
+    "route_balance_weight": "lambda_route_balance",
+}
+_FRONTIER_ARG_TO_CHECKPOINT = {
+    "frontier_budget": "frontier_budget",
+    "frontier_min_experts": "frontier_min_experts",
+    "frontier_routing_temperature": "routing_temperature",
+    "frontier_exploration": "exploration_epsilon",
+    "frontier_confidence_weight": "confidence_weight",
+    "frontier_compute_cost": "expansion_compute_cost",
+    "frontier_posterior_temperature": "posterior_temperature",
+    "frontier_credible_mass": "credible_mass",
+    "frontier_owner_confidence": "owner_confidence_threshold",
+    "max_writes_per_sequence": "max_writes_per_sequence",
+}
+_MERGE_ARG_TO_CHECKPOINT = {
+    "merge_min_replay": "min_replay",
+    "merge_stale_weight": "stale_weight",
+    "merge_dynamics_weight": "dynamics_weight",
+    "merge_loss_weight": "loss_weight",
+    "merge_gate_temperature": "gate_temperature",
+    "merge_budget_ratio": "budget_ratio",
+    "merge_dual_lr": "dual_lr",
+    "merge_dual_initial": "dual_initial",
+}
+
+
+def _checkpoint_config_value(payload: Mapping, dest: str):
+    """Read the persisted value corresponding to one CLI destination."""
+
+    training = payload.get("training_config", {})
+    wake = payload.get("wake_config", {})
+    sleep = payload.get("sleep_config", {})
+    structure = payload.get("structure_config", {})
+    model = payload.get("model_config", {})
+    frontier = (
+        model.get("frontier_routing_config", {})
+        if isinstance(model, Mapping)
+        else {}
+    )
+    if not all(isinstance(section, Mapping) for section in (training, wake, sleep, structure, model, frontier)):
+        return None
+
+    if dest == "controller_heads":
+        value = training.get("controller_train_heads")
+        if value is None:
+            return None
+        return ",".join(str(item) for item in value)
+    if dest in {"controller_target_version", "controller_write_ranking", "seed", "learning_rate", "weight_decay", "grad_clip", "sleep_every", "router_lr_scale", "evaluation_ablation"}:
+        return training.get(
+            "controller_target_version" if dest == "controller_target_version" else dest
+        )
+    if dest in {"z_dim", "node_dim", "memory_key_dim", "num_basis", "decays", "semantic_blend"}:
+        if dest == "semantic_blend":
+            return model.get(dest)
+        return model.get(dest)
+    if dest in _FRONTIER_ARG_TO_CHECKPOINT:
+        return frontier.get(_FRONTIER_ARG_TO_CHECKPOINT[dest])
+    if dest in _WAKE_ARG_TO_CHECKPOINT:
+        return wake.get(_WAKE_ARG_TO_CHECKPOINT[dest])
+    if dest.startswith("prototype_") or dest.startswith("count_"):
+        return wake.get(dest)
+    if dest.startswith("route_"):
+        return wake.get(dest, wake.get(_WAKE_ARG_TO_CHECKPOINT.get(dest, "")))
+    if dest == "residual_init_rank":
+        return wake.get("route_probe_residual_rank")
+    if dest == "residual_init_grad_clip":
+        return wake.get("route_probe_residual_grad_clip")
+    if dest in {"router_init_gain", "leaf_symmetry_scale", "residual_init_scale", "alignment_epochs", "alignment_batch_size", "alignment_lr", "alignment_weight_decay", "alignment_temperature", "alignment_grad_clip", "allow_root_only_alignment"}:
+        # These are fresh-initialisation choices. They have no effect after a
+        # full trainer restore, so older checkpoints legitimately omit them.
+        return None
+    if dest == "prune_warmup_epochs":
+        return structure.get(dest)
+    if dest in _MERGE_ARG_TO_CHECKPOINT:
+        merge_kwargs = structure.get("merge_kwargs", {})
+        if not isinstance(merge_kwargs, Mapping):
+            return None
+        return merge_kwargs.get(_MERGE_ARG_TO_CHECKPOINT[dest])
+    if dest in {"light_replay_budget", "split_min_structural_strength", "split_min_effective_sample_size", "split_route_loss_weight", "split_anchor_weight", "deep_availability_tau", "deep_probe_interval", "deep_computation_cost", "deep_prior_probability", "deep_prior_weight", "deep_evidence_budget", "topology_inertia_strength", "topology_inertia_tau"}:
+        return sleep.get(dest)
+    return None
+
+
+def _cl_config_value(payload: Mapping, dest: str):
+    """Read a value from the learner-level ``cl_config.json`` schema."""
+
+    training = payload.get("training", {})
+    if not isinstance(training, Mapping):
+        training = {}
+    if dest == "epochs":
+        return payload.get("epochs_per_task", payload.get("epochs"))
+    if dest == "cold_start_epochs":
+        return payload.get("cold_start_epochs")
+    if dest in {"learning_rate", "weight_decay", "grad_clip", "sleep_every", "seed", "evaluation_ablation", "controller_target_version", "controller_write_ranking"}:
+        section = training
+        if dest in section:
+            return section[dest]
+        optimizer = payload.get("optimizer", {})
+        if not isinstance(optimizer, Mapping):
+            optimizer = {}
+        if dest in optimizer:
+            return optimizer[dest]
+    if dest == "controller_heads":
+        value = training.get("controller_train_heads")
+        if value is not None:
+            return ",".join(str(item) for item in value)
+    if dest == "residual_init_rank":
+        wake = payload.get("wake", {})
+        return (
+            wake.get("route_probe_residual_rank", wake.get(dest))
+            if isinstance(wake, Mapping)
+            else None
+        )
+    if dest == "residual_init_grad_clip":
+        wake = payload.get("wake", {})
+        return (
+            wake.get("route_probe_residual_grad_clip", wake.get(dest))
+            if isinstance(wake, Mapping)
+            else None
+        )
+    if dest in {"z_dim", "node_dim", "memory_key_dim", "num_basis", "decays", "semantic_blend"}:
+        model = payload.get("model", {})
+        return model.get(dest) if isinstance(model, Mapping) else None
+    if dest in _FRONTIER_ARG_TO_CHECKPOINT:
+        frontier = payload.get("frontier", {})
+        if not isinstance(frontier, Mapping):
+            return None
+        return frontier.get(
+            _FRONTIER_ARG_TO_CHECKPOINT[dest],
+            frontier.get(dest),
+        )
+    if dest in _WAKE_ARG_TO_CHECKPOINT:
+        wake = payload.get("wake", {})
+        if not isinstance(wake, Mapping):
+            return None
+        return wake.get(
+            _WAKE_ARG_TO_CHECKPOINT[dest],
+            wake.get(dest),
+        )
+    for section_name in ("wake", "sleep", "structure", "training"):
+        section = payload.get(section_name, {})
+        if not isinstance(section, Mapping):
+            continue
+        if dest in section:
+            return section[dest]
+    if dest in _MERGE_ARG_TO_CHECKPOINT:
+        structure = payload.get("structure", {})
+        merge_kwargs = (
+            structure.get("merge_kwargs", {})
+            if isinstance(structure, Mapping)
+            else {}
+        )
+        return (
+            merge_kwargs.get(_MERGE_ARG_TO_CHECKPOINT[dest])
+            if isinstance(merge_kwargs, Mapping)
+            else None
+        )
+    return None
+
+
+def _resolve_cli_values(args, *, resume_payload: Mapping | None, cl_config: Mapping | None) -> None:
+    """Resolve fresh defaults while inheriting omitted resume options."""
+
+    parser_defaults = getattr(args, "_parser_defaults", {})
+    for dest in _PERSISTENT_CONFIG_DESTS:
+        if getattr(args, dest, None) is not None:
+            continue
+        value = None
+        if resume_payload is not None:
+            value = _checkpoint_config_value(resume_payload, dest)
+        if value is None and cl_config is not None and resume_payload is None:
+            value = _cl_config_value(cl_config, dest)
+        if value is None:
+            value = parser_defaults.get(dest)
+        if dest == "decays" and value is not None:
+            value = list(_normalise_config_value(value))
+        setattr(args, dest, value)
+
+    if args.epochs is None:
+        args.epochs = (
+            _cl_config_value(cl_config, "epochs")
+            if cl_config is not None and resume_payload is None
+            else None
+        )
+        if args.epochs is None:
+            args.epochs = parser_defaults.get("epochs", 20)
+    if args.cold_start_epochs is None:
+        args.cold_start_epochs = (
+            _cl_config_value(cl_config, "cold_start_epochs")
+            if cl_config is not None and resume_payload is None
+            else None
+        )
+        if args.cold_start_epochs is None:
+            args.cold_start_epochs = parser_defaults.get(
+                "cold_start_epochs", 5
+            )
+    if args.seed is None:
+        args.seed = parser_defaults.get("seed", 0)
+
+    # A checkpoint's RNG is restored by from_checkpoint(); the value below is
+    # only used for epoch-indexed shuffling and therefore must match it.
+    saved_training = (
+        resume_payload.get("training_config", {})
+        if resume_payload is not None
+        else {}
+    )
+    if (
+        isinstance(saved_training, Mapping)
+        and "seed" in saved_training
+    ):
+        if "seed" not in getattr(args, "_explicit_options", set()):
+            args.seed = int(saved_training["seed"])
+
+
+def _check_resume_config_drift(args, payload: Mapping) -> None:
+    """Reject implicit/accidental learner-config changes at a stage boundary."""
+
+    mismatches = []
+    for dest in sorted(
+        set(getattr(args, "_explicit_options", set()))
+        .intersection(_PERSISTENT_CONFIG_DESTS)
+    ):
+        expected = _checkpoint_config_value(payload, dest)
+        if expected is None:
+            continue
+        actual = getattr(args, dest)
+        if dest == "controller_heads" and isinstance(expected, (tuple, list)):
+            expected = ",".join(str(item) for item in expected)
+        if _normalise_config_value(actual) != _normalise_config_value(expected):
+            mismatches.append(
+                f"{dest}: checkpoint={expected!r}, cli={actual!r}"
+            )
+
+    saved_protocol = payload.get("cl_protocol", {})
+    if not isinstance(saved_protocol, Mapping):
+        saved_protocol = {}
+    if args.cl_config and saved_protocol.get("config_sha256"):
+        actual_sha = file_sha256(args.cl_config)
+        if actual_sha != saved_protocol["config_sha256"]:
+            mismatches.append(
+                "cl_config.json SHA-256 differs from the checkpoint"
+            )
+    if args.benchmark_manifest and saved_protocol.get("benchmark_sha256"):
+        actual_sha = file_sha256(args.benchmark_manifest)
+        if actual_sha != saved_protocol["benchmark_sha256"]:
+            mismatches.append(
+                "benchmark_manifest.json SHA-256 differs from the checkpoint"
+            )
+    if mismatches and not args.allow_config_override:
+        raise RuntimeError(
+            "CL configuration drift detected while resuming: "
+            + "; ".join(mismatches)
+            + "; pass --allow-config-override to continue"
+        )
+    args._config_override_used = bool(mismatches)
+
+
+def _apply_cl_metadata(trainer, args) -> None:
+    """Attach immutable benchmark/config provenance to future checkpoints."""
+
+    if args.cl_config:
+        path = Path(args.cl_config).expanduser().resolve()
+        trainer.training_config.cl_config_path = str(path)
+        trainer.training_config.cl_config_sha256 = file_sha256(path)
+    if args.benchmark_manifest:
+        path = Path(args.benchmark_manifest).expanduser().resolve()
+        trainer.training_config.benchmark_manifest_path = str(path)
+        trainer.training_config.benchmark_manifest_sha256 = file_sha256(path)
+    if args.cl_task_id is not None:
+        trainer.training_config.cl_task_id = args.cl_task_id
+    if args.cl_previous_checkpoint:
+        trainer.training_config.cl_previous_checkpoint = str(
+            Path(args.cl_previous_checkpoint).expanduser().resolve()
+        )
+    if getattr(args, "_config_override_used", False):
+        trainer.training_config.cl_config_override = True
+    elif getattr(args, "resume", None) is None:
+        trainer.training_config.cl_config_override = False
+
+
+def _start_cl_stage(trainer, args, resume_payload: Mapping | None) -> None:
+    """Reset validation selection only when a new CL task starts.
+
+    The learner state, global epoch counter, sleep state, optimizer and
+    topology remain restored.  Validation history is task-local because a
+    previous task's validation score cannot select this task's checkpoint.
+    """
+
+    if args.cl_task_id is None or resume_payload is None:
+        return
+    saved_protocol = resume_payload.get("cl_protocol", {})
+    if not isinstance(saved_protocol, Mapping):
+        return
+    saved_task = saved_protocol.get("task_id")
+    if saved_task is not None and int(saved_task) != int(args.cl_task_id):
+        trainer.validation_history = []
+        trainer.best_validation = None
+
+
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Train the Hawkes Memory Tree")
     parser.add_argument("--data-path", required=True)
+    parser.add_argument(
+        "--validation-data-path",
+        default=None,
+        help="Task-local validation CSV used only for checkpoint selection.",
+    )
+    parser.add_argument(
+        "--cl-config", default=None,
+        help="Learner-level continual-learning configuration JSON.",
+    )
+    parser.add_argument(
+        "--benchmark-manifest", default=None,
+        help="Canonical benchmark manifest recorded in each checkpoint.",
+    )
+    parser.add_argument("--cl-task-id", type=int, default=None)
+    parser.add_argument("--cl-previous-checkpoint", default=None)
+    parser.add_argument(
+        "--allow-config-override",
+        action="store_true",
+        help="Permit explicit learner-config changes when resuming.",
+    )
     parser.add_argument("--split-manifest", default=None)
     parser.add_argument(
         "--split", choices=("train", "validation", "test"), default=None
     )
     parser.add_argument("--checkpoint", default="checkpoints/memory_tree.pt")
     parser.add_argument("--best-checkpoint", default=None)
+    parser.add_argument(
+        "--initial-checkpoint-output",
+        default=None,
+        help=(
+            "Save the freshly initialized model before the first training "
+            "epoch, for a fixed continual-learning scratch/FWT baseline."
+        ),
+    )
     parser.add_argument("--validation-history-path", default=None)
     parser.add_argument("--controller-diagnostics-path", default=None)
     parser.add_argument(
@@ -72,6 +548,10 @@ def _parse_args():
     )
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-5)
+    parser.add_argument("--grad-clip", type=float, default=5.0)
+    parser.add_argument("--sleep-every", type=int, default=1)
     parser.add_argument(
         "--evaluation-ablation",
         choices=(
@@ -688,7 +1168,34 @@ def _parse_args():
         ),
     )
     parser.add_argument("--device", default=None)
-    return parser.parse_args()
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    parser_defaults = {
+        action.dest: action.default
+        for action in parser._actions
+        if action.dest in _PERSISTENT_CONFIG_DESTS
+        or action.dest in {"epochs", "cold_start_epochs"}
+    }
+    for action in parser._actions:
+        if action.dest in _PERSISTENT_CONFIG_DESTS or action.dest in {
+            "epochs", "cold_start_epochs"
+        }:
+            action.default = None
+    args = parser.parse_args(argv_list)
+    option_to_dest = {
+        option: action.dest
+        for action in parser._actions
+        for option in action.option_strings
+    }
+    explicit = set()
+    for token in argv_list:
+        if token == "--":
+            break
+        option = token.split("=", 1)[0]
+        if option in option_to_dest:
+            explicit.add(option_to_dest[option])
+    args._explicit_options = frozenset(explicit)
+    args._parser_defaults = parser_defaults
+    return args
 
 
 @torch.no_grad()
@@ -851,6 +1358,66 @@ def _apply_evaluation_ablation(trainer, name: str) -> None:
 
 def main() -> None:
     args = _parse_args()
+    resume_source = args.resume or args.controller_base_checkpoint
+    resume_payload = (
+        _load_checkpoint_payload(resume_source)
+        if resume_source is not None
+        else None
+    )
+    cl_config = (
+        _load_json_object(args.cl_config)
+        if args.cl_config is not None
+        else None
+    )
+    _resolve_cli_values(
+        args,
+        resume_payload=resume_payload,
+        cl_config=cl_config,
+    )
+    if resume_payload is not None:
+        _check_resume_config_drift(args, resume_payload)
+    if args.cl_task_id is not None:
+        if args.cl_task_id < 0:
+            raise ValueError("--cl-task-id must be non-negative")
+        if args.validation_data_path is None:
+            raise RuntimeError(
+                "continual stages require --validation-data-path so checkpoint "
+                "selection cannot fall back to training or test data"
+            )
+        if args.benchmark_manifest is None:
+            raise RuntimeError(
+                "continual stages require --benchmark-manifest"
+            )
+    if args.cl_task_id is not None and args.cl_task_id > 0:
+        if args.resume is None:
+            raise RuntimeError(
+                f"continual task {args.cl_task_id} requires --resume from "
+                "the previous task checkpoint"
+            )
+        saved_protocol = (
+            resume_payload.get("cl_protocol", {})
+            if resume_payload is not None
+            else {}
+        )
+        if isinstance(saved_protocol, Mapping):
+            saved_task = saved_protocol.get("task_id")
+            if saved_task is not None and int(saved_task) not in {
+                int(args.cl_task_id) - 1,
+                int(args.cl_task_id),
+            }:
+                raise RuntimeError(
+                    f"continual task {args.cl_task_id} requires a checkpoint "
+                    f"from task {int(args.cl_task_id) - 1}; got task {saved_task}"
+                )
+        if (
+            args.cl_previous_checkpoint is not None
+            and Path(args.cl_previous_checkpoint).expanduser().resolve()
+            != Path(args.resume).expanduser().resolve()
+        ):
+            raise RuntimeError(
+                "--resume must identify the same checkpoint as "
+                "--cl-previous-checkpoint"
+            )
     if not 0.0 <= args.semantic_blend <= 1.0:
         raise ValueError("--semantic-blend must lie in [0, 1]")
     if args.leaf_symmetry_scale < 0.0:
@@ -979,6 +1546,40 @@ def main() -> None:
     dataset = all_sequences
     validation_dataset = None
     manifest = None
+    if args.validation_data_path is not None:
+        if args.split_manifest is not None:
+            raise ValueError(
+                "--validation-data-path cannot be combined with --split-manifest; "
+                "the continual protocol already declares task-local splits"
+            )
+        train_path = Path(args.data_path).expanduser().resolve()
+        validation_path = Path(args.validation_data_path).expanduser().resolve()
+        if train_path.name != "train.csv":
+            raise ValueError(
+                "continual training updates must read a file named train.csv"
+            )
+        if validation_path.name not in {"val.csv", "validation.csv"}:
+            raise ValueError(
+                "checkpoint selection must read a file named val.csv or validation.csv"
+            )
+        validation_constructor = ConstructMemoryTree(
+            data_path=validation_path,
+            num_basis=args.num_basis,
+            decays=args.decays,
+            z_dim=args.z_dim,
+            node_dim=args.node_dim,
+            memory_key_dim=args.memory_key_dim,
+            tree_init_depth=tree_init_depth,
+            device=args.device,
+        )
+        validation_dataset = validation_constructor.load_sequences(
+            type_to_index=constructor.type_to_index
+        )
+        print(
+            f"[Task-local validation] train={train_path} "
+            f"validation={validation_path} "
+            f"sequences={len(validation_dataset)}"
+        )
     if args.split_manifest is not None:
         if args.split is None:
             raise ValueError("--split is required with --split-manifest")
@@ -1105,6 +1706,11 @@ def main() -> None:
         trainer.training_config.training_plot_path = args.training_plot_path
         trainer.training_config.plot_after_training = not args.no_training_plots
         trainer.training_config.seed = args.seed
+        trainer.training_config.learning_rate = args.learning_rate
+        trainer.training_config.weight_decay = args.weight_decay
+        trainer.training_config.grad_clip = args.grad_clip
+        trainer.training_config.sleep_every = args.sleep_every
+        trainer.training_config.evaluation_ablation = args.evaluation_ablation
         heads = tuple(
             value.strip()
             for value in args.controller_heads.split(",")
@@ -1153,6 +1759,7 @@ def main() -> None:
             f"trainable_tensors={len(trainable_names)} "
             f"frozen_sha256={trainer.training_config.frozen_state_sha256}"
         )
+        _apply_cl_metadata(trainer, args)
         _apply_evaluation_ablation(trainer, args.evaluation_ablation)
         trainer.train(dataset, validation_dataset=validation_dataset)
         return
@@ -1165,6 +1772,7 @@ def main() -> None:
             args.resume,
             device=constructor.device,
         )
+        _start_cl_stage(trainer, args, resume_payload)
         trainer.tree.configure_frontier_routing(
             config=FrontierRoutingConfig(
                 frontier_budget=args.frontier_budget,
@@ -1198,7 +1806,18 @@ def main() -> None:
             args.unified_topology_log_path
         )
         trainer.training_config.router_lr_scale = args.router_lr_scale
+        trainer.training_config.controller_write_ranking = bool(
+            args.controller_write_ranking
+        )
+        trainer.controller_utility_replay.write_ranking_enabled = bool(
+            args.controller_write_ranking
+        )
         trainer.training_config.seed = args.seed
+        trainer.training_config.learning_rate = args.learning_rate
+        trainer.training_config.weight_decay = args.weight_decay
+        trainer.training_config.grad_clip = args.grad_clip
+        trainer.training_config.sleep_every = args.sleep_every
+        trainer.training_config.evaluation_ablation = args.evaluation_ablation
         trainer.training_config.plot_after_training = (
             not args.no_training_plots
         )
@@ -1206,11 +1825,25 @@ def main() -> None:
             args.training_metrics_path
         )
         trainer.training_config.training_plot_path = args.training_plot_path
+        trainer.wake_config.prototype_duplicate_threshold = (
+            args.prototype_duplicate_threshold
+        )
+        trainer.wake_config.prototype_mode_threshold = args.prototype_mode_threshold
+        trainer.wake_config.prototype_mode_capacity = args.prototype_mode_capacity
+        trainer.wake_config.prototype_context_alias_capacity = (
+            args.prototype_context_alias_capacity
+        )
         trainer.wake_config.prototype_duplicate_quantile = (
             args.prototype_duplicate_quantile
         )
         trainer.tree.episodic_memory.configure_prototype_memory(
-            duplicate_quantile=trainer.wake_config.prototype_duplicate_quantile
+            duplicate_threshold=trainer.wake_config.prototype_duplicate_threshold,
+            mode_threshold=trainer.wake_config.prototype_mode_threshold,
+            duplicate_quantile=trainer.wake_config.prototype_duplicate_quantile,
+            mode_capacity=trainer.wake_config.prototype_mode_capacity,
+            context_alias_capacity=(
+                trainer.wake_config.prototype_context_alias_capacity
+            ),
         )
         trainer.wake_config.lambda_route_mi = args.route_mi_weight
         trainer.wake_config.lambda_route_posterior = (
@@ -1288,6 +1921,14 @@ def main() -> None:
         trainer.controller.count_saturation = args.count_saturation
         trainer.controller.count_topk = args.count_topk
         trainer.sleep_config.light_replay_budget = args.light_replay_budget
+        trainer.sleep_config.split_min_structural_strength = (
+            args.split_min_structural_strength
+        )
+        trainer.sleep_config.split_min_effective_sample_size = (
+            args.split_min_effective_sample_size
+        )
+        trainer.sleep_config.split_route_loss_weight = args.split_route_loss_weight
+        trainer.sleep_config.split_anchor_weight = args.split_anchor_weight
         trainer.sleep_config.deep_availability_tau = (
             args.deep_availability_tau
         )
@@ -1318,6 +1959,7 @@ def main() -> None:
             "dynamics_weight": args.merge_dynamics_weight,
             "normalize_by_events": True,
         }
+        _apply_cl_metadata(trainer, args)
         trainer._reconcile_optimizer_parameters()
         _apply_evaluation_ablation(trainer, args.evaluation_ablation)
         trainer.train(dataset, validation_dataset=validation_dataset)
@@ -1682,6 +2324,10 @@ def main() -> None:
         ),
         training=TrainingConfig(
             epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            grad_clip=args.grad_clip,
+            sleep_every=args.sleep_every,
             checkpoint_path=args.checkpoint,
             best_checkpoint_path=args.best_checkpoint,
             validation_history_path=args.validation_history_path,
@@ -1693,8 +2339,18 @@ def main() -> None:
             training_metrics_path=args.training_metrics_path,
             training_plot_path=args.training_plot_path,
             evaluation_ablation=args.evaluation_ablation,
+            controller_target_version=args.controller_target_version,
+            controller_train_heads=tuple(
+                value.strip()
+                for value in args.controller_heads.split(",")
+                if value.strip()
+            ),
+            controller_write_ranking=bool(args.controller_write_ranking),
         ),
         device=constructor.device,
     )
+    _apply_cl_metadata(trainer, args)
     _apply_evaluation_ablation(trainer, args.evaluation_ablation)
+    if args.initial_checkpoint_output is not None and resume_payload is None:
+        trainer.save_checkpoint(args.initial_checkpoint_output, epoch=0)
     trainer.train(dataset, validation_dataset=validation_dataset)

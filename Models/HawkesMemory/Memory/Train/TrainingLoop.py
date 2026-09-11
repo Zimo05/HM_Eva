@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections import defaultdict
 
 from Train.TrainingComponents import *  # noqa: F403
@@ -98,7 +99,14 @@ class TrainingLoopMixin:
             None,
         )
         if configured:
-            return Path(configured)
+            configured_path = Path(configured)
+            # The continual runner passes ``topology_events.jsonl`` as the
+            # structured transaction destination.  Keep the existing
+            # human-readable candidate log beside it instead of appending
+            # plain text to a JSONL stream.
+            if configured_path.suffix.lower() == ".jsonl":
+                return configured_path.with_suffix(".log")
+            return configured_path
         checkpoint = Path(self.training_config.checkpoint_path)
         return checkpoint.with_name(
             f"{checkpoint.stem}_unified_topology.log"
@@ -119,6 +127,68 @@ class TrainingLoopMixin:
             for line in lines:
                 stream.write(f"{line}\n")
             stream.write("\n")
+
+    def _topology_events_path(self) -> Path:
+        """Resolve the append-only JSONL stream of committed topology edits."""
+
+        configured = getattr(
+            self.training_config,
+            "unified_topology_log_path",
+            None,
+        )
+        if configured:
+            configured_path = Path(configured)
+            if configured_path.suffix.lower() == ".jsonl":
+                return configured_path
+            return configured_path.with_suffix(".jsonl")
+        checkpoint = Path(self.training_config.checkpoint_path)
+        return checkpoint.with_name("topology_events.jsonl")
+
+    def _write_topology_events(
+        self,
+        epoch: int,
+        transaction: Mapping[str, Any],
+    ) -> None:
+        """Persist committed Split/Merge/Prune actions as structured JSONL."""
+
+        actions = transaction.get("actions", ()) if transaction else ()
+        rows = []
+        for action in actions:
+            kind = str(action.get("action", ""))
+            if kind not in {"split", "merge", "topology_prune"}:
+                continue
+            if kind == "split":
+                source = action.get("node")
+                targets = action.get("children", ())
+            else:
+                source = action.get("parent")
+                targets = action.get("nodes", ())
+            row = {
+                "global_epoch": int(epoch),
+                "task_id": getattr(self.training_config, "cl_task_id", None),
+                "action": kind,
+                "source": None if source is None else str(source),
+                "targets": [str(value) for value in (targets or ())],
+                "committed": True,
+            }
+            for key in (
+                "action_id",
+                "conservative_gain",
+                "rebased_rows",
+                "overflow_rows",
+                "decision_reason",
+            ):
+                value = action.get(key)
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    row[key] = value
+            rows.append(row)
+        if not rows:
+            return
+        path = self._topology_events_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _calibrate_controller_checkpoint(
         self,
@@ -700,6 +770,7 @@ class TrainingLoopMixin:
                 f"time={time.perf_counter() - cache_started:.3f}s"
             )
         generator = torch.Generator(device="cpu")
+        stage_start_epoch = self.completed_epochs
         final_epoch = self.completed_epochs + self.training_config.epochs
 
         for epoch in range(self.completed_epochs + 1, final_epoch + 1):
@@ -1010,6 +1081,7 @@ class TrainingLoopMixin:
                 )
                 self.sleep_state["accepted_writes_since_sleep"] = 0
                 transaction = sleep_result.get("transaction") or {}
+                self._write_topology_events(epoch, transaction)
                 split_nodes = {
                     action.get("node")
                     for action in transaction.get("actions", [])
@@ -1100,6 +1172,9 @@ class TrainingLoopMixin:
             )
             epoch_result = {
                 "epoch": epoch,
+                "global_epoch": epoch,
+                "stage_id": self.training_config.cl_task_id,
+                "local_epoch": epoch - stage_start_epoch,
                 "wake_loss_per_event": wake_loss,
                 "wake_prediction_nll_per_event": wake_prediction / max(event_count, 1),
                 "writes": writes,

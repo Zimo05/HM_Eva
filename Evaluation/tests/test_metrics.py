@@ -14,6 +14,19 @@ def test_prediction_metrics_hand_calculation():
     assert result["macro_f1"] == 1.0 / 3.0
 
 
+def test_prediction_metrics_keeps_unavailable_event_nll_null():
+    rows = [
+        {
+            "true_type": 0,
+            "predicted_type": 0,
+            "true_delta_time": 1.0,
+            "predicted_delta_time": 1.5,
+            "event_nll": None,
+        }
+    ]
+    assert prediction_metrics(rows)["nll_per_event"] is None
+
+
 def test_adaptation_auc_trapezoid():
     assert adaptation_auc({0: 4.0, 4: 2.0}) == 3.0
 

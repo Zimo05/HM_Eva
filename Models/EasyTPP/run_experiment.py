@@ -65,8 +65,9 @@ SUPPORTED_DATASETS = (
     "dws_17",
     "dws_20",
 )
-DEFAULT_EPOCHS = 80
-DEFAULT_BATCH_SIZE = 64
+DEFAULT_EPOCHS_BY_MODEL = {"S2P2": 300, "AttNHP": 200}
+DEFAULT_BATCH_SIZE = 256
+DEFAULT_EARLY_STOP_PATIENCE = 25
 DEFAULT_THINNING = {
     "num_sample": 1,
     "num_exp": 50,
@@ -518,18 +519,23 @@ def _evaluate(
                 for position in positions:
                     predicted_type = int(predicted_types[batch_index, position].cpu())
                     true_type = int(target_types[batch_index, position].cpu())
-                    probabilities = [0.0] * dim_process
-                    if 0 <= predicted_type < dim_process:
-                        probabilities[predicted_type] = 1.0
                     rows.append(
                         {
                             "sequence_id": sequence_cursor + batch_index,
                             "event_index": int(position) + 1,
                             "true_type": true_type,
                             "predicted_type": predicted_type,
-                            "type_probabilities": probabilities,
+                            # EasyTPP's public one-step API returns argmax
+                            # marks, not the normalized mark distribution at
+                            # the observed event time.  Do not serialize an
+                            # argmax one-hot vector as if it were a model
+                            # probability.
+                            "type_probabilities": None,
                             "true_delta_time": float(target_dtimes[batch_index, position].cpu()),
                             "predicted_delta_time": float(predicted_dtimes[batch_index, position].cpu()),
+                            # A scalar sequence NLL is available from
+                            # ``loglike_loss``.  Per-event decomposition is
+                            # not exposed by these model implementations.
                             "event_nll": None,
                         }
                     )
@@ -542,10 +548,6 @@ def _evaluate(
         "accuracy": (correct / prediction_count) if prediction_count else None,
         "rmse": math.sqrt(squared_error / prediction_count) if prediction_count else None,
     }
-    if rows:
-        event_nll = -float(metrics["loglike"])
-        for row in rows:
-            row["event_nll"] = event_nll
     return metrics, rows
 
 
@@ -661,8 +663,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=DEFAULT_EARLY_STOP_PATIENCE,
+        help="validation epochs without improvement before stopping",
+    )
     parser.add_argument("--max-sequences", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--max-events-per-sequence", type=int, default=None, help=argparse.SUPPRESS)
     return parser
@@ -670,10 +678,18 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.epochs < 1:
+    resolved_epochs = (
+        DEFAULT_EPOCHS_BY_MODEL[args.model]
+        if args.epochs is None
+        else args.epochs
+    )
+    resolved_batch_size = DEFAULT_BATCH_SIZE if args.batch_size is None else args.batch_size
+    if resolved_epochs < 1:
         raise ValueError("--epochs must be positive")
-    if args.batch_size < 1:
+    if resolved_batch_size < 1:
         raise ValueError("--batch-size must be positive")
+    if args.early_stop_patience < 1:
+        raise ValueError("--early-stop-patience must be positive")
     if args.max_sequences is not None and args.max_sequences < 1:
         raise ValueError("--max-sequences must be positive")
     output = args.output_dir.expanduser().resolve()
@@ -702,9 +718,21 @@ def main(argv: list[str] | None = None) -> int:
     model = MODEL_CLASSES[args.model](config)
     model.optimizer = torch.optim.Adam(model.parameters(), lr=1e-2 if args.model == "S2P2" else 1e-3)
 
-    train_loader = _make_loader(records["train"], dim_process, args.batch_size, shuffle=True)
-    valid_loader = _make_loader(records["dev"], dim_process, args.batch_size, shuffle=False)
-    test_loader = _make_loader(records["test"], dim_process, args.batch_size, shuffle=False)
+    train_loader = _make_loader(records["train"], dim_process, resolved_batch_size, shuffle=True)
+    valid_loader = _make_loader(records["dev"], dim_process, resolved_batch_size, shuffle=False)
+    test_loader = _make_loader(records["test"], dim_process, resolved_batch_size, shuffle=False)
+
+    initial_checkpoint = (
+        args.initial_checkpoint.expanduser().resolve()
+        if args.initial_checkpoint is not None
+        else None
+    )
+    initial_metadata: dict[str, Any] = {}
+    if initial_checkpoint is not None:
+        # This must precede both the evaluate-only branch and the training
+        # loop.  Sequential/replay continual runs pass the previous task's
+        # checkpoint here and then fine-tune that loaded model.
+        initial_metadata = _load_checkpoint(model, initial_checkpoint, device)
 
     config_payload = {
         "format_version": 1,
@@ -714,6 +742,12 @@ def main(argv: list[str] | None = None) -> int:
         "variant": resolved_variant,
         "seed": args.seed,
         "device": str(device),
+        "training": {
+            "max_epochs": resolved_epochs,
+            "batch_size": resolved_batch_size,
+            "early_stop_patience": args.early_stop_patience,
+        },
+        "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
         "dim_process": dim_process,
         "prepared_data_dir": str(prepared),
         "dtime_max": dtime_max,
@@ -745,16 +779,16 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint = output / "checkpoint" / "best.pt"
     best_epoch = 0
     best_validation = -math.inf
+    completed_epochs = 0
+    no_improvement_epochs = 0
     if args.evaluate_only:
-        metadata = {}
-        if args.initial_checkpoint is not None:
-            initial_checkpoint = args.initial_checkpoint.expanduser().resolve()
-            metadata = _load_checkpoint(model, initial_checkpoint, device)
+        if initial_checkpoint is not None:
             if initial_checkpoint != checkpoint.resolve():
                 shutil.copy2(initial_checkpoint, checkpoint)
-        best_epoch = int(metadata.get("epoch", 0)) if metadata else 0
+        best_epoch = int(initial_metadata.get("epoch", 0)) if initial_metadata else 0
     else:
-        for epoch in range(1, args.epochs + 1):
+        for epoch in range(1, resolved_epochs + 1):
+            completed_epochs = epoch
             train_metrics = _train_epoch(model, train_loader, device)
             valid_metrics, _ = _evaluate(
                 model,
@@ -786,9 +820,13 @@ def main(argv: list[str] | None = None) -> int:
                     },
                 ]
             )
-            if valid_metrics["loglike"] > best_validation:
-                best_validation = float(valid_metrics["loglike"])
+            validation_loglike = float(valid_metrics["loglike"])
+            if not math.isfinite(validation_loglike):
+                raise FloatingPointError("EasyTPP produced a non-finite validation log-likelihood")
+            if validation_loglike > best_validation:
+                best_validation = validation_loglike
                 best_epoch = epoch
+                no_improvement_epochs = 0
                 _save_checkpoint(
                     checkpoint,
                     model,
@@ -798,6 +836,10 @@ def main(argv: list[str] | None = None) -> int:
                     best_validation,
                     config,
                 )
+            else:
+                no_improvement_epochs += 1
+            if no_improvement_epochs >= args.early_stop_patience:
+                break
         if not checkpoint.is_file():
             raise RuntimeError("validation never produced a best checkpoint")
         _load_checkpoint(model, checkpoint, device)
@@ -836,6 +878,14 @@ def main(argv: list[str] | None = None) -> int:
             "model": args.model,
             "dataset": args.dataset,
             "best_epoch": best_epoch,
+            "epochs_completed": completed_epochs,
+            "max_epochs": resolved_epochs,
+            "early_stop_patience": args.early_stop_patience,
+            "early_stopped": bool(
+                not args.evaluate_only
+                and completed_epochs < resolved_epochs
+                and no_improvement_epochs >= args.early_stop_patience
+            ),
             "selection_metric": "validation_loglike",
             "validation_loglike": None if args.evaluate_only else best_validation,
             "test": test_metrics,

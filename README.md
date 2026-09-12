@@ -138,7 +138,7 @@ DWS 入口额外支持 `--variant 8|13|20`；continual 入口支持非负的 `--
 
 主指标是 test NLL/event、Accuracy、Macro-F1、time MAE/RMSE，以及 checkpoint bytes、参数规模、训练时间和可获得的 GPU 信息。
 
-S2P2 和 AttNHP 共用 `Models/EasyTPP/run_experiment.py`。它们读取现有 EasyTPP-compatible pickle，不改模型内部实现；训练只使用 train/validation，按 validation log-likelihood 保存 `checkpoint/best.pt`，然后对 test 只评估一次。thinning 的 `dtime_max` 只从 train split 的最大间隔乘以 1.2 得到。
+S2P2 和 AttNHP 共用 `Models/EasyTPP/run_experiment.py`。它们读取现有 EasyTPP-compatible pickle，不改模型内部实现；训练只使用 train/validation，按 validation log-likelihood 保存 `checkpoint/best.pt`，然后对 test 只评估一次。默认训练上限与 EasyTPP 配置对齐：S2P2 为 300 epochs、AttNHP 为 200 epochs，batch size 均为 256，并使用 validation patience=25 的 early stopping；直接调用 wrapper 时可用 `--epochs`、`--batch-size` 和 `--early-stop-patience` 覆盖。thinning 的 `dtime_max` 只从 train split 的最大间隔乘以 1.2 得到。
 
 ### 5.2 DWS-13：主 synthetic 实验
 
@@ -273,7 +273,7 @@ python evaluate_continual_HM.py --seed 7 --task-start 0 --task-end 9 --device cu
 
 ### 6.4 Sequential baselines
 
-Sequential 表示模型按 task 顺序更新，只保留上一阶段模型状态，不访问旧 task 训练数据。
+Sequential 表示模型按 task 顺序更新，只保留上一阶段模型状态，不访问旧 task 训练数据。每个 task 的 pre-update evaluation 和当前 task training 都使用上一阶段 checkpoint；wrapper 会在进入 training loop 前加载 `--initial-checkpoint`，task 0 没有上一阶段 checkpoint 时从随机初始化开始。每个 task 的 optimizer 重新初始化，保持当前 benchmark 的“只延续模型参数”定义。
 
 ```bash
 python evaluate_continual_RMTPP_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
@@ -447,7 +447,7 @@ results/continual/RMTPP/replay/seed_7/
 
 事件级预测统一包含 `sequence_id`、`event_index`、`true_type`、`predicted_type`、`type_probabilities`、真实/预测时间间隔和 `event_nll`。
 
-RMTPP 与 FullyNN 的上游 EasyTPP API 当前不暴露逐事件 probability 和 likelihood term，因此这两个字段可能为 `null`，但 aggregate test NLL 是真实模型 NLL。THP、S2P2、AttNHP、TPP-LLM 和 HM 会导出 probability 与 event NLL。
+RMTPP、FullyNN、S2P2 和 AttNHP 当前都可能不暴露逐事件 probability 和 likelihood term，因此这些字段写为 `null`，不会伪造 one-hot probability 或把 aggregate NLL 复制成每个 event 的 NLL。它们仍会导出真实的 aggregate test NLL、Accuracy、Macro-F1 和时间误差；只有在模型 API 提供真正的 per-event decomposition 后，才填充这两个细粒度字段。THP、TPP-LLM 和 HM 维持各自已有的事件级输出。
 
 `resources.json` 不会伪造无法读取的资源数据。若父进程无法取得子训练进程的 CUDA peak allocation，`peak_gpu_memory_bytes` 会是 `null` 并附带说明；需要严格峰值显存时，应由运行同事同时使用统一的外部 GPU 监控方案。
 

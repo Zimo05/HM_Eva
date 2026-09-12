@@ -29,8 +29,13 @@ def prediction_metrics(rows: Sequence[Mapping]) -> dict:
         recall = tp / (tp + fn) if tp + fn else 0.0
         f1s.append(2 * precision * recall / (precision + recall) if precision + recall else 0.0)
     errors = [float(r["predicted_delta_time"]) - float(r["true_delta_time"]) for r in rows]
+    event_nlls = [
+        float(row["event_nll"])
+        for row in rows
+        if row.get("event_nll") not in (None, "")
+    ]
     return {
-        "nll_per_event": mean(float(r["event_nll"]) for r in rows),
+        "nll_per_event": mean(event_nlls) if event_nlls else None,
         "accuracy": mean(a == b for a, b in zip(true, pred)),
         "macro_f1": mean(f1s),
         "time_mae": mean(abs(x) for x in errors),

@@ -35,5 +35,21 @@ def test_registry_identities_are_unique():
     assert len({row["identity"] for row in rows}) == len(rows)
 
 
+def test_easytpp_registry_coverage_and_replay_dependencies():
+    with (ROOT / "experiment_registry.csv").open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    easy_rows = [row for row in rows if row["model"] in {"S2P2", "AttNHP"}]
+    assert len(easy_rows) == 58
+    by_job_id = {row["job_id"]: row for row in rows}
+    for row in easy_rows:
+        assert (ROOT / row["script"]).is_file()
+        if row["condition"] == "replay":
+            dependency = by_job_id[row["depends_on"]]
+            assert dependency["model"] == "HM"
+            assert dependency["condition"] == "full"
+            assert dependency["seed"] == row["seed"]
+            assert row["arguments"].startswith("--hm-resource-root ")
+
+
 def test_no_evaluate_all_entry_point():
     assert not (ROOT / "evaluate_all.py").exists()

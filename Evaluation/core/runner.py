@@ -379,8 +379,13 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
         epochs = args.epochs or (1 if args.smoke else 80)
         batch = args.batch_size or (2 if args.smoke else 16)
     elif model in {"S2P2", "AttNHP"}:
-        epochs = args.epochs or (1 if args.smoke else 80)
-        batch = args.batch_size or (2 if args.smoke else 64)
+        official_epochs = 300 if model == "S2P2" else 200
+        epochs = (
+            (1 if args.smoke else official_epochs)
+            if args.epochs is None
+            else args.epochs
+        )
+        batch = (2 if args.smoke else 256) if args.batch_size is None else args.batch_size
     else:
         epochs = args.epochs or (1 if args.smoke else (1 if model == "TPP_LLM" else 20))
         batch = args.batch_size or (2 if args.smoke else 32)

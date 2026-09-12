@@ -39,6 +39,25 @@ PROTOCOLS = {
     "fast_adapt": EvaluationProtocol.FAST_ADAPT,
     "online_write": EvaluationProtocol.ONLINE_WRITE,
 }
+EVENT_PREDICTION_SCOPES = ("none", "current", "final", "all")
+
+
+def _event_prediction_scope(args: argparse.Namespace) -> str:
+    """Resolve the event-row scope, including the legacy boolean alias."""
+
+    scope = getattr(args, "event_prediction_scope", None)
+    if scope is None:
+        scope = (
+            "all"
+            if getattr(args, "save_event_predictions", False)
+            else "none"
+        )
+    if scope not in EVENT_PREDICTION_SCOPES:
+        raise ValueError(
+            f"unsupported event prediction scope {scope!r}; expected one of "
+            f"{EVENT_PREDICTION_SCOPES}"
+        )
+    return str(scope)
 
 # A memory view is orthogonal to the state transition protocol.  In
 # particular, ``frozen/full`` still retrieves the checkpoint's episodic bank;
@@ -553,20 +572,29 @@ def clear_episodic_memory(inference: MemoryTreeInference) -> None:
     inference.tree.episodic_memory._packed_mirror_signature = None
 
 
-def run_variant(
+def _load_variant_inference(
     checkpoint: Path,
-    sequences: Sequence[Mapping[str, Any]],
     variant: str,
     device: str | None,
-    progress_dir: Path | None = None,
-    resume_partial: bool = False,
+    *,
     prototype_duplicate_threshold: float | None = None,
     prototype_mode_threshold: float | None = None,
     prototype_context_alias_capacity: int | None = None,
-    verbose: bool = True,
-) -> tuple[list[dict], MemoryTreeInference, float]:
+) -> tuple[
+    str,
+    EvaluationProtocol,
+    str,
+    dict[str, Any],
+    MemoryTreeInference,
+    Any,
+]:
+    """Load one protocol state and its immutable routing cache.
+
+    The helper keeps the full-row and scalar online evaluators on exactly the
+    same checkpoint/configuration path.  A caller may still choose a fresh
+    instance when protocol semantics require state isolation.
+    """
     canonical, protocol, memory_view, settings = _evaluation_spec(variant)
-    protocol_name = protocol.value
     probe_writes = (
         protocol is EvaluationProtocol.ONLINE_WRITE
         and memory_view in {"full", "full_no_write"}
@@ -589,6 +617,45 @@ def run_variant(
     inference = _configure_evaluation_frontier(inference)
     if not settings["episodic"]:
         clear_episodic_memory(inference)
+    static_cache = None
+    if hasattr(inference.tree.frontier_routing, "build_static_cache"):
+        static_cache = inference.tree.frontier_routing.build_static_cache(
+            detach=True
+        )
+    return canonical, protocol, memory_view, settings, inference, static_cache
+
+
+def run_variant(
+    checkpoint: Path,
+    sequences: Sequence[Mapping[str, Any]],
+    variant: str,
+    device: str | None,
+    progress_dir: Path | None = None,
+    resume_partial: bool = False,
+    prototype_duplicate_threshold: float | None = None,
+    prototype_mode_threshold: float | None = None,
+    prototype_context_alias_capacity: int | None = None,
+    verbose: bool = True,
+) -> tuple[list[dict], MemoryTreeInference, float]:
+    (
+        canonical,
+        protocol,
+        memory_view,
+        settings,
+        inference,
+        static_cache,
+    ) = _load_variant_inference(
+        checkpoint,
+        variant,
+        device,
+        prototype_duplicate_threshold=prototype_duplicate_threshold,
+        prototype_mode_threshold=prototype_mode_threshold,
+        prototype_context_alias_capacity=prototype_context_alias_capacity,
+    )
+    protocol_name = protocol.value
+    # The online-write protocol mutates only the episodic bank.  Router and
+    # semantic tables stay frozen, so the static cache is shared across the
+    # whole ordered run without changing any state transition.
     partial_path = (
         None if progress_dir is None else progress_dir / f"{canonical.replace('/', '_')}.partial.json"
     )
@@ -606,7 +673,33 @@ def run_variant(
         print(f"[Resume] {canonical} continuing at sequence {start_position + 1}")
     start = time.perf_counter()
     for sequence_position, sequence in enumerate(sequences[start_position:], start=start_position):
-        result = inference.run_sequence(sequence)
+        # Keep sequence order for ONLINE_WRITE because the bank after S_i is
+        # the bank observed by S_{i+1}.  Inside each sequence, however, the
+        # frozen encoder, router projection, memory query, and Hawkes cache do
+        # not depend on writes, so prepare them once before the causal event
+        # loop.  The scalar run_sequence call still owns every Working Memory
+        # and persistent-write transition.
+        prepared_sequence = None
+        if hasattr(inference, "prepare_sequence_batch"):
+            prepared_batch, static_cache = inference.prepare_sequence_batch(
+                [sequence],
+                frontier_static_cache=static_cache,
+            )
+            if prepared_batch:
+                prepared_sequence = prepared_batch[0]
+        if prepared_sequence is None or prepared_sequence.get("z") is None:
+            result = inference.run_sequence(
+                sequence,
+                frontier_static_cache=static_cache,
+            )
+        else:
+            result = inference.run_sequence(
+                prepared_sequence["sequence"],
+                precomputed_z=prepared_sequence["z"],
+                frontier_static_cache=static_cache,
+                precomputed_projected_z=prepared_sequence["projected_z"],
+                precomputed_memory_query=prepared_sequence["memory_query"],
+            )
         cluster_id = sequence.get("cluster_id")
         for event in result["events"]:
             posterior = [float(v) for v in event["frontier_posterior"]]
@@ -766,13 +859,135 @@ def run_variant(
     return rows, inference, elapsed
 
 
+def run_variant_scalar(
+    checkpoint: Path,
+    sequences: Sequence[Mapping[str, Any]],
+    variant: str,
+    device: str | None,
+    progress_dir: Path | None = None,
+    prototype_duplicate_threshold: float | None = None,
+    prototype_mode_threshold: float | None = None,
+    prototype_context_alias_capacity: int | None = None,
+    verbose: bool = True,
+) -> tuple[dict[str, dict[str, Any]], MemoryTreeInference, float]:
+    """Run a causal variant while retaining only scalar metrics.
+
+    This is used by the default ``online_write`` CL benchmark when event
+    predictions were not explicitly requested.  It preserves sequence order,
+    Working Memory, and online bank transitions, but avoids constructing the
+    large per-event diagnostic dictionaries used by :func:`run_variant`.
+    """
+    if not sequences:
+        raise ValueError("scalar evaluation requires at least one sequence")
+    (
+        canonical,
+        _protocol,
+        _memory_view,
+        _settings,
+        inference,
+        static_cache,
+    ) = _load_variant_inference(
+        checkpoint,
+        variant,
+        device,
+        prototype_duplicate_threshold=prototype_duplicate_threshold,
+        prototype_mode_threshold=prototype_mode_threshold,
+        prototype_context_alias_capacity=prototype_context_alias_capacity,
+    )
+    accumulators: dict[str, dict[str, Any]] = {}
+    start = time.perf_counter()
+
+    for sequence_position, sequence in enumerate(sequences):
+        prepared_sequence = None
+        if hasattr(inference, "prepare_sequence_batch"):
+            prepared_batch, static_cache = inference.prepare_sequence_batch(
+                [sequence],
+                frontier_static_cache=static_cache,
+            )
+            if prepared_batch:
+                prepared_sequence = prepared_batch[0]
+        if prepared_sequence is None or prepared_sequence.get("z") is None:
+            result = inference.run_sequence(
+                sequence,
+                frontier_static_cache=static_cache,
+                compact=True,
+                capture_event_predictions=False,
+            )
+        else:
+            result = inference.run_sequence(
+                prepared_sequence["sequence"],
+                precomputed_z=prepared_sequence["z"],
+                frontier_static_cache=static_cache,
+                precomputed_projected_z=prepared_sequence["projected_z"],
+                precomputed_memory_query=prepared_sequence["memory_query"],
+                compact=True,
+                capture_event_predictions=False,
+            )
+        scalar = result.get("scalar_metrics")
+        if not isinstance(scalar, Mapping):
+            raise RuntimeError(
+                f"{canonical} scalar inference did not return scalar metrics"
+            )
+        raw_group_id = sequence.get("eval_set_id")
+        group_id = "all" if raw_group_id is None else str(raw_group_id)
+        group = accumulators.setdefault(group_id, {
+            "events": 0,
+            "sequences": 0,
+            "nll_sum": 0.0,
+            "correct": 0,
+            "time_abs_sum": 0.0,
+        })
+        group["events"] += int(scalar["events"])
+        group["sequences"] += 1
+        group["nll_sum"] += float(scalar["nll_sum"])
+        group["correct"] += int(scalar["correct"])
+        group["time_abs_sum"] += float(scalar["time_abs_sum"])
+
+        completed = sequence_position + 1
+        elapsed_now = time.perf_counter() - start
+        if verbose:
+            eta = elapsed_now / completed * (len(sequences) - completed)
+            print(
+                f"[Evaluate scalar] {canonical} {completed}/{len(sequences)} "
+                f"elapsed={elapsed_now:.1f}s eta={eta:.1f}s",
+                flush=True,
+            )
+        if progress_dir is not None:
+            progress_dir.mkdir(parents=True, exist_ok=True)
+            (progress_dir / f"{canonical.replace('/', '_')}.progress.json").write_text(
+                json.dumps({
+                    "variant": canonical,
+                    "completed_sequences": completed,
+                    "total_sequences": len(sequences),
+                    "elapsed_seconds": elapsed_now,
+                    "last_source_index": int(sequence["source_index"]),
+                    "last_eval_set_id": group_id,
+                    "event_predictions_captured": False,
+                }, indent=2),
+                encoding="utf-8",
+            )
+
+    metrics_by_group: dict[str, dict[str, Any]] = {}
+    for group_id, group in accumulators.items():
+        event_count = int(group["events"])
+        denominator = max(event_count, 1)
+        metrics_by_group[group_id] = {
+            "events": event_count,
+            "sequences": int(group["sequences"]),
+            "nll_per_event": float(group["nll_sum"]) / denominator,
+            "accuracy": float(group["correct"]) / denominator,
+            "local_time_mae": float(group["time_abs_sum"]) / denominator,
+        }
+    return metrics_by_group, inference, time.perf_counter() - start
+
+
 def run_variant_compact(
     checkpoint: Path,
     sequences: Sequence[Mapping[str, Any]],
     variant: str,
     device: str | None,
     *,
-    sequence_batch_size: int = 32,
+    sequence_batch_size: int = 64,
     progress_dir: Path | None = None,
     prototype_duplicate_threshold: float | None = None,
     prototype_mode_threshold: float | None = None,
@@ -798,62 +1013,28 @@ def run_variant_compact(
             "compact evaluation is restricted to frozen read-only variants"
         )
 
-    # The latest HM runtime intentionally keeps one canonical event-wise
-    # inference entry point.  Older benchmark revisions added a padded batch
-    # API here, so retain the compact evaluator's output contract by falling
-    # back to that canonical entry point when the optional batch API is absent.
-    if not hasattr(MemoryTreeInference, "prepare_sequence_batch") or not hasattr(
-        MemoryTreeInference, "run_sequence_batch_compact"
-    ):
-        rows, inference, elapsed = run_variant(
-            checkpoint,
-            sequences,
-            canonical,
-            device,
-            progress_dir=progress_dir,
-            prototype_duplicate_threshold=prototype_duplicate_threshold,
-            prototype_mode_threshold=prototype_mode_threshold,
-            prototype_context_alias_capacity=prototype_context_alias_capacity,
-            verbose=verbose,
+    required_batch_api = {
+        name: hasattr(MemoryTreeInference, name)
+        for name in ("prepare_sequence_batch", "run_sequence_batch_compact")
+    }
+    missing_batch_api = [
+        name for name, available in required_batch_api.items() if not available
+    ]
+    if missing_batch_api:
+        raise RuntimeError(
+            f"{canonical} evaluation requires batched HM inference; missing "
+            f"API: {', '.join(missing_batch_api)}"
         )
-        accumulators: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            group_id = str(row.get("eval_set_id", "all"))
-            group = accumulators.setdefault(group_id, {
-                "events": 0,
-                "sequences": set(),
-                "nll_sum": 0.0,
-                "correct": 0,
-                "time_abs_sum": 0.0,
-            })
-            group["events"] += 1
-            group["sequences"].add(row.get("source_index"))
-            group["nll_sum"] += float(row["nll"])
-            group["correct"] += int(
-                int(row.get("predicted_type_at_event_time", -1))
-                == int(row.get("true_type", -2))
-            )
-            group["time_abs_sum"] += abs(
-                float(row.get("predicted_time", 0.0))
-                - float(row.get("true_time", 0.0))
-            )
-        metrics_by_group = {}
-        for group_id, group in accumulators.items():
-            events = int(group["events"])
-            denominator = max(events, 1)
-            metrics_by_group[group_id] = {
-                "events": events,
-                "sequences": len(group["sequences"]),
-                "nll_per_event": float(group["nll_sum"]) / denominator,
-                "accuracy": float(group["correct"]) / denominator,
-                "local_time_mae": float(group["time_abs_sum"]) / denominator,
-            }
-        return (
-            metrics_by_group,
-            rows if capture_event_predictions else [],
-            inference,
-            elapsed,
-        )
+
+    # Length bucketing changes only execution order. Every source sequence
+    # carries its original position so event rows can be restored afterward.
+    ordered_sequences = []
+    for original_position, sequence in enumerate(sequences):
+        source = dict(sequence)
+        source.setdefault("_sequence_position", original_position)
+        ordered_sequences.append(source)
+    ordered_sequences.sort(key=lambda sequence: len(sequence["times"]))
+    sequences = ordered_sequences
 
     inference = MemoryTreeInference.from_checkpoint(
         checkpoint,
@@ -887,28 +1068,25 @@ def run_variant_compact(
             batch,
             frontier_static_cache=static_cache,
         )
-        if all(item.get("z") is not None for item in prepared):
-            batch_results = inference.run_sequence_batch_compact(
-                prepared,
-                frontier_static_cache=static_cache,
-                capture_event_predictions=capture_event_predictions,
+        if any(item.get("z") is None for item in prepared):
+            raise RuntimeError(
+                f"{canonical} evaluation could not prepare a batched prefix "
+                "embedding; refusing scalar fallback"
             )
-        else:
-            # Custom encoders may not expose a padded prefix API. Preserve
-            # their established event-wise semantics while still reusing the
-            # static frontier cache.
-            batch_results = [
-                inference.run_sequence(
-                    item["sequence"],
-                    precomputed_z=item["z"],
-                    frontier_static_cache=static_cache,
-                    precomputed_projected_z=item["projected_z"],
-                    precomputed_memory_query=item["memory_query"],
-                    compact=True,
-                    capture_event_predictions=capture_event_predictions,
+        capture_by_sequence = [
+            bool(
+                source_sequence.get(
+                    "_capture_event_predictions",
+                    capture_event_predictions,
                 )
-                for item in prepared
-            ]
+            )
+            for source_sequence in batch
+        ]
+        batch_results = inference.run_sequence_batch_compact(
+            prepared,
+            frontier_static_cache=static_cache,
+            capture_event_predictions=capture_by_sequence,
+        )
         for offset, (source_sequence, prepared_sequence) in enumerate(
             zip(batch, prepared)
         ):
@@ -919,7 +1097,8 @@ def run_variant_compact(
                 raise RuntimeError(
                     "compact inference did not return scalar metrics"
                 )
-            group_id = str(source_sequence.get("eval_set_id", "all"))
+            raw_group_id = source_sequence.get("eval_set_id")
+            group_id = "all" if raw_group_id is None else str(raw_group_id)
             group = accumulators.setdefault(group_id, {
                 "events": 0,
                 "sequences": 0,
@@ -933,7 +1112,7 @@ def run_variant_compact(
             group["correct"] += int(scalar["correct"])
             group["time_abs_sum"] += float(scalar["time_abs_sum"])
 
-            if capture_event_predictions:
+            if capture_by_sequence[offset]:
                 for event in result.get("events", ()):
                     event_rows.append({
                         "variant": canonical,
@@ -1046,6 +1225,13 @@ def run_variant_compact(
             "accuracy": float(group["correct"]) / denominator,
             "local_time_mae": float(group["time_abs_sum"]) / denominator,
         }
+    if capture_event_predictions:
+        event_rows.sort(
+            key=lambda row: (
+                int(row.get("sequence_position", 0)),
+                int(row.get("event_index", 0)),
+            )
+        )
     return metrics_by_group, event_rows, inference, elapsed
 
 
@@ -1717,7 +1903,12 @@ def warnings_for(summary: Mapping[str, Any]) -> list[str]:
     if tree.get("unvisited_leaf_fraction", 0) > 0.25:
         warnings.append("Coverage risk: more than 25% of leaves were never exposed on the test set.")
     for comparison in summary.get("ablations", []):
-        if comparison["comparison"] == "total_memory_gain" and comparison["mean_nll_gain"] < 0:
+        mean_gain = comparison.get("mean_nll_gain")
+        if (
+            comparison.get("comparison") == "total_memory_gain"
+            and isinstance(mean_gain, (int, float))
+            and mean_gain < 0
+        ):
             warnings.append("Memory hurts held-out NLL on average relative to semantic-only inference.")
     return warnings
 
@@ -1936,6 +2127,16 @@ def write_protocol_artifacts(
 
 
 def write_report(path: Path, summary: Mapping[str, Any]) -> None:
+    def metric(value: Any, digits: int) -> str:
+        if value is None:
+            return "n/a"
+        return f"{float(value):.{digits}f}"
+
+    def percent(value: Any) -> str:
+        if value is None:
+            return "n/a"
+        return f"{float(value):.1%}"
+
     lines = [
         "# Hawkes Memory Tree Evaluation", "",
         f"Evaluation regime: **{summary.get('evaluation_regime', 'transductive')}**.",
@@ -1943,15 +2144,16 @@ def write_report(path: Path, summary: Mapping[str, Any]) -> None:
     ]
     for variant, metrics in summary["variants"].items():
         lines.append(
-            f"- **{variant}**: NLL/event={metrics['nll_per_event']:.6f}, "
-            f"ACC={metrics['accuracy']:.4f}, macro-F1={metrics['macro_f1']:.4f}, "
-            f"local-time MAE={metrics['local_time_mae']:.4f}"
+            f"- **{variant}**: NLL/event={metric(metrics.get('nll_per_event'), 6)}, "
+            f"ACC={metric(metrics.get('accuracy'), 4)}, "
+            f"macro-F1={metric(metrics.get('macro_f1'), 4)}, "
+            f"local-time MAE={metric(metrics.get('local_time_mae'), 4)}"
         )
     lines.extend(["", "## Memory contribution", ""])
     for item in summary["ablations"]:
         lines.append(
-            f"- **{item['comparison']}**: mean ΔNLL={item['mean_nll_gain']:+.6f}, "
-            f"improved events={item['improved_event_fraction']:.1%}, "
+            f"- **{item['comparison']}**: mean ΔNLL={metric(item.get('mean_nll_gain'), 6)}, "
+            f"improved events={percent(item.get('improved_event_fraction'))}, "
             f"95% CI={item['bootstrap_95ci']}"
         )
     lines.extend(["", "## Controller utility diagnostics", ""])
@@ -2037,21 +2239,36 @@ def make_plots(
     except ImportError:
         return
     names = list(summary["variants"])
-    nlls = [summary["variants"][name]["nll_per_event"] for name in names]
-    accuracies = [summary["variants"][name]["accuracy"] for name in names]
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4))
-    axes[0].bar(names, nlls)
-    axes[0].set_title("NLL per event")
-    axes[1].bar(names, accuracies)
-    axes[1].set_title("Next-type accuracy")
-    for axis in axes:
-        axis.tick_params(axis="x", rotation=30)
-    figure.tight_layout()
-    figure.savefig(output_dir / "prediction_ablation.png", dpi=160)
-    plt.close(figure)
-    if ablations:
+    prediction_rows = [
+        (name, summary["variants"][name])
+        for name in names
+        if summary["variants"][name].get("nll_per_event") is not None
+        and summary["variants"][name].get("accuracy") is not None
+    ]
+    if prediction_rows:
+        prediction_names = [name for name, _ in prediction_rows]
+        nlls = [metrics["nll_per_event"] for _, metrics in prediction_rows]
+        accuracies = [metrics["accuracy"] for _, metrics in prediction_rows]
+        figure, axes = plt.subplots(1, 2, figsize=(12, 4))
+        axes[0].bar(prediction_names, nlls)
+        axes[0].set_title("NLL per event")
+        axes[1].bar(prediction_names, accuracies)
+        axes[1].set_title("Next-type accuracy")
+        for axis in axes:
+            axis.tick_params(axis="x", rotation=30)
+        figure.tight_layout()
+        figure.savefig(output_dir / "prediction_ablation.png", dpi=160)
+        plt.close(figure)
+    valid_ablations = [
+        row for row in ablations
+        if isinstance(row.get("mean_nll_gain"), (int, float))
+    ]
+    if valid_ablations:
         figure, axis = plt.subplots(figsize=(8, 4))
-        axis.bar([row["comparison"] for row in ablations], [row["mean_nll_gain"] for row in ablations])
+        axis.bar(
+            [row["comparison"] for row in valid_ablations],
+            [row["mean_nll_gain"] for row in valid_ablations],
+        )
         axis.axhline(0, color="black", linewidth=0.8)
         axis.set_ylabel("Positive means lower NLL")
         axis.tick_params(axis="x", rotation=25)
@@ -2100,6 +2317,12 @@ def parse_args() -> argparse.Namespace:
         help="Override the number of retrieval/context aliases per law prototype.",
     )
     parser.add_argument("--max-test-sequences", type=int, default=None)
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=64,
+        help="number of variable-length read-only sequences per HM batch",
+    )
     parser.add_argument("--split-manifest", type=Path, default=None)
     parser.add_argument("--quick-per-cluster", type=int, default=None)
     parser.add_argument(
@@ -2107,10 +2330,31 @@ def parse_args() -> argparse.Namespace:
         help="canonical protocol/memory-view keys; legacy names are accepted as aliases",
     )
     parser.add_argument("--resume", action="store_true", help="Reuse completed variant row files")
-    parser.add_argument(
-        "--save-event-predictions", action="store_true",
-        help="Write the large combined event_predictions.csv artifact.",
+    event_output = parser.add_mutually_exclusive_group()
+    event_output.add_argument(
+        "--event-prediction-scope",
+        choices=EVENT_PREDICTION_SCOPES,
+        default="none",
+        help=(
+            "event rows to persist: none (default), current, final, or all; "
+            "this single-dataset evaluator treats current/final as all"
+        ),
     )
+    event_output.add_argument(
+        "--save-event-predictions",
+        dest="event_prediction_scope",
+        action="store_const",
+        const="all",
+        help="compatibility alias for --event-prediction-scope all",
+    )
+    event_output.add_argument(
+        "--no-save-event-predictions",
+        dest="event_prediction_scope",
+        action="store_const",
+        const="none",
+        help="compatibility alias for --event-prediction-scope none",
+    )
+    parser.set_defaults(event_prediction_scope="none")
     parser.add_argument(
         "--write-baseline-summary", type=Path, default=None,
         help="Optional immutable v6.1 summary for Write ranking comparisons.",
@@ -2124,11 +2368,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional v4 summary.json used for ACC/Macro-F1 non-regression.",
     )
     parser.add_argument("--no-plots", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.eval_batch_size <= 0:
+        parser.error("--eval-batch-size must be positive")
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    event_scope = _event_prediction_scope(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     dataset, type_map = load_dataset(args.data_path)
     checkpoint_meta = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -2218,9 +2466,15 @@ def main() -> None:
         file_key = canonical.replace("/", "_")
         print(f"[Evaluate] {canonical}: {len(sequences)} sequences")
         completed_path = args.output_dir / f"{file_key}.rows.json"
+        scalar_completed_path = args.output_dir / f"{file_key}.scalar.json"
+        capture_event_predictions = event_scope != "none"
+        metrics: dict[str, Any] | None = None
         # Inference is still loaded for tree diagnostics. Completed rows can
         # be reused safely because each variant starts from the same checkpoint.
-        if args.resume and completed_path.is_file():
+        # Compact/scalar runs intentionally do not use an event-row cache: an
+        # old row file must not silently turn the default no-event-output path
+        # back into a large Python-object evaluation.
+        if args.resume and completed_path.is_file() and capture_event_predictions:
             rows = json.loads(completed_path.read_text(encoding="utf-8"))
             inference = MemoryTreeInference.from_checkpoint(
                 args.checkpoint,
@@ -2244,6 +2498,96 @@ def main() -> None:
                 clear_episodic_memory(inference)
             elapsed = 0.0
             print(f"[Resume] reused completed variant {canonical}")
+        elif not capture_event_predictions and args.resume and scalar_completed_path.is_file():
+            metrics = json.loads(
+                scalar_completed_path.read_text(encoding="utf-8")
+            )
+            (
+                _loaded_canonical,
+                _loaded_protocol,
+                _loaded_memory_view,
+                _loaded_settings,
+                inference,
+                _loaded_static_cache,
+            ) = _load_variant_inference(
+                args.checkpoint,
+                canonical,
+                args.device,
+                prototype_duplicate_threshold=args.prototype_duplicate_threshold,
+                prototype_mode_threshold=args.prototype_mode_threshold,
+                prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+            )
+            rows = []
+            elapsed = 0.0
+            print(f"[Resume] reused scalar metrics for {canonical}")
+        elif (
+            not capture_event_predictions
+            and protocol in {
+                EvaluationProtocol.FROZEN,
+                EvaluationProtocol.FAST_ADAPT,
+            }
+        ):
+            compact_by_group, _compact_events, inference, elapsed = (
+                run_variant_compact(
+                    args.checkpoint,
+                    sequences,
+                    canonical,
+                    args.device,
+                    sequence_batch_size=args.eval_batch_size,
+                    progress_dir=args.output_dir if args.resume else None,
+                    prototype_duplicate_threshold=args.prototype_duplicate_threshold,
+                    prototype_mode_threshold=args.prototype_mode_threshold,
+                    prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+                    capture_event_predictions=False,
+                )
+            )
+            metrics = compact_by_group.get("all")
+            if metrics is None and len(compact_by_group) == 1:
+                metrics = next(iter(compact_by_group.values()))
+            if metrics is None:
+                raise RuntimeError(
+                    f"{canonical} compact evaluation returned no scalar metrics"
+                )
+            rows = []
+            metrics = dict(metrics)
+            metrics["event_predictions_captured"] = False
+            if metrics.get("nll_per_event") is not None:
+                metrics["perplexity"] = math.exp(
+                    min(float(metrics["nll_per_event"]), 50.0)
+                )
+            scalar_completed_path.write_text(
+                json.dumps(_jsonable(metrics), ensure_ascii=False),
+                encoding="utf-8",
+            )
+        elif not capture_event_predictions and protocol is EvaluationProtocol.ONLINE_WRITE:
+            scalar_by_group, inference, elapsed = run_variant_scalar(
+                args.checkpoint,
+                sequences,
+                canonical,
+                args.device,
+                progress_dir=args.output_dir if args.resume else None,
+                prototype_duplicate_threshold=args.prototype_duplicate_threshold,
+                prototype_mode_threshold=args.prototype_mode_threshold,
+                prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+            )
+            metrics = scalar_by_group.get("all")
+            if metrics is None and len(scalar_by_group) == 1:
+                metrics = next(iter(scalar_by_group.values()))
+            if metrics is None:
+                raise RuntimeError(
+                    f"{canonical} scalar evaluation returned no metrics"
+                )
+            rows = []
+            metrics = dict(metrics)
+            metrics["event_predictions_captured"] = False
+            if metrics.get("nll_per_event") is not None:
+                metrics["perplexity"] = math.exp(
+                    min(float(metrics["nll_per_event"]), 50.0)
+                )
+            scalar_completed_path.write_text(
+                json.dumps(_jsonable(metrics), ensure_ascii=False),
+                encoding="utf-8",
+            )
         else:
             rows, inference, elapsed = run_variant(
                 args.checkpoint, sequences, variant, args.device, args.output_dir,
@@ -2254,16 +2598,25 @@ def main() -> None:
             )
             completed_path.write_text(json.dumps(_jsonable(rows)), encoding="utf-8")
         all_rows[canonical] = rows
-        metrics = aggregate_metrics(
-            rows,
-            expected_types,
-            args.seed,
-            args.bootstrap_samples,
-        )
+        if capture_event_predictions or metrics is None:
+            metrics = aggregate_metrics(
+                rows,
+                expected_types,
+                args.seed,
+                args.bootstrap_samples,
+            )
         metrics.update({
             "elapsed_seconds": elapsed,
-            "events_per_second": len(rows) / max(elapsed, 1e-12),
+            "events_per_second": int(metrics.get("events", len(rows)))
+            / max(elapsed, 1e-12),
         })
+        if not capture_event_predictions:
+            # Store the completed scalar contract, including runtime fields,
+            # so a later --resume does not rehydrate a stale pre-timing blob.
+            scalar_completed_path.write_text(
+                json.dumps(_jsonable(metrics), ensure_ascii=False),
+                encoding="utf-8",
+            )
         variant_metrics[canonical] = metrics
         if final_inference is None or canonical == "frozen/full":
             final_inference = inference
@@ -2275,7 +2628,11 @@ def main() -> None:
         )
     diagnostic_rows = all_rows.get("frozen/full", all_rows[variants[0]])
     tree, node_rows = tree_metrics(final_inference, diagnostic_rows)
-    ablations = ablation_metrics(all_rows, args.seed)
+    ablations = (
+        ablation_metrics(all_rows, args.seed)
+        if any(all_rows.values())
+        else []
+    )
     controller = controller_metrics(all_rows, variant_metrics, checkpoint_meta)
     summary: dict[str, Any] = {
         "checkpoint": str(args.checkpoint.resolve()),
@@ -2289,6 +2646,7 @@ def main() -> None:
         "protocols": list(PROTOCOLS),
         "memory_views": list(MEMORY_VIEWS),
         "primary_protocol": "frozen",
+        "event_prediction_scope": event_scope,
         "variants": variant_metrics,
         "ablations": ablations,
         "controller": controller,
@@ -2569,7 +2927,7 @@ def main() -> None:
         json.dumps(_jsonable(summary), ensure_ascii=False, indent=2), encoding="utf-8"
     )
     flat_rows = [row for rows in all_rows.values() for row in rows]
-    if args.save_event_predictions:
+    if event_scope != "none":
         write_csv(args.output_dir / "event_predictions.csv", flat_rows)
     write_csv(args.output_dir / "node_metrics.csv", node_rows)
     write_csv(args.output_dir / "ablation_metrics.csv", ablations)

@@ -66,15 +66,25 @@ def compatible(existing: dict[str, Any], current: dict[str, Any]) -> bool:
     keys = ("job_key", "dataset", "model", "condition", "seed", "variant", "rank", "task_start", "task_end", "inputs")
     if not all(existing.get(key) == current.get(key) for key in keys):
         return False
-    ignored = {"resume", "dry_run", "output_root", "run_id"}
-    old_args = {
-        key: value for key, value in existing.get("arguments", {}).items()
-        if key not in ignored
-    }
-    new_args = {
-        key: value for key, value in current.get("arguments", {}).items()
-        if key not in ignored
-    }
+    ignored = {"resume", "dry_run", "output_root", "run_id", "eval_batch_size"}
+
+    def comparable_arguments(payload: dict[str, Any]) -> dict[str, Any]:
+        result = {
+            key: value for key, value in payload.items() if key not in ignored
+        }
+        # Manifests written before the scope API have neither field. Treat
+        # them as the default no-event-output mode so --resume remains usable
+        # after the evaluator upgrade. Explicit scope changes still remain
+        # incompatible, because they change the requested artifact contract.
+        if "event_prediction_scope" not in result:
+            result["event_prediction_scope"] = (
+                "all" if result.get("save_event_predictions", False) else "none"
+            )
+        result.pop("save_event_predictions", None)
+        return result
+
+    old_args = comparable_arguments(existing.get("arguments", {}))
+    new_args = comparable_arguments(current.get("arguments", {}))
     return old_args == new_args
 
 

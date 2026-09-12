@@ -133,7 +133,7 @@ def _continual_hm_command(
         "--device",
         resolved_device(args.device),
         "--epochs",
-        str(args.epochs or (1 if args.smoke else 20)),
+        str(args.epochs or (1 if args.smoke else 30)),
         "--cold-start-epochs",
         str(cold_start_epochs),
         "--unified-topology-log-path",
@@ -196,7 +196,7 @@ def _continual_cl_config(args, protocol: CLProtocol, strategy: str) -> dict[str,
         "format_version": 1,
         "benchmark_id": protocol.benchmark_id,
         "benchmark_version": protocol.version,
-        "epochs_per_task": int(args.epochs or (1 if args.smoke else 20)),
+        "epochs_per_task": int(args.epochs or (1 if args.smoke else 30)),
         "cold_start_epochs": int(1 if args.smoke else 5),
         "training": {
             "seed": int(args.seed),
@@ -368,13 +368,14 @@ def _validate_continual_stage_manifest(
 
 
 def _baseline_command(model: str, args, prepared: Path, output: Path,
-                      initial: Path | None, evaluate_only: bool):
+                      initial: Path | None, evaluate_only: bool,
+                      dataset_label: str | None = None):
     import os
     import sys
     python = args.python_executable or sys.executable
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(__import__("pathlib").Path(__file__).resolve().parents[2]), env.get("PYTHONPATH", "")))
-    epochs = args.epochs or (1 if args.smoke else (1 if model == "TPP_LLM" else 20))
+    epochs = args.epochs or (1 if args.smoke else (1 if model == "TPP_LLM" else 25))
     batch = args.batch_size or (2 if args.smoke else 32)
     device = resolved_device(args.device)
     if model == "RMTPP":
@@ -385,7 +386,33 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
         if evaluate_only:
             command += ["--evaluate-only"]
     elif model == "THP":
-        command = [python, str(MODELS_ROOT / "THP" / "run_experiment.py"), "--dataset", "taobao", "--prepared-data-dir", str(prepared), "--output-dir", str(output), "--archive", str(output) + ".tar.gz", "--overwrite", "--seed", str(args.seed), "--device", device, "--epochs", str(epochs), "--batch-size", str(batch)]
+        command = [
+            python,
+            str(MODELS_ROOT / "THP" / "run_experiment.py"),
+            "--dataset", "taobao",
+            "--prepared-data-dir", str(prepared),
+            "--output-dir", str(output),
+            "--archive", str(output) + ".tar.gz",
+            "--overwrite",
+            "--seed", str(args.seed),
+            "--device", device,
+            "--epochs", str(epochs),
+            "--batch-size", str(batch),
+            "--learning-rate", "3e-4",
+            "--d-model", "128",
+            "--d-rnn", "128",
+            "--d-inner", "256",
+            "--d-k", "32",
+            "--d-v", "32",
+            "--num-heads", "4",
+            "--num-layers", "2",
+            "--dropout", "0.10",
+            "--label-smoothing", "0.01",
+            "--weight-decay", "1e-5",
+            "--grad-clip", "1.0",
+        ]
+        if dataset_label:
+            command += ["--dataset-label", dataset_label]
         cwd = MODELS_ROOT / "THP"
         if initial:
             command += ["--initial-checkpoint", str(initial)]
@@ -700,6 +727,7 @@ def _run_baseline_adaptation(
             output,
             pre_checkpoint,
             evaluate_only,
+            dataset_label=protocol.benchmark_id,
         )
         run_command(
             command,
@@ -840,12 +868,28 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                 protocol=protocol,
             )
             pre_output = task_root / "pre_update"
-            command, cwd, env = _baseline_command(model, args, prepared, pre_output, previous, True)
+            command, cwd, env = _baseline_command(
+                model,
+                args,
+                prepared,
+                pre_output,
+                previous,
+                True,
+                dataset_label=protocol.benchmark_id,
+            )
             run_command(command, cwd, env, target / "logs" / f"task_{task:02d}_pre.log")
             stage_rows.append({"task": task, "evaluation": "pre_update", **_native_metric(model, pre_output)})
             if task != first_protocol_task:
                 scratch_output = task_root / "scratch_pre"
-                command, cwd, env = _baseline_command(model, args, prepared, scratch_output, None, True)
+                command, cwd, env = _baseline_command(
+                    model,
+                    args,
+                    prepared,
+                    scratch_output,
+                    None,
+                    True,
+                    dataset_label=protocol.benchmark_id,
+                )
                 run_command(command, cwd, env, target / "logs" / f"task_{task:02d}_scratch.log")
                 stage_rows.append({"task": task, "evaluation": "scratch_pre", **_native_metric(model, scratch_output)})
             if pre_checkpoint is not None and protocol.adaptation(task) is not None:
@@ -907,7 +951,15 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                 validation_csvs=validation_csvs,
             )
             train_output = task_root / "train"
-            command, cwd, env = _baseline_command(model, args, prepared, train_output, previous if strategy != "joint" else None, False)
+            command, cwd, env = _baseline_command(
+                model,
+                args,
+                prepared,
+                train_output,
+                previous if strategy != "joint" else None,
+                False,
+                dataset_label=protocol.benchmark_id,
+            )
             run_command(command, cwd, env, target / "logs" / f"task_{task:02d}_train.log")
             produced = (
                 train_output / "best.pt"
@@ -939,7 +991,15 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                     protocol=protocol,
                 )
                 anchor_output = task_root / "anchors" / anchor_id
-                command, cwd, env = _baseline_command(model, args, prepared_anchor, anchor_output, checkpoint, True)
+                command, cwd, env = _baseline_command(
+                    model,
+                    args,
+                    prepared_anchor,
+                    anchor_output,
+                    checkpoint,
+                    True,
+                    dataset_label=protocol.benchmark_id,
+                )
                 run_command(command, cwd, env, target / "logs" / f"task_{task:02d}_anchor_{anchor_id}.log")
                 stage_rows.append({
                     "task": task,
@@ -1167,7 +1227,27 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
                     "checkpoint_role": "best",
                 }
                 write_json(existing_resource, resource_manifest)
-            eval_command = [args.python_executable or __import__("sys").executable, "-m", "EvaluateCL", "--data-root", str(data_root), "--checkpoint-dir", str(target / "checkpoint"), "--output-dir", str(target / "native"), "--task-start", str(args.task_start), "--task-end", str(args.task_end), "--device", resolved_device(args.device), "--resume", "--save-event-predictions"]
+            eval_command = [
+                args.python_executable or __import__("sys").executable,
+                "-m", "EvaluateCL",
+                "--data-root", str(data_root),
+                "--checkpoint-dir", str(target / "checkpoint"),
+                "--output-dir", str(target / "native"),
+                "--task-start", str(args.task_start),
+                "--task-end", str(args.task_end),
+                "--device", resolved_device(args.device),
+                "--resume",
+                "--eval-batch-size", str(args.eval_batch_size),
+            ]
+            # Keep the default command free of event-row output.  The legacy
+            # boolean remains an explicit alias; the scope option is passed
+            # through for supplementary/final and debug runs.
+            if getattr(args, "save_event_predictions", False):
+                eval_command.append("--save-event-predictions")
+            else:
+                event_scope = getattr(args, "event_prediction_scope", "none")
+                if event_scope != "none":
+                    eval_command += ["--event-prediction-scope", event_scope]
             if strategy == "no_working":
                 eval_command += ["--variants", "frozen/full"]
             elif strategy == "no_episodic":
@@ -1186,12 +1266,31 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
             run_command(eval_command, cwd, env, target / "logs" / "evaluate.log")
             summary_path = target / "native" / "summary.json"
             metrics = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
-            for name in ("task_metrics.csv", "anchor_metrics.csv", "continual_summary.csv", "checkpoint_tree.csv"):
-                source = target / "native" / name
-                if source.exists() and name == "task_metrics.csv":
-                    shutil.copy2(source, target / "sequence_metrics.csv")
+            native = target / "native"
+            # Keep the runner-level CL artifact contract identical to the
+            # baseline path. EvaluateCL keeps its richer native tree under
+            # ``native/`` and calls the frozen checkpoint × regime matrix
+            # ``anchor_nll_matrix.csv``; the outer contract exposes that same
+            # matrix as ``frozen_anchor_matrix.csv``.
+            hm_artifacts = {
+                "task_metrics.csv": "task_metrics.csv",
+                "anchor_metrics.csv": "anchor_metrics.csv",
+                "continual_summary.csv": "continual_summary.csv",
+                "anchor_nll_matrix.csv": "frozen_anchor_matrix.csv",
+                "law_metrics.csv": "law_metrics.csv",
+                "fwt_metrics.csv": "fwt_metrics.csv",
+                "rrr_metrics.csv": "rrr_metrics.csv",
+                "checkpoint_tree.csv": "checkpoint_tree.csv",
+            }
+            for source_name, target_name in hm_artifacts.items():
+                source = native / source_name
+                if source.is_file():
+                    shutil.copy2(source, target / target_name)
+            task_metrics = native / "task_metrics.csv"
+            if task_metrics.is_file():
+                shutil.copy2(task_metrics, target / "sequence_metrics.csv")
             predictions = target / "native" / "event_predictions.csv"
-            if predictions.exists():
+            if predictions.exists() and getattr(args, "event_prediction_scope", "none") != "none":
                 shutil.copy2(predictions, target / "event_predictions.csv")
                 with predictions.open("r", newline="", encoding="utf-8-sig") as source, gzip.open(target / "predictions.jsonl.gz", "wt", encoding="utf-8") as destination:
                     for row in csv.DictReader(source):

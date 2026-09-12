@@ -47,18 +47,24 @@ def parse_args():
         )
     )
     parser.add_argument("--dataset", choices=SUPPORTED_DATASETS, required=True)
-    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument(
+        "--dataset-label",
+        default=None,
+        help="Optional display name for plots/logs when using prepared data.",
+    )
+    parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--d-model", type=int, default=64)
-    parser.add_argument("--d-rnn", type=int, default=256)
-    parser.add_argument("--d-inner", type=int, default=128)
-    parser.add_argument("--d-k", type=int, default=16)
-    parser.add_argument("--d-v", type=int, default=16)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--d-model", type=int, default=128)
+    parser.add_argument("--d-rnn", type=int, default=128)
+    parser.add_argument("--d-inner", type=int, default=256)
+    parser.add_argument("--d-k", type=int, default=32)
+    parser.add_argument("--d-v", type=int, default=32)
     parser.add_argument("--num-heads", type=int, default=4)
-    parser.add_argument("--num-layers", type=int, default=4)
+    parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument("--label-smoothing", type=float, default=0.01)
+    parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument(
         "--integral-method", choices=("trapezoid", "mc"), default="trapezoid"
     )
@@ -104,6 +110,8 @@ def validate_args(args):
         raise ValueError("--num-workers cannot be negative")
     if args.learning_rate <= 0:
         raise ValueError("--learning-rate must be positive")
+    if args.weight_decay < 0:
+        raise ValueError("--weight-decay cannot be negative")
     if not 0 <= args.dropout < 1:
         raise ValueError("--dropout must be in [0, 1)")
     if not 0 <= args.label_smoothing < 1:
@@ -230,6 +238,7 @@ def training_command(args, paths, adapted_dir, device):
         "-type_loss_weight", str(args.type_loss_weight),
         "-time_loss_weight", str(args.time_loss_weight),
         "-grad_clip", str(args.grad_clip),
+        "-weight_decay", str(args.weight_decay),
         "-selection_metric", args.selection_metric,
         "-log", str(paths["csv"] / "epoch_metrics.csv"),
         "-test_log", str(paths["csv"] / "test_metrics.csv"),
@@ -394,7 +403,8 @@ def main():
     success = False
     try:
         device = resolve_device(args.device)
-        console.line("THP dataset: {}".format(args.dataset))
+        dataset_label = args.dataset_label or args.dataset
+        console.line("THP dataset: {}".format(dataset_label))
         console.line("Device: {}".format(device))
         console.line("Adapting dataset with seed={}".format(args.seed))
         adapted_dir = (
@@ -430,7 +440,7 @@ def main():
                 paths["scratch"] / "best_model.pt",
                 checkpoint_dir / "best.pt",
             )
-            plot_metrics(rows, test_row, paths, args.dataset)
+            plot_metrics(rows, test_row, paths, dataset_label)
             console.line(
                 "Saved likelihood, RMSE and accuracy plots for train/validation"
             )

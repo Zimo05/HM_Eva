@@ -376,6 +376,949 @@ class MemoryTreeInference:
             result["T"] = sequence["T"].to(self.device)
         return result
 
+    @torch.no_grad()
+    def _forecast_history_statistics(
+        self,
+        sequence: Mapping[str, Tensor],
+    ) -> Tensor:
+        """Cache prefix statistics at the causal forecast origin.
+
+        ``event_NLL`` uses the strict-time history cache.  Forecasting in
+        ``run_sequence`` instead evaluates the local rate at
+        ``t[k - 1] + 1e-6``.  For the next event, every prefix event is at or
+        before ``t[k - 1]``, so the cached history at ``t[k]`` can be rescaled
+        to that forecast origin; tied events are then added explicitly.  This
+        keeps the batched path algebraically identical to the scalar path
+        without putting a Python event loop around ``intensity_at_event``.
+        """
+        times = sequence["times"]
+        types = sequence["types"].long()
+        event_count = int(times.numel())
+        if event_count == 0:
+            return times.new_empty(
+                (0, self.hawkes.num_types, self.hawkes.num_basis)
+            )
+        expected_shape = (
+            event_count,
+            self.hawkes.num_types,
+            self.hawkes.num_basis,
+        )
+        strict_history = sequence.get(HAWKES_HISTORY_STATS_KEY)
+        if (
+            not isinstance(strict_history, Tensor)
+            or sequence.get(HAWKES_CACHE_SIGNATURE_KEY)
+            != self.hawkes.cache_signature
+            or strict_history.shape != expected_shape
+        ):
+            cached = self.hawkes.prepare_sequence_cache(sequence, inplace=False)
+            strict_history = cached[HAWKES_HISTORY_STATS_KEY]
+        strict_history = strict_history.to(
+            device=times.device,
+            dtype=times.dtype,
+        )
+
+        # ``event_NLL``'s history cache is evaluated at times[k], while the
+        # scalar forecast is evaluated at times[k - 1] + 1e-6.  Since event k
+        # is the next event in a non-decreasing sequence, the contribution of
+        # every strict-time prefix event is changed by the same per-basis
+        # decay factor.  The remaining tied predecessors are not present in
+        # strict_history and are added from cumulative type counts.  No
+        # [L, L, M] tensor is needed.
+        if event_count == 1:
+            return strict_history
+        one_hot_types = F.one_hot(
+            types,
+            num_classes=self.hawkes.num_types,
+        ).to(dtype=times.dtype)
+        run_start = torch.cat([
+            torch.ones(1, dtype=torch.bool, device=times.device),
+            times[1:] != times[:-1],
+        ])
+        run_ids = run_start.to(torch.long).cumsum(dim=0) - 1
+        cumulative = one_hot_types.cumsum(dim=0)
+        run_starts = torch.nonzero(run_start, as_tuple=False).reshape(-1)
+        run_base = cumulative.index_select(0, run_starts) - (
+            one_hot_types.index_select(0, run_starts)
+        )
+        same_timestamp_counts = cumulative[:-1] - run_base.index_select(
+            0, run_ids[:-1]
+        )
+        tied_with_previous = times[1:] == times[:-1]
+        decays = self.hawkes.decays.to(device=times.device, dtype=times.dtype)
+        forecast_epsilon = times.new_tensor(1e-6)
+        strict_scale = torch.exp(
+            (
+                times[1:] - times[:-1] - forecast_epsilon
+            ).reshape(-1, 1, 1)
+            * decays.reshape(1, 1, -1)
+        )
+        strict_forecast = strict_history[1:] * strict_scale
+        same_timestamp_kernel = torch.exp(-forecast_epsilon * decays)
+        tied_correction = (
+            same_timestamp_counts.unsqueeze(-1)
+            * same_timestamp_kernel.reshape(1, 1, -1)
+            * tied_with_previous.reshape(-1, 1, 1).to(times.dtype)
+        )
+        return torch.cat([
+            strict_history[:1],
+            strict_forecast + tied_correction,
+        ], dim=0)
+
+    @torch.no_grad()
+    def prepare_sequence_batch(
+        self,
+        sequences: Sequence[Mapping[str, Any]],
+        *,
+        frontier_static_cache: Any = None,
+    ) -> tuple[list[dict[str, Any]], Any]:
+        """Prepare a padded sequence minibatch for packed inference.
+
+        The returned ``z`` tensors contain one strict-prefix embedding per
+        observed event.  ``projected_z`` and ``memory_query`` are prepared in
+        the same flattened order, so routing and retrieval can consume all
+        valid prefixes in one call.  Sequence metadata is retained for the
+        evaluator, while all model tensors live on ``self.device``.
+        """
+        if frontier_static_cache is None:
+            frontier_static_cache = self.tree.frontier_routing.build_static_cache(
+                detach=True
+            )
+        if not sequences:
+            return [], frontier_static_cache
+
+        moved_sequences: list[dict[str, Any]] = []
+        lengths: list[int] = []
+        for sequence in sequences:
+            # Do not mutate the evaluator's source mapping while adding the
+            # resident Hawkes cache.  Keep labels such as eval_set_id beside
+            # the device-resident tensors for downstream reporting.
+            source = dict(sequence)
+            moved = self._move_sequence(source)
+            moved_sequence = {**source, **moved}
+            moved_sequences.append(moved_sequence)
+            lengths.append(int(moved_sequence["times"].numel()))
+
+        # The benchmark loader normally filters empty sequences.  Returning a
+        # compatibility marker here lets callers use the established scalar
+        # fallback for unusual/custom inputs instead of producing an invalid
+        # packed GRU batch.
+        if any(length <= 0 for length in lengths):
+            return [
+                {
+                    "sequence": moved,
+                    "z": None,
+                    "projected_z": None,
+                    "memory_query": None,
+                    "length": length,
+                }
+                for moved, length in zip(moved_sequences, lengths)
+            ], frontier_static_cache
+
+        z_by_sequence: list[Tensor]
+        if hasattr(self.encoder, "forward_padded_prefix"):
+            batch_size = len(moved_sequences)
+            max_length = max(lengths)
+            reference_times = moved_sequences[0]["times"]
+            padded_times = reference_times.new_zeros(batch_size, max_length)
+            padded_types = torch.zeros(
+                batch_size,
+                max_length,
+                dtype=torch.long,
+                device=reference_times.device,
+            )
+            padded_features = reference_times.new_zeros(
+                batch_size,
+                max_length,
+                2,
+            )
+            valid_mask = torch.zeros(
+                batch_size,
+                max_length,
+                dtype=torch.bool,
+                device=reference_times.device,
+            )
+            for row, (sequence, length) in enumerate(
+                zip(moved_sequences, lengths)
+            ):
+                padded_times[row, :length] = sequence["times"]
+                padded_types[row, :length] = sequence["types"]
+                padded_features[row, :length] = sequence[
+                    EVENT_TIME_FEATURES_KEY
+                ]
+                valid_mask[row, :length] = True
+            z_padded, prefix_mask = self.encoder.forward_padded_prefix(
+                padded_times,
+                padded_types,
+                valid_mask,
+                time_features=padded_features,
+                lengths_cpu=lengths,
+            )
+            z_by_sequence = [
+                z_padded[row, :length].contiguous()
+                for row, length in enumerate(lengths)
+            ]
+            z_flat = z_padded[prefix_mask]
+        elif hasattr(self.encoder, "forward_all_prefix"):
+            # This is a compatibility path for prefix encoders that already
+            # expose a vectorized single-sequence API but not the padded API.
+            z_by_sequence = [
+                self.encoder.forward_all_prefix(
+                    sequence["times"],
+                    sequence["types"],
+                    time_features=sequence.get(EVENT_TIME_FEATURES_KEY),
+                )
+                for sequence in moved_sequences
+            ]
+            z_flat = torch.cat(z_by_sequence, dim=0)
+        else:
+            return [
+                {
+                    "sequence": moved,
+                    "z": None,
+                    "projected_z": None,
+                    "memory_query": None,
+                    "length": length,
+                }
+                for moved, length in zip(moved_sequences, lengths)
+            ], frontier_static_cache
+
+        projected_flat = self.tree.router_compat.project_z(z_flat)
+        if self.tree.episodic_memory.query_net is None:
+            raise RuntimeError("the wrapped tree must construct memory.query_net")
+        query_flat = self.tree.episodic_memory.query_net(z_flat)
+
+        prepared: list[dict[str, Any]] = []
+        start = 0
+        for sequence, length, z in zip(moved_sequences, lengths, z_by_sequence):
+            stop = start + length
+            prepared.append({
+                "sequence": sequence,
+                "z": z,
+                "projected_z": projected_flat[start:stop],
+                "memory_query": query_flat[start:stop],
+                "forecast_history_stats": self._forecast_history_statistics(
+                    sequence
+                ),
+                "length": length,
+            })
+            start = stop
+        return prepared, frontier_static_cache
+
+    def _batched_hawkes_intensity(
+        self,
+        theta: Tensor,
+        history_stats: Tensor,
+    ) -> Tensor:
+        """Evaluate Hawkes intensities for ``[N]`` or ``[N, K]`` rows."""
+        if theta.ndim not in (2, 3):
+            raise ValueError("theta must have shape [N, P] or [N, K, P]")
+        if history_stats.ndim != 3:
+            raise ValueError("history_stats must have shape [N, D, M]")
+        history_stats = history_stats.to(device=theta.device, dtype=theta.dtype)
+        D = self.hawkes.num_types
+        M = self.hawkes.num_basis
+        raw_mu = theta[..., :D]
+        raw_W = theta[..., D:].reshape(*theta.shape[:-1], D, D, M)
+        mu = F.softplus(raw_mu)
+        W = F.softplus(raw_W)
+        if theta.ndim == 2:
+            excitation = (
+                W * history_stats.unsqueeze(1)
+            ).sum(dim=(-1, -2))
+        else:
+            excitation = (
+                W * history_stats.unsqueeze(1).unsqueeze(1)
+            ).sum(dim=(-1, -2))
+        return (mu + excitation).clamp_min(1e-8)
+
+    def _batched_event_nll(
+        self,
+        theta: Tensor,
+        history_stats: Tensor,
+        interval_stats: Tensor,
+        event_types: Tensor,
+        durations: Tensor,
+    ) -> Tensor:
+        """Vectorized equivalent of ``HawkesFamily.event_NLL``."""
+        if theta.ndim not in (2, 3):
+            raise ValueError("theta must have shape [N, P] or [N, K, P]")
+        history_stats = history_stats.to(device=theta.device, dtype=theta.dtype)
+        interval_stats = interval_stats.to(device=theta.device, dtype=theta.dtype)
+        durations = durations.to(device=theta.device, dtype=theta.dtype)
+        event_types = event_types.to(device=theta.device, dtype=torch.long)
+        D = self.hawkes.num_types
+        M = self.hawkes.num_basis
+        intensity = self._batched_hawkes_intensity(theta, history_stats)
+        raw_mu = theta[..., :D]
+        raw_W = theta[..., D:].reshape(*theta.shape[:-1], D, D, M)
+        mu = F.softplus(raw_mu)
+        W = F.softplus(raw_W)
+        if theta.ndim == 2:
+            target = intensity.gather(
+                1,
+                event_types.reshape(-1, 1),
+            ).squeeze(1)
+            integral = (
+                mu.sum(dim=-1) * durations
+                + (W * interval_stats.unsqueeze(1)).sum(dim=(-1, -2))
+            )
+        else:
+            width = theta.size(1)
+            target = intensity.gather(
+                2,
+                event_types.reshape(-1, 1, 1).expand(-1, width, 1),
+            ).squeeze(-1)
+            integral = (
+                mu.sum(dim=-1) * durations.unsqueeze(1)
+                + (
+                    W * interval_stats.unsqueeze(1).unsqueeze(1)
+                ).sum(dim=(-1, -2))
+            )
+        return -torch.log(target.clamp_min(1e-8)) + integral
+
+    def _batched_frontier_owners(
+        self,
+        frontier_node_indices: Tensor,
+        frontier_mask: Tensor,
+        posterior: Tensor,
+    ) -> tuple[list[tuple[str, ...]], list[str], Tensor]:
+        """Resolve hard credible-set owners at the diagnostic boundary."""
+        node_ids = tuple(self.tree.all_node_ids)
+        indices_cpu = frontier_node_indices.detach().cpu().tolist()
+        masks_cpu = frontier_mask.detach().cpu().tolist()
+        owner_ids: list[str] = []
+        frontier_ids: list[tuple[str, ...]] = []
+        owner_indices: list[int] = []
+        for row, (indices, mask) in enumerate(zip(indices_cpu, masks_cpu)):
+            active_indices = [
+                int(index)
+                for index, active in zip(indices, mask)
+                if active
+            ]
+            active_ids = tuple(node_ids[index] for index in active_indices)
+            if not active_ids:
+                raise RuntimeError("packed frontier contains no active node")
+            owner_id = self._posterior_owner(
+                active_ids,
+                posterior[row].masked_select(frontier_mask[row]),
+            )
+            frontier_ids.append(active_ids)
+            owner_ids.append(owner_id)
+            owner_indices.append(node_ids.index(owner_id))
+        return (
+            frontier_ids,
+            owner_ids,
+            torch.as_tensor(
+                owner_indices,
+                dtype=torch.long,
+                device=frontier_node_indices.device,
+            ),
+        )
+
+    def run_sequence_batch_compact(
+        self,
+        prepared: Sequence[Mapping[str, Any]],
+        *,
+        frontier_static_cache: Any = None,
+        capture_event_predictions: bool | Sequence[bool] = False,
+        capture_prediction_theta: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Run a read-only sequence minibatch through packed HM inference.
+
+        Prefix encoding, routing, memory retrieval, frontier energies, and
+        Hawkes terms are evaluated on flattened valid prefixes.  The only
+        remaining time loop advances independent Working Memory rows, which
+        preserves the causal recurrence for ``FAST_ADAPT`` while allowing all
+        sequences in one minibatch to share each wavefront computation.
+        """
+        if not prepared:
+            return []
+        if self.config.allow_memory_writes or self.config.update_memory_usage:
+            raise ValueError(
+                "packed inference is restricted to read-only protocols"
+            )
+        if any(item.get("z") is None for item in prepared):
+            raise ValueError(
+                "packed inference requires prepared prefix embeddings"
+            )
+        if isinstance(capture_event_predictions, bool):
+            capture_by_sequence = [
+                capture_event_predictions for _ in prepared
+            ]
+        else:
+            capture_by_sequence = [
+                bool(value) for value in capture_event_predictions
+            ]
+            if len(capture_by_sequence) != len(prepared):
+                raise ValueError(
+                    "capture_event_predictions must be a bool or have one "
+                    "value per prepared sequence"
+                )
+        # Working Memory is sequence-local.  The packed implementation keeps
+        # its recurrence in ``working_state`` rather than the adapter's scalar
+        # slot, so start from the same clean boundary as ``run_sequence``.
+        self.tree.reset_working_memory()
+        if frontier_static_cache is None:
+            frontier_static_cache = self.tree.frontier_routing.build_static_cache(
+                detach=True
+            )
+
+        lengths = [
+            int(item.get("length", item["sequence"]["times"].numel()))
+            for item in prepared
+        ]
+        if any(length <= 0 for length in lengths):
+            raise ValueError("packed inference cannot contain empty sequences")
+        z_flat = torch.cat([
+            item["z"][:length]
+            for item, length in zip(prepared, lengths)
+        ], dim=0)
+        if any(item.get("projected_z") is None for item in prepared):
+            with torch.no_grad():
+                projected_flat = self.tree.router_compat.project_z(z_flat)
+        else:
+            projected_flat = torch.cat([
+                item["projected_z"][:length]
+                for item, length in zip(prepared, lengths)
+            ], dim=0)
+        if any(item.get("memory_query") is None for item in prepared):
+            if self.tree.episodic_memory.query_net is None:
+                raise RuntimeError("the wrapped tree must construct memory.query_net")
+            with torch.no_grad():
+                query_flat = self.tree.episodic_memory.query_net(z_flat)
+        else:
+            query_flat = torch.cat([
+                item["memory_query"][:length]
+                for item, length in zip(prepared, lengths)
+            ], dim=0)
+
+        device = z_flat.device
+        sequence_index = torch.cat([
+            torch.full(
+                (length,),
+                row,
+                dtype=torch.long,
+                device=device,
+            )
+            for row, length in enumerate(lengths)
+        ])
+        time_index = torch.cat([
+            torch.arange(length, dtype=torch.long, device=device)
+            for length in lengths
+        ])
+        times_flat = torch.cat([
+            item["sequence"]["times"][:length]
+            for item, length in zip(prepared, lengths)
+        ], dim=0)
+        types_flat = torch.cat([
+            item["sequence"]["types"][:length].long()
+            for item, length in zip(prepared, lengths)
+        ], dim=0)
+        history_flat = torch.cat([
+            item["sequence"][HAWKES_HISTORY_STATS_KEY][:length]
+            for item, length in zip(prepared, lengths)
+        ], dim=0)
+        interval_flat = torch.cat([
+            item["sequence"][HAWKES_INTERVAL_STATS_KEY][:length]
+            for item, length in zip(prepared, lengths)
+        ], dim=0)
+        forecast_stats_by_sequence = []
+        duration_by_sequence = []
+        forecast_origin_by_sequence = []
+        for item, length in zip(prepared, lengths):
+            sequence = item["sequence"]
+            forecast_stats = item.get("forecast_history_stats")
+            if forecast_stats is None:
+                forecast_stats = self._forecast_history_statistics(sequence)
+            forecast_stats_by_sequence.append(forecast_stats[:length])
+            times = sequence["times"][:length]
+            duration_by_sequence.append(
+                torch.cat([
+                    # event_NLL integrates the baseline over [0, t_0] for
+                    # the first event; only later rows use inter-event gaps.
+                    times[:1].clamp_min(0.0),
+                    (times[1:] - times[:-1]).clamp_min(0.0),
+                ])
+            )
+            forecast_origin_by_sequence.append(
+                torch.cat([
+                    times.new_zeros(1),
+                    times[:-1],
+                ])
+            )
+        forecast_flat = torch.cat(forecast_stats_by_sequence, dim=0)
+        duration_flat = torch.cat(duration_by_sequence, dim=0)
+        forecast_origin_flat = torch.cat(forecast_origin_by_sequence, dim=0)
+
+        parameter_dim = self.tree.param_dim
+        with torch.no_grad():
+            static_memory_output = self.tree(
+                z_flat,
+                working_delta=z_flat.new_zeros(z_flat.size(0), parameter_dim),
+                decays=self.hawkes.decays,
+                frontier_static_cache=frontier_static_cache,
+                frontier_projected_z=projected_flat,
+                frontier_query=query_flat,
+                update_memory_state=False,
+                # Keep the existing diagnostic visit accounting. It is not a
+                # predictive state transition and is order-independent under
+                # the packed counter update.
+                update_search_state=True,
+                materialize_diagnostics=False,
+            )
+            frontier_energy = self._batched_event_nll(
+                static_memory_output["frontier_theta"],
+                history_flat,
+                interval_flat,
+                types_flat,
+                duration_flat,
+            )
+            frontier_energy = frontier_energy.masked_fill(
+                ~static_memory_output["frontier_mask"],
+                torch.inf,
+            )
+            temperature = self.tree.frontier_routing.config.posterior_temperature
+            frontier_logits = (
+                static_memory_output["frontier_mass"].clamp_min(1e-12).log()
+                - frontier_energy / temperature
+            )
+            posterior = torch.softmax(
+                frontier_logits.masked_fill(
+                    ~static_memory_output["frontier_mask"],
+                    -torch.inf,
+                ),
+                dim=-1,
+            ).masked_fill(~static_memory_output["frontier_mask"], 0.0)
+
+            frontier_ids, owner_ids, owner_indices = self._batched_frontier_owners(
+                static_memory_output["frontier_node_indices"],
+                static_memory_output["frontier_mask"],
+                posterior,
+            )
+            novelty, count, weighted_similarity = (
+                self.tree.episodic_memory.novelty_count_packed(
+                    query_flat,
+                    owner_indices,
+                    tuple(self.tree.all_node_ids),
+                    temperature=self.controller.novelty_temperature,
+                    count_exponent=self.controller.count_exponent,
+                    eps=self.controller.controller_eps,
+                    count_similarity_low=self.controller.count_similarity_low,
+                    count_similarity_high=self.controller.count_similarity_high,
+                    count_topk=self.controller.count_topk,
+                    count_saturation=self.controller.count_saturation,
+                )
+            )
+
+            packed_info = static_memory_output["packed_memory_info"]
+            visited_mask = static_memory_output["visited_node_mask"]
+            retrieval_alpha_mass = (
+                packed_info["alpha"]
+                * visited_mask.unsqueeze(-1).to(packed_info["alpha"].dtype)
+            ).sum(dim=(-1, -2))
+            retrieval_effective_k = (
+                packed_info["effective_k"]
+                * visited_mask.to(packed_info["effective_k"].dtype)
+            ).sum(dim=-1)
+            visited_count = visited_mask.sum(dim=-1)
+            retrieval_null_alpha = (
+                packed_info["null_alpha"] * visited_mask.to(
+                    packed_info["null_alpha"].dtype
+                )
+            ).sum(dim=-1) / visited_count.clamp_min(1).to(
+                packed_info["null_alpha"].dtype
+            )
+            retrieval_null_alpha = torch.where(
+                visited_count > 0,
+                retrieval_null_alpha,
+                retrieval_null_alpha.new_ones(()),
+            )
+            visited_nonempty = (
+                packed_info["valid_mask"].any(dim=-1) & visited_mask
+            ).sum(dim=-1)
+            raw_episodic_residual_norm = (
+                static_memory_output["frontier_episodic_delta"]
+                .detach()
+                .norm(dim=-1)
+                .mean(dim=-1)
+            )
+            episodic_residual_norm = (
+                static_memory_output["episodic_delta"]
+                .detach()
+                .norm(dim=(-2, -1))
+            )
+            owner_on_retrieval_path = (
+                static_memory_output["visited_node_indices"]
+                == owner_indices.unsqueeze(1)
+            ) & visited_mask
+            owner_on_retrieval_path = owner_on_retrieval_path.any(dim=-1)
+
+        batch_size = len(prepared)
+        nll_by_sequence = z_flat.new_zeros(batch_size)
+        correct_by_sequence = torch.zeros(
+            batch_size,
+            dtype=torch.long,
+            device=device,
+        )
+        time_abs_by_sequence = z_flat.new_zeros(batch_size)
+        working_state = self.tree.working_memory.new_batch_state(batch_size)
+        adapt_working_memory = bool(self.config.adapt_working_memory)
+        need_events = bool(
+            capture_prediction_theta or any(capture_by_sequence)
+        )
+        event_results: list[Optional[dict[str, Any]]] = (
+            [None] * z_flat.size(0) if need_events else []
+        )
+
+        # Static tensors are copied to CPU only when the caller asks for event
+        # rows. The numerical hot path remains entirely device-side.
+        if need_events:
+            posterior_cpu = posterior.detach().cpu()
+            responsibility_cpu = static_memory_output["r"].detach().cpu()
+            raw_residual_cpu = raw_episodic_residual_norm.detach().cpu()
+            episodic_residual_cpu = episodic_residual_norm.detach().cpu()
+            alpha_mass_cpu = retrieval_alpha_mass.detach().cpu()
+            effective_k_cpu = retrieval_effective_k.detach().cpu()
+            null_alpha_cpu = retrieval_null_alpha.detach().cpu()
+            visited_count_cpu = visited_count.detach().cpu()
+            visited_nonempty_cpu = visited_nonempty.detach().cpu()
+            owner_on_path_cpu = owner_on_retrieval_path.detach().cpu()
+            sequence_index_cpu = sequence_index.detach().cpu().tolist()
+            time_index_cpu = time_index.detach().cpu().tolist()
+            times_flat_cpu = times_flat.detach().cpu().tolist()
+            weighted_similarity_cpu = weighted_similarity.detach().cpu()
+            source_index_by_sequence = []
+            for item in prepared:
+                source_value = item["sequence"].get("source_index", -1)
+                source_index_by_sequence.append(
+                    int(
+                        source_value.item()
+                        if hasattr(source_value, "item")
+                        else source_value
+                    )
+                )
+            calibrated_write_threshold = float(
+                self.controller.calibration_thresholds[2].detach().cpu()
+            )
+
+        if adapt_working_memory:
+            active_row_waves = [
+                torch.nonzero(
+                    time_index == position,
+                    as_tuple=False,
+                ).reshape(-1)
+                for position in range(max(lengths))
+            ]
+        else:
+            # Frozen evaluation has no sequence-dependent recurrence. All
+            # valid events can therefore share one controller/Hawkes wave,
+            # avoiding an otherwise unnecessary Python loop over positions.
+            active_row_waves = [
+                torch.arange(z_flat.size(0), dtype=torch.long, device=device)
+            ]
+        for active_rows in active_row_waves:
+            if active_rows.numel() == 0:
+                continue
+            sequence_rows = sequence_index.index_select(0, active_rows)
+            state_before = working_state.index_select(0, sequence_rows)
+            if adapt_working_memory:
+                working_used = state_before.detach().clone().requires_grad_(True)
+            else:
+                working_used = state_before
+
+            wave_memory = {
+                key: static_memory_output[key].index_select(0, active_rows)
+                for key in (
+                    "r",
+                    "frontier_semantic_theta",
+                    "frontier_episodic_delta",
+                )
+            }
+            active_history = history_flat.index_select(0, active_rows)
+            active_interval = interval_flat.index_select(0, active_rows)
+            active_types = types_flat.index_select(0, active_rows)
+            active_durations = duration_flat.index_select(0, active_rows)
+
+            with torch.no_grad():
+                pre_params = self._controller_effective_parameters(
+                    wave_memory,
+                    working_used,
+                    working_used.new_zeros(active_rows.numel()),
+                )
+                pre_nll = self._batched_event_nll(
+                    pre_params.theta,
+                    active_history,
+                    active_interval,
+                    active_types,
+                    active_durations,
+                )
+                controller_output = self.controller.action_distribution_batch(
+                    surprise=pre_nll,
+                    novelty=novelty.index_select(0, active_rows),
+                    count=count.index_select(0, active_rows),
+                    update_statistics=False,
+                    owner_confidence=posterior.index_select(
+                        0, active_rows
+                    ).max(dim=-1).values,
+                    retrieval_similarity=weighted_similarity.index_select(
+                        0, active_rows
+                    ),
+                    retrieval_residual_norm=raw_episodic_residual_norm.index_select(
+                        0, active_rows
+                    ),
+                )
+                action_probabilities = controller_output["probabilities"]
+                raw_action_probabilities = controller_output[
+                    "raw_probabilities"
+                ]
+
+            with torch.set_grad_enabled(adapt_working_memory):
+                final_params = self._controller_effective_parameters(
+                    wave_memory,
+                    working_used,
+                    action_probabilities[:, 1],
+                )
+                final_nll = self._batched_event_nll(
+                    final_params.theta,
+                    active_history,
+                    active_interval,
+                    active_types,
+                    active_durations,
+                )
+
+            if adapt_working_memory:
+                working_gradient = torch.autograd.grad(
+                    final_nll.sum(),
+                    working_used,
+                    retain_graph=False,
+                    create_graph=False,
+                )[0]
+                self.tree.working_memory.update_batch_rows(
+                    working_state,
+                    sequence_rows,
+                    working_gradient,
+                    adaptation_probability=action_probabilities[:, 0],
+                )
+
+            with torch.no_grad():
+                active_forecast = forecast_flat.index_select(0, active_rows)
+                current_intensity = self._batched_hawkes_intensity(
+                    final_params.theta,
+                    active_history,
+                )
+                forecast_intensity = self._batched_hawkes_intensity(
+                    final_params.theta,
+                    active_forecast,
+                )
+                type_probabilities = current_intensity / current_intensity.sum(
+                    dim=-1,
+                    keepdim=True,
+                ).clamp_min(1e-8)
+                forecast_rate = forecast_intensity.sum(dim=-1).clamp_min(1e-8)
+                forecast_type_probabilities = (
+                    forecast_intensity / forecast_rate.unsqueeze(-1)
+                )
+                predicted_delta = forecast_rate.reciprocal()
+                active_origins = forecast_origin_flat.index_select(
+                    0, active_rows
+                )
+                predicted_time = active_origins + predicted_delta
+                predicted_type = current_intensity.argmax(dim=-1)
+
+                nll_by_sequence.index_add_(
+                    0,
+                    sequence_rows,
+                    final_nll.detach(),
+                )
+                correct_by_sequence.index_add_(
+                    0,
+                    sequence_rows,
+                    predicted_type.eq(active_types).long(),
+                )
+                time_abs_by_sequence.index_add_(
+                    0,
+                    sequence_rows,
+                    (predicted_time - times_flat.index_select(0, active_rows))
+                    .abs(),
+                )
+
+            if not need_events:
+                continue
+
+            active_global = active_rows.detach().cpu().tolist()
+            nll_cpu = final_nll.detach().cpu().tolist()
+            type_probabilities_cpu = type_probabilities.detach().cpu()
+            forecast_probabilities_cpu = (
+                forecast_type_probabilities.detach().cpu()
+            )
+            predicted_delta_cpu = predicted_delta.detach().cpu().tolist()
+            predicted_time_cpu = predicted_time.detach().cpu().tolist()
+            active_types_cpu = active_types.detach().cpu().tolist()
+            predicted_type_cpu = predicted_type.detach().cpu().tolist()
+            action_probabilities_cpu = action_probabilities.detach().cpu()
+            raw_action_probabilities_cpu = (
+                raw_action_probabilities.detach().cpu()
+            )
+            pre_theta_cpu = pre_params.theta.detach().cpu()
+            current_intensity_cpu = current_intensity.detach().cpu()
+            for local_index, global_index in enumerate(active_global):
+                sequence_row = int(sequence_index_cpu[global_index])
+                if not (
+                    capture_prediction_theta
+                    or capture_by_sequence[sequence_row]
+                ):
+                    continue
+                event_index = int(time_index_cpu[global_index])
+                source_index = source_index_by_sequence[sequence_row]
+                action_index = int(
+                    action_probabilities_cpu[local_index].argmax().item()
+                )
+                action = str(tuple(Action)[action_index])
+                retrieve_gate = float(
+                    action_probabilities_cpu[local_index, 1]
+                )
+                raw_write_gate = float(
+                    raw_action_probabilities_cpu[local_index, 2]
+                )
+                action_write_gate = float(
+                    action_probabilities_cpu[local_index, 2]
+                )
+                event_results[global_index] = {
+                    "event_index": event_index,
+                    "nll": float(nll_cpu[local_index]),
+                    "predicted_type": int(predicted_type_cpu[local_index]),
+                    "true_type": int(active_types_cpu[local_index]),
+                    "prediction_theta": pre_theta_cpu[local_index],
+                    "intensity": current_intensity_cpu[local_index],
+                    "type_probabilities_at_event_time": type_probabilities_cpu[
+                        local_index
+                    ],
+                    "forecast_type_probabilities": forecast_probabilities_cpu[
+                        local_index
+                    ],
+                    "predicted_delta": float(predicted_delta_cpu[local_index]),
+                    "predicted_time": float(predicted_time_cpu[local_index]),
+                    "true_time": float(
+                        times_flat_cpu[global_index]
+                    ),
+                    "responsibility": responsibility_cpu[global_index],
+                    "owner_id": owner_ids[global_index],
+                    "frontier_node_ids": frontier_ids[global_index],
+                    "frontier_posterior": posterior_cpu[global_index],
+                    "action": action,
+                    "memorize_argmax": action_index == 2,
+                    "action_probabilities": action_probabilities_cpu[
+                        local_index
+                    ],
+                    "raw_action_probabilities": raw_action_probabilities_cpu[
+                        local_index
+                    ],
+                    "retrieval_alpha_mass": float(
+                        alpha_mass_cpu[global_index]
+                    ),
+                    "retrieval_alpha_per_visited_node": float(
+                        alpha_mass_cpu[global_index]
+                        / max(int(visited_count_cpu[global_index]), 1)
+                    ),
+                    "retrieval_similarity": float(
+                        weighted_similarity_cpu[global_index]
+                    ),
+                    "retrieval_effective_k": int(
+                        effective_k_cpu[global_index]
+                    ),
+                    "retrieval_null_alpha": float(
+                        null_alpha_cpu[global_index]
+                    ),
+                    "visited_bank_count": int(visited_count_cpu[global_index]),
+                    "visited_nonempty_bank_count": int(
+                        visited_nonempty_cpu[global_index]
+                    ),
+                    "raw_episodic_residual_norm": float(
+                        raw_residual_cpu[global_index]
+                    ),
+                    "retrieve_gate": retrieve_gate,
+                    "gated_episodic_residual_norm": float(
+                        raw_residual_cpu[global_index]
+                    ) * abs(retrieve_gate),
+                    "owner_on_retrieval_path": bool(
+                        owner_on_path_cpu[global_index]
+                    ),
+                    "retrieval_counterfactual_gain": None,
+                    "retrieval_counterfactual_unavailable_reason": (
+                        "requires paired no_episodic evaluation"
+                    ),
+                    "episodic_residual_norm": float(
+                        episodic_residual_cpu[global_index]
+                    ),
+                    "write_token": f"{source_index}:{event_index}",
+                    "write_candidate": bool(
+                        raw_write_gate >= self.controller.write_candidate_threshold
+                    ),
+                    "write_gate_active": bool(action_write_gate > 0.0),
+                    "write_probed": False,
+                    "write_utility": None,
+                    "write_priority": None,
+                    "write_accepted": False,
+                    "write_local_accepted": False,
+                    "write_probation_enqueued": False,
+                    "write_promotion_count": 0,
+                    "write_retrieved_later": False,
+                    "write_beneficial": False,
+                    "write_gate_passed": bool(
+                        raw_write_gate >= calibrated_write_threshold
+                    ),
+                    "write_priority_passed": False,
+                    "write_window_complete": False,
+                    "write_utility_passed": False,
+                    "write_owner_on_score_path": False,
+                    "write_virtual_candidate_alpha": None,
+                }
+
+        results: list[dict[str, Any]] = []
+        offset = 0
+        for row, length in enumerate(lengths):
+            capture_row = bool(
+                capture_prediction_theta or capture_by_sequence[row]
+            )
+            if capture_row:
+                row_events = [
+                    event_results[index]
+                    for index in range(offset, offset + length)
+                ]
+                if any(event is None for event in row_events):
+                    raise RuntimeError(
+                        "packed inference did not materialize all event rows"
+                    )
+                materialized_events = [event for event in row_events if event is not None]
+            else:
+                materialized_events = []
+            total_nll = float(nll_by_sequence[row].detach().cpu())
+            results.append({
+                "events": materialized_events,
+                "total_nll": total_nll,
+                "nll_per_event": total_nll / max(length, 1),
+                "pending_write_count": 0,
+                "accepted_write_count": 0,
+                "local_accepted_write_count": 0,
+                "probation_validation_count": 0,
+                "probation_validations": [],
+                "promoted_write_count": 0,
+                "promotions": [],
+                "probation_size": 0,
+                "write_probe_count": 0,
+                "leaf_ids": list(self.tree.leaf_ids),
+                "scalar_metrics": {
+                    "events": length,
+                    "nll_sum": total_nll,
+                    "correct": int(correct_by_sequence[row].detach().cpu()),
+                    "time_abs_sum": float(
+                        time_abs_by_sequence[row].detach().cpu()
+                    ),
+                },
+            })
+            offset += length
+        return results
+
     def _action(
         self,
         memory_output: Mapping[str, Any],
@@ -1205,13 +2148,25 @@ class MemoryTreeInference:
 
     def run_sequence(
         self,
-        cpu_sequence: Mapping[str, Tensor],
+        cpu_sequence: Mapping[str, Any],
+        *,
+        precomputed_z: Optional[Tensor] = None,
+        frontier_static_cache: Any = None,
+        precomputed_projected_z: Optional[Tensor] = None,
+        precomputed_memory_query: Optional[Tensor] = None,
+        compact: bool = False,
+        capture_event_predictions: bool = False,
     ) -> Dict[str, Any]:
         """Process observed events causally using only the wake mechanism.
 
         Local candidates wait for their complete causal write horizon, then
         remain retrieval-invisible until independent sequences pass ESS + LCB.
         """
+        # The ordinary API keeps its historical event-row contract.  Compact
+        # callers can explicitly request those rows for diagnostics; otherwise
+        # keep only the tiny mutable write state needed by the causal wake
+        # logic and return scalar accumulators below.
+        materialize_events = (not compact) or bool(capture_event_predictions)
         source_value = cpu_sequence.get("source_index", -1)
         source_index = int(
             source_value.item() if hasattr(source_value, "item") else source_value
@@ -1225,18 +2180,51 @@ class MemoryTreeInference:
             )
             self._anonymous_sequence_counter += 1
         sequence = self._move_sequence(cpu_sequence)
+        event_count = int(sequence["times"].numel())
+        if precomputed_z is not None:
+            precomputed_z = precomputed_z.to(self.device)
+            if (
+                precomputed_z.ndim != 2
+                or precomputed_z.shape != (event_count, self.tree.z_dim)
+            ):
+                raise ValueError(
+                    "precomputed_z must have shape "
+                    f"[{event_count}, {self.tree.z_dim}]"
+                )
+        if precomputed_projected_z is not None:
+            precomputed_projected_z = precomputed_projected_z.to(self.device)
+            if (
+                precomputed_projected_z.ndim != 2
+                or precomputed_projected_z.size(0) != event_count
+            ):
+                raise ValueError(
+                    "precomputed_projected_z must have one row per event"
+                )
+        if precomputed_memory_query is not None:
+            precomputed_memory_query = precomputed_memory_query.to(self.device)
+            if (
+                precomputed_memory_query.ndim != 2
+                or precomputed_memory_query.size(0) != event_count
+            ):
+                raise ValueError(
+                    "precomputed_memory_query must have one row per event"
+                )
         self.tree.reset_working_memory()
         pending_writes: list[Dict[str, Any]] = []
         write_probe_contexts: list[Dict[str, Any]] = []
-        outputs = []
+        outputs: list[Dict[str, Any]] = []
         total_nll = 0.0
+        scalar_correct = 0
+        scalar_time_abs_sum = 0.0
         accepted_write_count = 0
         local_accepted_write_count = 0
         accepted_write_requests: list[Dict[str, Any]] = []
 
         for event_index in range(sequence["times"].numel()):
             with torch.no_grad():
-                if isinstance(self.encoder, CausalPrefixEncoder):
+                if precomputed_z is not None:
+                    z_t = precomputed_z[event_index].reshape(1, -1)
+                elif isinstance(self.encoder, CausalPrefixEncoder):
                     z_t = self.encoder(
                         sequence["times"],
                         sequence["types"],
@@ -1260,6 +2248,17 @@ class MemoryTreeInference:
                     z_t=z_t,
                     working_delta=working_delta,
                     decays=self.hawkes.decays,
+                    frontier_static_cache=frontier_static_cache,
+                    frontier_projected_z=(
+                        None
+                        if precomputed_projected_z is None
+                        else precomputed_projected_z[event_index].reshape(1, -1)
+                    ),
+                    frontier_query=(
+                        None
+                        if precomputed_memory_query is None
+                        else precomputed_memory_query[event_index].reshape(1, -1)
+                    ),
                     update_memory_state=False,
                 )
                 pre_action_params = self._controller_effective_parameters(
@@ -1496,92 +2495,118 @@ class MemoryTreeInference:
                     "future_contexts": write_probe_contexts,
                 })
 
-            total_nll += float(nll.detach().cpu())
-            outputs.append({
-                "event_index": event_index,
-                "nll": float(nll.detach().cpu()),
-                "predicted_type": predicted_type,
-                "true_type": int(sequence["types"][event_index].item()),
-                # ``pre_action_theta`` is the parameter state formed from the
-                # strict prefix events[:event_index].  CL law-recovery uses it
-                # to draw a genuinely causal intensity curve; the ordinary
-                # event rows intentionally keep this diagnostic internal.
-                "prediction_theta": pre_action_params.theta.detach().cpu(),
-                "intensity": intensity.detach().cpu(),
-                "type_probabilities_at_event_time": (
-                    type_probabilities_at_event_time.detach().cpu()
-                ),
-                "forecast_type_probabilities": (
-                    forecast_type_probabilities.detach().cpu()
-                ),
-                "predicted_delta": float(predicted_delta.detach().cpu()),
-                "predicted_time": float(predicted_time.detach().cpu()),
-                "true_time": float(
-                    sequence["times"][event_index].detach().cpu()
-                ),
-                "responsibility": memory_output["r"][0].detach().cpu(),
-                "owner_id": owner_id,
-                "frontier_node_ids": tuple(
-                    memory_output["frontier_node_ids"][0]
-                ),
-                "frontier_posterior": posterior.detach().cpu(),
-                "action": str(action),
-                "memorize_argmax": action == Action.MEMORIZE,
-                "action_probabilities": (
-                    action_probabilities.detach().cpu()
-                ),
-                "raw_action_probabilities": (
-                    raw_action_probabilities.detach().cpu()
-                ),
-                "retrieval_alpha_mass": retrieval_alpha_mass,
-                "retrieval_alpha_per_visited_node": (
-                    retrieval_alpha_mass / visited_bank_count
-                    if visited_bank_count else 0.0
-                ),
-                "retrieval_similarity": float(
-                    retrieval_similarity.detach().cpu()
-                ),
-                "retrieval_effective_k": retrieval_effective_k,
-                "retrieval_null_alpha": retrieval_null_alpha,
-                "visited_bank_count": visited_bank_count,
-                "visited_nonempty_bank_count": visited_nonempty_bank_count,
-                "raw_episodic_residual_norm": raw_episodic_residual_norm,
-                "retrieve_gate": retrieve_gate,
-                "gated_episodic_residual_norm": (
-                    gated_episodic_residual_norm
-                ),
-                "owner_on_retrieval_path": owner_on_retrieval_path,
-                "retrieval_counterfactual_gain": None,
-                "retrieval_counterfactual_unavailable_reason": (
-                    "requires paired no_episodic evaluation"
-                ),
-                "episodic_residual_norm": float(
-                    memory_output["episodic_delta"][0]
-                    .detach().norm().cpu()
-                ),
-                "write_token": (
-                    f"{source_index}:{int(event_index)}"
-                ),
-                "write_candidate": bool(
-                    float(raw_action_probabilities[2].detach().cpu())
-                    >= self.controller.write_candidate_threshold
-                ),
-                "write_gate_active": bool(
-                    float(action_probabilities[2].detach().cpu()) > 0.0
-                ),
-                "write_gate_passed": bool(
-                    float(raw_action_probabilities[2].detach().cpu())
-                    >= float(self.controller.calibration_thresholds[2].detach().cpu())
-                ),
-                "write_priority_passed": False,
-                "write_window_complete": False,
-                "write_accepted": False,
-                "write_local_accepted": False,
-                "write_probation_enqueued": False,
-                "write_promotion_count": 0,
-                "write_retrieved_later": False,
-                "write_beneficial": False,
-            })
+            event_nll = float(nll.detach().cpu())
+            true_type = int(sequence["types"][event_index].item())
+            true_time = float(sequence["times"][event_index].detach().cpu())
+            total_nll += event_nll
+            if compact:
+                scalar_correct += int(predicted_type == true_type)
+                scalar_time_abs_sum += abs(
+                    float(predicted_time.detach().cpu()) - true_time
+                )
+
+            if materialize_events:
+                outputs.append({
+                    "event_index": event_index,
+                    "nll": event_nll,
+                    "predicted_type": predicted_type,
+                    "true_type": true_type,
+                    # ``pre_action_theta`` is the parameter state formed from
+                    # the strict prefix events[:event_index].  CL law-recovery uses it
+                    # to draw a genuinely causal intensity curve; the ordinary
+                    # event rows intentionally keep this diagnostic internal.
+                    "prediction_theta": pre_action_params.theta.detach().cpu(),
+                    "intensity": intensity.detach().cpu(),
+                    "type_probabilities_at_event_time": (
+                        type_probabilities_at_event_time.detach().cpu()
+                    ),
+                    "forecast_type_probabilities": (
+                        forecast_type_probabilities.detach().cpu()
+                    ),
+                    "predicted_delta": float(predicted_delta.detach().cpu()),
+                    "predicted_time": float(predicted_time.detach().cpu()),
+                    "true_time": true_time,
+                    "responsibility": memory_output["r"][0].detach().cpu(),
+                    "owner_id": owner_id,
+                    "frontier_node_ids": tuple(
+                        memory_output["frontier_node_ids"][0]
+                    ),
+                    "frontier_posterior": posterior.detach().cpu(),
+                    "action": str(action),
+                    "memorize_argmax": action == Action.MEMORIZE,
+                    "action_probabilities": (
+                        action_probabilities.detach().cpu()
+                    ),
+                    "raw_action_probabilities": (
+                        raw_action_probabilities.detach().cpu()
+                    ),
+                    "retrieval_alpha_mass": retrieval_alpha_mass,
+                    "retrieval_alpha_per_visited_node": (
+                        retrieval_alpha_mass / visited_bank_count
+                        if visited_bank_count else 0.0
+                    ),
+                    "retrieval_similarity": float(
+                        retrieval_similarity.detach().cpu()
+                    ),
+                    "retrieval_effective_k": retrieval_effective_k,
+                    "retrieval_null_alpha": retrieval_null_alpha,
+                    "visited_bank_count": visited_bank_count,
+                    "visited_nonempty_bank_count": visited_nonempty_bank_count,
+                    "raw_episodic_residual_norm": raw_episodic_residual_norm,
+                    "retrieve_gate": retrieve_gate,
+                    "gated_episodic_residual_norm": (
+                        gated_episodic_residual_norm
+                    ),
+                    "owner_on_retrieval_path": owner_on_retrieval_path,
+                    "retrieval_counterfactual_gain": None,
+                    "retrieval_counterfactual_unavailable_reason": (
+                        "requires paired no_episodic evaluation"
+                    ),
+                    "episodic_residual_norm": float(
+                        memory_output["episodic_delta"][0]
+                        .detach().norm().cpu()
+                    ),
+                    "write_token": (
+                        f"{source_index}:{int(event_index)}"
+                    ),
+                    "write_candidate": bool(
+                        float(raw_action_probabilities[2].detach().cpu())
+                        >= self.controller.write_candidate_threshold
+                    ),
+                    "write_gate_active": bool(
+                        float(action_probabilities[2].detach().cpu()) > 0.0
+                    ),
+                    "write_gate_passed": bool(
+                        float(raw_action_probabilities[2].detach().cpu())
+                        >= float(self.controller.calibration_thresholds[2].detach().cpu())
+                    ),
+                    "write_priority_passed": False,
+                    "write_window_complete": False,
+                    "write_accepted": False,
+                    "write_local_accepted": False,
+                    "write_probation_enqueued": False,
+                    "write_promotion_count": 0,
+                    "write_retrieved_later": False,
+                    "write_beneficial": False,
+                })
+            else:
+                # These are the only fields mutated by delayed write/admission
+                # bookkeeping after the event itself has been scored.
+                outputs.append({
+                    "predicted_type": predicted_type,
+                    "true_type": true_type,
+                    "predicted_time": float(predicted_time.detach().cpu()),
+                    "true_time": true_time,
+                    "write_probed": False,
+                    "write_priority_passed": False,
+                    "write_window_complete": False,
+                    "write_accepted": False,
+                    "write_local_accepted": False,
+                    "write_probation_enqueued": False,
+                    "write_promotion_count": 0,
+                    "write_retrieved_later": False,
+                    "write_beneficial": False,
+                })
 
             # F=[t,t+h) still performs the existing causal local admission.
             # It no longer mutates EpisodicMemory: C-window local utility must
@@ -1822,10 +2847,10 @@ class MemoryTreeInference:
             for request in pending_writes
             if request["ready_index"] >= event_count
         ]
-        return {
-            "events": outputs,
+        result = {
+            "events": outputs if materialize_events else [],
             "total_nll": total_nll,
-            "nll_per_event": total_nll / max(len(outputs), 1),
+            "nll_per_event": total_nll / max(event_count, 1),
             "pending_write_count": len(pending_writes),
             "accepted_write_count": (
                 accepted_write_count
@@ -1846,6 +2871,14 @@ class MemoryTreeInference:
             ),
             "leaf_ids": list(self.tree.leaf_ids),
         }
+        if compact:
+            result["scalar_metrics"] = {
+                "events": event_count,
+                "nll_sum": total_nll,
+                "correct": scalar_correct,
+                "time_abs_sum": scalar_time_abs_sum,
+            }
+        return result
 
     @torch.no_grad()
     def predict_next_event(

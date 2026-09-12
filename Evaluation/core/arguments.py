@@ -7,6 +7,9 @@ import sys
 from pathlib import Path
 
 
+EVENT_PREDICTION_SCOPES = ("none", "current", "final", "all")
+
+
 def common_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--seed", type=int, required=True)
@@ -27,6 +30,8 @@ def common_parser(description: str) -> argparse.ArgumentParser:
 
 def _validate_runtime(parser: argparse.ArgumentParser, args: argparse.Namespace) -> argparse.Namespace:
     """Fail before creating a result directory when the runtime cannot run a job."""
+    if hasattr(args, "eval_batch_size") and args.eval_batch_size <= 0:
+        parser.error("--eval-batch-size must be positive")
     if sys.version_info < (3, 10):
         parser.error(
             "Evaluation 需要 Python 3.10+；当前入口由 "
@@ -63,18 +68,26 @@ def _validate_runtime(parser: argparse.ArgumentParser, args: argparse.Namespace)
         parser.error(f"实验环境 {executable!r} 缺少依赖：{', '.join(missing)}。")
     if args.device.startswith("cuda"):
         if not runtime["cuda"]:
-            parser.error(
-                f"指定了 --device {args.device}，但 {executable!r} 中的 PyTorch 不支持可用 CUDA。"
-                "可先用 --device cpu 做 smoke test，正式 GPU 实验需安装 CUDA 版 PyTorch。"
-            )
-        if ":" in args.device:
+            if args.dry_run:
+                print(
+                    f"[Warning] CUDA {args.device} 当前不可用；"
+                    "dry-run 仅验证实验配置，因此继续执行。",
+                    file=sys.stderr,
+                )
+            else:
+                parser.error(
+                    f"指定了 --device {args.device}，但 {executable!r} "
+                    "中的 PyTorch 不支持可用 CUDA。"
+                )
+        elif ":" in args.device:
             try:
                 index = int(args.device.split(":", 1)[1])
             except ValueError:
                 parser.error("--device 应为 auto、cpu、cuda 或 cuda:N。")
             if index < 0 or index >= runtime["cuda_device_count"]:
                 parser.error(
-                    f"请求 GPU {index}，但实验环境只检测到 {runtime['cuda_device_count']} 张 GPU。"
+                    f"请求 GPU {index}，但实验环境只检测到 "
+                    f"{runtime['cuda_device_count']} 张 GPU。"
                 )
     elif args.device not in {"auto", "cpu"}:
         parser.error("--device 应为 auto、cpu、cuda 或 cuda:N。")
@@ -102,9 +115,38 @@ def continual_args(*, replay: bool = False) -> argparse.Namespace:
         help="last task; resolved from the loaded benchmark protocol when omitted",
     )
     parser.add_argument("--data-root", type=Path, default=None)
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=64,
+        help="number of variable-length HM sequences per evaluation batch",
+    )
+    parser.add_argument(
+        "--save-event-predictions",
+        action="store_true",
+        help="compatibility alias for --event-prediction-scope all",
+    )
+    parser.add_argument(
+        "--event-prediction-scope",
+        choices=EVENT_PREDICTION_SCOPES,
+        default=None,
+        help=(
+            "event diagnostics to persist: none (default), current task, "
+            "final checkpoint, or all checkpoints/sets"
+        ),
+    )
     if replay:
         parser.add_argument("--hm-resource-root", type=Path, required=True)
     args = _parse(parser)
+    if args.event_prediction_scope is None:
+        args.event_prediction_scope = (
+            "all" if args.save_event_predictions else "none"
+        )
+    elif args.save_event_predictions:
+        parser.error(
+            "--save-event-predictions cannot be combined with "
+            "--event-prediction-scope"
+        )
     if args.task_start < 0:
         parser.error("--task-start must be non-negative")
     if args.task_end is not None and args.task_end < args.task_start:

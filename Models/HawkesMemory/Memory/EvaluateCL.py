@@ -45,6 +45,7 @@ try:
         adaptation_curve_rows,
         dataset_fingerprint,
         run_variant,
+        run_variant_scalar,
         run_variant_compact,
         write_csv,
     )
@@ -56,6 +57,7 @@ except ModuleNotFoundError:
         adaptation_curve_rows,
         dataset_fingerprint,
         run_variant,
+        run_variant_scalar,
         run_variant_compact,
         write_csv,
     )
@@ -104,6 +106,7 @@ SCALAR_METRICS = (
     "accuracy",
     "local_time_mae",
 )
+EVENT_PREDICTION_SCOPES = ("none", "current", "final", "all")
 CL_PROTOCOL_VARIANTS = (
     "frozen/full",
     "fast_adapt/full",
@@ -123,6 +126,58 @@ LEGACY_CL_VARIANT_MAP = {
     "no_episodic": "frozen/no_episodic",
     "semantic_only": "frozen/semantic_only",
 }
+
+
+def _event_prediction_scope(args: argparse.Namespace) -> str:
+    """Resolve the event-row scope, including the legacy boolean alias."""
+
+    scope = getattr(args, "event_prediction_scope", None)
+    if scope is None:
+        scope = (
+            "all"
+            if getattr(args, "save_event_predictions", False)
+            else "none"
+        )
+    if scope not in EVENT_PREDICTION_SCOPES:
+        raise ValueError(
+            f"unsupported event prediction scope {scope!r}; expected one of "
+            f"{EVENT_PREDICTION_SCOPES}"
+        )
+    return str(scope)
+
+
+def _event_prediction_set_names(
+    *,
+    args: argparse.Namespace,
+    checkpoint_task: int,
+    evaluation_sets: Sequence["EvaluationSet"],
+) -> set[str]:
+    """Return the evaluation sets whose event rows should be materialized.
+
+    ``current`` means the current task test and its matched control for every
+    checkpoint. ``final`` means every set attached to the final selected
+    checkpoint. This keeps the paper path small while retaining useful final
+    checkpoint diagnostics.
+    """
+
+    scope = _event_prediction_scope(args)
+    if scope == "none":
+        return set()
+    if scope == "all":
+        return {evaluation_set.name for evaluation_set in evaluation_sets}
+    if scope == "current":
+        return {
+            evaluation_set.name
+            for evaluation_set in evaluation_sets
+            if evaluation_set.task_id == checkpoint_task
+            and evaluation_set.kind in {"task_test", "matched_control"}
+        }
+    final_task = int(
+        getattr(args, "_event_prediction_final_task", checkpoint_task)
+    )
+    if checkpoint_task != final_task:
+        return set()
+    return {evaluation_set.name for evaluation_set in evaluation_sets}
 
 
 def _canonical_variant(variant: str) -> str:
@@ -439,31 +494,39 @@ def _load_or_run_batch(
     checkpoint_sha256: str,
     args: argparse.Namespace,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], float, bool]:
-    """Evaluate each set from a fresh checkpoint for one protocol.
+    """Evaluate one checkpoint/variant with protocol-correct state scope.
 
     ``ONLINE_WRITE`` mutates the in-memory episodic bank.  A single inference
     object must therefore never be shared by two evaluation sets (or by two
-    protocol rows).  Read-only protocols use the compact path, while the
-    online protocol uses the ordinary causal path so its writes and usage
-    updates remain active across the sequences within one evaluation set.
+    protocol rows).  Read-only protocols combine all sets into one compact
+    call, while the online protocol uses a fresh ordinary causal path per set
+    so its writes and usage updates remain active only within that set.
     """
 
     variant = _canonical_variant(variant)
-    capture_event_rows = bool(
-        args.save_event_predictions or not variant.startswith("frozen/")
+    # Event-level diagnostics are scoped independently from the scalar
+    # benchmark. The default path keeps only scalar accumulators; selected
+    # sequences can still materialize rows for supplementary/debug analysis.
+    event_scope = _event_prediction_scope(args)
+    capture_event_set_ids = _event_prediction_set_names(
+        args=args,
+        checkpoint_task=checkpoint_task,
+        evaluation_sets=evaluation_sets,
     )
+    capture_event_rows = bool(capture_event_set_ids)
 
     cache = _batch_cache_dir(args.output_dir, checkpoint_task, variant)
     metrics_path = cache / "metrics.json"
     events_path = cache / "event_rows.json"
     meta_path = cache / "meta.json"
     expected_meta = {
-        "cache_format": "protocol_eval_per_set_v2",
+        "cache_format": "protocol_eval_scope_v4",
         "checkpoint": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
         "variant": variant,
         "sequence_batch_size": int(args.eval_batch_size),
-        "save_event_predictions": bool(args.save_event_predictions),
+        "event_prediction_scope": event_scope,
+        "capture_event_set_ids": sorted(capture_event_set_ids),
         "capture_event_rows": capture_event_rows,
         "evaluation_sets": [
             {
@@ -550,6 +613,67 @@ def _load_or_run_batch(
         raise ValueError(
             f"no evaluation sets available for checkpoint task_{checkpoint_task:02d}"
         )
+
+    empty_metrics = {
+        "events": 0,
+        "sequences": 0,
+        "nll_per_event": None,
+        "accuracy": None,
+        "local_time_mae": None,
+    }
+    if not variant.startswith("online_write/"):
+        # FROZEN and FAST_ADAPT do not carry persistent state across
+        # sequences.  Combine every set for this checkpoint/variant so HM,
+        # the static routing cache, and the packed GPU waves are constructed
+        # exactly once.  The global position is retained for restoring the
+        # benchmark ordering after length bucketing.
+        all_sequences: list[dict[str, Any]] = []
+        for evaluation_set in evaluation_sets:
+            for sequence in evaluation_cache[evaluation_set.path]:
+                all_sequences.append({
+                    **dict(sequence),
+                    "eval_set_id": evaluation_set.name,
+                    "eval_kind": evaluation_set.kind,
+                    "eval_task": evaluation_set.task_id,
+                    "regime_id": evaluation_set.regime_id,
+                    "stage_label": evaluation_set.stage_label,
+                    "_capture_event_predictions": (
+                        evaluation_set.name in capture_event_set_ids
+                    ),
+                    "_sequence_position": len(all_sequences),
+                })
+        if all_sequences:
+            metrics, event_rows, _inference, elapsed = run_variant_compact(
+                checkpoint,
+                all_sequences,
+                variant,
+                args.device,
+                sequence_batch_size=args.eval_batch_size,
+                progress_dir=progress_dir,
+                prototype_duplicate_threshold=args.prototype_duplicate_threshold,
+                prototype_mode_threshold=args.prototype_mode_threshold,
+                prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+                capture_event_predictions=capture_event_rows,
+                verbose=args.verbose,
+            )
+        else:
+            metrics = {}
+            event_rows = []
+            elapsed = 0.0
+        for evaluation_set in evaluation_sets:
+            metrics.setdefault(evaluation_set.name, dict(empty_metrics))
+        if args.resume:
+            metrics_path.write_text(
+                json.dumps(_jsonable(metrics), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            if capture_event_rows:
+                events_path.write_text(
+                    json.dumps(_jsonable(event_rows), ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        return metrics, event_rows, elapsed, False
+
     for evaluation_set in evaluation_sets:
         set_sequences = [
             {
@@ -579,8 +703,9 @@ def _load_or_run_batch(
         set_progress_dir = None
         if progress_dir is not None:
             set_progress_dir = progress_dir / _safe_name(evaluation_set.name)
-        if variant.startswith("online_write/"):
-            checkpoint_before = _sha256(checkpoint)
+        checkpoint_before = _sha256(checkpoint)
+        capture_set = evaluation_set.name in capture_event_set_ids
+        if capture_set:
             rows, _inference, set_elapsed = run_variant(
                 checkpoint,
                 set_sequences,
@@ -592,33 +717,34 @@ def _load_or_run_batch(
                 prototype_context_alias_capacity=args.prototype_context_alias_capacity,
                 verbose=args.verbose,
             )
-            if _sha256(checkpoint) != checkpoint_before:
-                raise RuntimeError(
-                    f"ONLINE_WRITE mutated checkpoint file {checkpoint}; "
-                    "writes must remain in the disposable inference object"
-                )
             set_metrics = aggregate_event_rows(rows)
-            if capture_event_rows:
-                event_rows.extend(rows)
         else:
-            set_metrics_by_group, set_events, _inference, set_elapsed = (
-                run_variant_compact(
-                    checkpoint,
-                    set_sequences,
-                    variant,
-                    args.device,
-                    sequence_batch_size=args.eval_batch_size,
-                    progress_dir=set_progress_dir,
-                    prototype_duplicate_threshold=args.prototype_duplicate_threshold,
-                    prototype_mode_threshold=args.prototype_mode_threshold,
-                    prototype_context_alias_capacity=args.prototype_context_alias_capacity,
-                    capture_event_predictions=capture_event_rows,
-                    verbose=args.verbose,
-                )
+            (
+                set_metrics_by_group,
+                _inference,
+                set_elapsed,
+            ) = run_variant_scalar(
+                checkpoint,
+                set_sequences,
+                variant,
+                args.device,
+                progress_dir=set_progress_dir,
+                prototype_duplicate_threshold=args.prototype_duplicate_threshold,
+                prototype_mode_threshold=args.prototype_mode_threshold,
+                prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+                verbose=args.verbose,
             )
-            set_metrics = set_metrics_by_group.get(evaluation_set.name, {})
-            if capture_event_rows:
-                event_rows.extend(set_events)
+            set_metrics = set_metrics_by_group.get(
+                evaluation_set.name,
+                dict(empty_metrics),
+            )
+        if _sha256(checkpoint) != checkpoint_before:
+            raise RuntimeError(
+                f"ONLINE_WRITE mutated checkpoint file {checkpoint}; "
+                "writes must remain in the disposable inference object"
+            )
+        if capture_set:
+            event_rows.extend(rows)
         metrics[evaluation_set.name] = set_metrics
         elapsed += float(set_elapsed)
     if args.resume:
@@ -1211,13 +1337,26 @@ def _adaptation_records(
                         + query_index
                     ),
                 })
-            event_rows, _inference, _elapsed = run_variant(
-                checkpoint,
-                combined,
-                variant,
-                args.device,
-                verbose=args.verbose,
-            )
+            if variant.startswith("fast_adapt/"):
+                _, event_rows, _inference, _elapsed = run_variant_compact(
+                    checkpoint,
+                    combined,
+                    variant,
+                    args.device,
+                    sequence_batch_size=getattr(args, "eval_batch_size", 64),
+                    capture_event_predictions=True,
+                    verbose=args.verbose,
+                )
+            else:
+                # ONLINE_WRITE must preserve sequence order because the bank
+                # after one combined sequence is the state seen by the next.
+                event_rows, _inference, _elapsed = run_variant(
+                    checkpoint,
+                    combined,
+                    variant,
+                    args.device,
+                    verbose=args.verbose,
+                )
             query_rows = [
                 row for row in event_rows
                 if int(row.get("event_index", -1)) >= int(K)
@@ -1256,7 +1395,7 @@ def _fwt_scratch_nlls(
         sequences = evaluation_cache.get(path)
         if not sequences:
             continue
-        event_rows, _inference, _elapsed = run_variant(
+        metrics_by_group, _event_rows, _inference, _elapsed = run_variant_compact(
             scratch_checkpoint,
             [
                 {
@@ -1271,9 +1410,28 @@ def _fwt_scratch_nlls(
             ],
             "frozen/full",
             args.device,
+            sequence_batch_size=getattr(args, "eval_batch_size", 64),
+            capture_event_predictions=False,
+            prototype_duplicate_threshold=getattr(
+                args, "prototype_duplicate_threshold", None
+            ),
+            prototype_mode_threshold=getattr(
+                args, "prototype_mode_threshold", None
+            ),
+            prototype_context_alias_capacity=getattr(
+                args, "prototype_context_alias_capacity", None
+            ),
             verbose=args.verbose,
         )
-        output[int(task_id)] = _mean(row.get("nll") for row in event_rows)
+        group_id = f"task_{task_id:02d}_scratch"
+        selected_metrics = metrics_by_group.get(group_id)
+        if selected_metrics is None and len(metrics_by_group) == 1:
+            selected_metrics = next(iter(metrics_by_group.values()))
+        output[int(task_id)] = (
+            None
+            if selected_metrics is None
+            else selected_metrics.get("nll_per_event")
+        )
     return output
 
 
@@ -2844,7 +3002,7 @@ def _write_report(
         "- `plots/`: current quality, CLNLL/forgetting, anchor heatmap, adaptation, NISE, and topology figures.",
         "- `checkpoint_tree.csv`: leaf/node counts and checkpoint memory sizes.",
         "- `summary.json`: machine-readable copy of the complete evaluation manifest.",
-        "- `event_predictions.csv`: written only when `--save-event-predictions` is supplied.",
+        "- `event_predictions.csv`: optional rows selected by `--event-prediction-scope` (default `none`; legacy `--save-event-predictions` means `all`).",
         "- `protocol_comparison.csv`: one comparison table across the selected protocols.",
         "- `frozen/`: strict frozen anchor matrix, CLNLL, forgetting, BWT, and law metrics.",
         "- `fast_adapt/`: official fixed-query adaptation curve plus event-exposure diagnostics; it is excluded from CL aggregates.",
@@ -3038,7 +3196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-batch-size",
         type=int,
-        default=32,
+        default=64,
         help=(
             "number of variable-length sequences used for each padded encoder "
             "batch; reduce it when GPU memory is tight"
@@ -3048,10 +3206,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bootstrap-samples", type=int, default=1000)
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume", action="store_true", help="reuse completed matrix cells")
-    parser.add_argument(
-        "--save-event-predictions", action="store_true",
-        help="write the large combined event_predictions.csv artifact",
+    event_output = parser.add_mutually_exclusive_group()
+    event_output.add_argument(
+        "--event-prediction-scope",
+        choices=EVENT_PREDICTION_SCOPES,
+        default="none",
+        help=(
+            "event rows to persist: none (default), current task/control, "
+            "final checkpoint, or all checkpoints/sets"
+        ),
     )
+    event_output.add_argument(
+        "--save-event-predictions",
+        dest="event_prediction_scope",
+        action="store_const",
+        const="all",
+        help="compatibility alias for --event-prediction-scope all",
+    )
+    event_output.add_argument(
+        "--no-save-event-predictions",
+        dest="event_prediction_scope",
+        action="store_const",
+        const="none",
+        help="compatibility alias for --event-prediction-scope none",
+    )
+    parser.set_defaults(event_prediction_scope="none")
     parser.add_argument(
         "--intensity-samples",
         type=int,
@@ -3143,6 +3322,9 @@ def main() -> None:
             "no task has both a test.csv and checkpoint after applying the task range; "
             f"data={sorted(task_sets)}, checkpoints={sorted(checkpoint_paths)}"
         )
+    # ``final`` is relative to the selected range, so a partial/resumed CL
+    # run still emits diagnostics for its own final checkpoint.
+    args._event_prediction_final_task = selected_ids[-1]
     skipped_ids = sorted(set(task_sets).symmetric_difference(checkpoint_paths))
 
     stage_metadata = _read_stage_metadata(protocol)
@@ -3282,9 +3464,10 @@ def main() -> None:
     anchor_matrix_rows: list[dict[str, Any]] = []
     control_matrix_rows: list[dict[str, Any]] = []
     protocol_event_rows: list[dict[str, Any]] = []
+    event_scope = _event_prediction_scope(args)
     event_writer = (
         _EventPredictionWriter(args.output_dir / "event_predictions.csv")
-        if args.save_event_predictions
+        if event_scope != "none"
         else None
     )
     protocol_task_ids = list(protocol.task_ids)
@@ -3651,6 +3834,7 @@ def main() -> None:
         "available_checkpoint_task_ids": sorted(checkpoint_paths),
         "skipped_task_ids": skipped_ids,
         "current_only": bool(args.current_only),
+        "event_prediction_scope": event_scope,
         "anchors_enabled": not args.no_anchors,
         "anchor_files": [str(item.path.resolve()) for item in anchors],
         "controls": list(protocol.controls),

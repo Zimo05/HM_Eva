@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_all_public_entry_points_exist():
     datasets = ("dws", "retweet", "taobao", "stackoverflow")
-    models = ("HM", "RMTPP", "FullyNN", "THP", "TPP_LLM")
+    models = ("HM", "RMTPP", "FullyNN", "THP", "S2P2", "AttNHP", "TPP_LLM")
     for dataset in datasets:
         for model in models:
             path = ROOT / f"evaluate_{dataset}_{model}.py"
@@ -15,6 +15,16 @@ def test_all_public_entry_points_exist():
             text = path.read_text(encoding="utf-8")
             assert f'dataset="{dataset}"' in text
             assert f'model="{model}"' in text
+
+
+def test_easytpp_continual_entry_points_exist():
+    for model in ("S2P2", "AttNHP"):
+        for strategy in ("sequential", "joint", "replay"):
+            path = ROOT / f"evaluate_continual_{model}_{strategy}.py"
+            assert path.is_file()
+            text = path.read_text(encoding="utf-8")
+            assert f'model="{model}"' in text
+            assert f'strategy="{strategy}"' in text
 
 
 def test_registry_identities_are_unique():

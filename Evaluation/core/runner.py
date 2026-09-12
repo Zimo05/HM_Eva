@@ -375,20 +375,61 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
     python = args.python_executable or sys.executable
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(__import__("pathlib").Path(__file__).resolve().parents[2]), env.get("PYTHONPATH", "")))
-    epochs = args.epochs or (1 if args.smoke else (1 if model == "TPP_LLM" else 25))
-    batch = args.batch_size or (2 if args.smoke else 32)
+    if model == "RMTPP":
+        epochs = args.epochs or (1 if args.smoke else 80)
+        batch = args.batch_size or (2 if args.smoke else 16)
+    elif model in {"S2P2", "AttNHP"}:
+        epochs = args.epochs or (1 if args.smoke else 80)
+        batch = args.batch_size or (2 if args.smoke else 64)
+    else:
+        epochs = args.epochs or (1 if args.smoke else (1 if model == "TPP_LLM" else 20))
+        batch = args.batch_size or (2 if args.smoke else 32)
     device = resolved_device(args.device)
     if model == "RMTPP":
-        command = [python, str(MODELS_ROOT / "RMTPP" / "run_experiment.py"), "--dataset", "taobao", "--prepared-data-dir", str(prepared), "--output-dir", str(output), "--archive", str(output) + ".tar.gz", "--overwrite", "--seed", str(args.seed), "--gpu", ("-1" if device == "cpu" else device.split(":")[-1]), "--epochs", str(epochs), "--batch-size", str(batch)]
+        command = [
+            python,
+            str(MODELS_ROOT / "RMTPP" / "run_experiment.py"),
+            "--dataset", "taobao",
+            "--prepared-data-dir", str(prepared),
+            "--output-dir", str(output),
+            "--archive", str(output) + ".tar.gz",
+            "--overwrite",
+            "--seed", str(args.seed),
+            "--gpu", ("-1" if device == "cpu" else device.split(":")[-1]),
+            "--epochs", str(epochs),
+            "--batch-size", str(batch),
+            "--learning-rate", "5e-4",
+            "--hidden-size", "64",
+            "--mc-samples", "32",
+            "--early-stop-patience", "20",
+            "--lr-patience", "6",
+            "--lr-factor", "0.3",
+        ]
+        if dataset_label:
+            command += ["--dataset-label", dataset_label]
         cwd = MODELS_ROOT / "RMTPP"
         if initial:
             command += ["--initial-checkpoint", str(initial)]
         if evaluate_only:
             command += ["--evaluate-only"]
     elif model == "THP":
+        command = [python, str(MODELS_ROOT / "THP" / "run_experiment.py"),
+                   "--dataset", "taobao", "--prepared-data-dir", str(prepared),
+                   "--output-dir", str(output), "--archive", str(output) + ".tar.gz",
+                   "--overwrite", "--seed", str(args.seed), "--device", device,
+                   "--epochs", str(epochs), "--batch-size", str(batch)]
+        if dataset_label:
+            command += ["--dataset-label", dataset_label]
+        cwd = MODELS_ROOT / "THP"
+        if initial:
+            command += ["--initial-checkpoint", str(initial)]
+        if evaluate_only:
+            command += ["--evaluate-only"]
+    elif model in {"S2P2", "AttNHP"}:
         command = [
             python,
-            str(MODELS_ROOT / "THP" / "run_experiment.py"),
+            str(MODELS_ROOT / "EasyTPP" / "run_experiment.py"),
+            "--model", model,
             "--dataset", "taobao",
             "--prepared-data-dir", str(prepared),
             "--output-dir", str(output),
@@ -398,22 +439,12 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
             "--device", device,
             "--epochs", str(epochs),
             "--batch-size", str(batch),
-            "--learning-rate", "3e-4",
-            "--d-model", "128",
-            "--d-rnn", "128",
-            "--d-inner", "256",
-            "--d-k", "32",
-            "--d-v", "32",
-            "--num-heads", "4",
-            "--num-layers", "2",
-            "--dropout", "0.10",
-            "--label-smoothing", "0.01",
-            "--weight-decay", "1e-5",
-            "--grad-clip", "1.0",
         ]
         if dataset_label:
             command += ["--dataset-label", dataset_label]
-        cwd = MODELS_ROOT / "THP"
+        if args.smoke:
+            command += ["--max-sequences", "4", "--max-events-per-sequence", "16"]
+        cwd = MODELS_ROOT / "EasyTPP"
         if initial:
             command += ["--initial-checkpoint", str(initial)]
         if evaluate_only:

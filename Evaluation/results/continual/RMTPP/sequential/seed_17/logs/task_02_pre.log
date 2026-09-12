@@ -1,0 +1,18 @@
+[38;20m2026-09-12 17:23:00,952 - run_experiment.py[pid:331218;line:678:main] - INFO: Preparing taobao with seed=17[0m
+[38;20m2026-09-12 17:23:00,979 - run_experiment.py[pid:331218;line:686:main] - INFO: Time stats: median=0.501589, mean=1.142307, p99=8.778541, max=21.855734[0m
+[31;1m2026-09-12 17:23:00,992 - config.py[pid:331218;line:34:build_from_yaml_file] - CRITICAL: Load pipeline config class RunnerConfig[0m
+[31;1m2026-09-12 17:23:01,091 - runner_config.py[pid:331218;line:141:update_config] - CRITICAL: train model RMTPP using GPU with torch backend[0m
+[38;20m2026-09-12 17:23:01,102 - runner_config.py[pid:331218;line:35:__init__] - INFO: Save the config to /tmp/rmtpp_baseline_cache/taobao_4m8rkbf9/runtime/331218_140401731806400_260912-172300/RMTPP_train_output.yaml[0m
+[38;20m2026-09-12 17:23:01,102 - base_runner.py[pid:331218;line:176:save_log] - INFO: Save the log to /tmp/rmtpp_baseline_cache/taobao_4m8rkbf9/runtime/331218_140401731806400_260912-172300/log[0m
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 128 examples [00:00, 3469.73 examples/s]
+1.1329998379093007 1.751734201365137
+min_dt: 3.7e-06
+max_dt: 21.8557336
+[38;20m2026-09-12 17:23:04,531 - tpp_runner.py[pid:331218;line:62:_init_model] - INFO: Num of model parameters 9560[0m
+Generating validation split: 0 examples [00:00, ? examples/s]Generating validation split: 32 examples [00:00, 635.31 examples/s]
+Generating test split: 0 examples [00:00, ? examples/s]Generating test split: 32 examples [00:00, 3342.32 examples/s]
+[38;20m2026-09-12 17:23:05,546 - run_experiment.py[pid:331218;line:699:main] - INFO: RMTPP taobao experiment complete[0m
+[38;20m2026-09-12 17:23:05,547 - run_experiment.py[pid:331218;line:700:main] - INFO: Archive contains only log/, csv/, and plot/[0m
+[38;20m2026-09-12 17:23:05,550 - run_experiment.py[pid:331218;line:646:create_archive] - INFO: Saved archive to /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_02/pre_update.tar.gz[0m
+Result directory: /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_02/pre_update
+Archive: /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_02/pre_update.tar.gz

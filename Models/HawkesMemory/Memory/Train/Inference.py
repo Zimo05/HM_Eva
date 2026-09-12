@@ -654,13 +654,18 @@ class MemoryTreeInference:
         mu = F.softplus(raw_mu)
         W = F.softplus(raw_W)
         if theta.ndim == 2:
+            # W is [N, D_out, D_src, M] and interval_stats is
+            # [N, D_src, M].  The interval integral is a scalar per event:
+            # all output types, source types, and basis functions must be
+            # reduced.  Reducing only (-1, -2) leaves an erroneous [N, D_out]
+            # tensor that broadcasts into the event loss.
             target = intensity.gather(
                 1,
                 event_types.reshape(-1, 1),
             ).squeeze(1)
             integral = (
                 mu.sum(dim=-1) * durations
-                + (W * interval_stats.unsqueeze(1)).sum(dim=(-1, -2))
+                + (W * interval_stats.unsqueeze(1)).sum(dim=(-3, -2, -1))
             )
         else:
             width = theta.size(1)
@@ -672,9 +677,130 @@ class MemoryTreeInference:
                 mu.sum(dim=-1) * durations.unsqueeze(1)
                 + (
                     W * interval_stats.unsqueeze(1).unsqueeze(1)
-                ).sum(dim=(-1, -2))
+                ).sum(dim=(-3, -2, -1))
             )
         return -torch.log(target.clamp_min(1e-8)) + integral
+
+    def _lca_index_table(self, reference: Tensor) -> Tensor:
+        """Return a topology-versioned device table for pairwise LCA folds."""
+        signature = tuple(
+            (
+                node_id,
+                self.tree.nodes[node_id].parent,
+                self.tree.nodes[node_id].left,
+                self.tree.nodes[node_id].right,
+            )
+            for node_id in self.tree.all_node_ids
+        )
+        cached = getattr(self, "_inference_lca_table_cache", None)
+        if (
+            cached is not None
+            and cached[0] == signature
+            and cached[1].device == reference.device
+        ):
+            return cached[1]
+
+        node_ids = tuple(self.tree.all_node_ids)
+        node_index = {
+            node_id: index for index, node_id in enumerate(node_ids)
+        }
+        values = [
+            [
+                node_index[self._lowest_common_ancestor((left, right))]
+                for right in node_ids
+            ]
+            for left in node_ids
+        ]
+        table = torch.tensor(
+            values,
+            device=reference.device,
+            dtype=torch.long,
+        )
+        self._inference_lca_table_cache = (signature, table)
+        return table
+
+    def _posterior_owner_indices_batch(
+        self,
+        frontier_node_indices: Tensor,
+        frontier_mask: Tensor,
+        posterior: Tensor,
+    ) -> Tensor:
+        """Resolve posterior owners for a whole wavefront on the device.
+
+        The returned indices are consumed by packed retrieval/controller
+        calculations.  String IDs are intentionally materialized separately
+        at the diagnostic boundary so the numerical path has no per-event
+        ``.item()``/``.cpu()`` synchronization.
+        """
+        if (
+            frontier_node_indices.ndim != 2
+            or frontier_mask.shape != frontier_node_indices.shape
+            or posterior.shape != frontier_node_indices.shape
+        ):
+            raise ValueError(
+                "frontier indices, mask, and posterior must align as [N, K]"
+            )
+        safe_posterior = posterior.masked_fill(~frontier_mask, 0.0)
+        sort_posterior = posterior.masked_fill(~frontier_mask, -torch.inf)
+        order = sort_posterior.argsort(
+            dim=-1,
+            descending=True,
+            stable=True,
+        )
+        sorted_mass = safe_posterior.gather(1, order)
+        credible_count = (
+            sorted_mass.cumsum(dim=-1)
+            < self.tree.frontier_routing.config.credible_mass
+        ).sum(dim=-1) + 1
+        credible_count = torch.minimum(
+            credible_count,
+            frontier_mask.sum(dim=-1),
+        )
+        sorted_nodes = frontier_node_indices.clamp_min(0).gather(1, order)
+        owner = sorted_nodes[:, 0]
+        lca_table = self._lca_index_table(posterior)
+        for slot in range(1, posterior.size(1)):
+            combined = lca_table[owner, sorted_nodes[:, slot]]
+            owner = torch.where(slot < credible_count, combined, owner)
+        return owner
+
+    def _materialize_batched_frontier_diagnostics(
+        self,
+        frontier_node_indices: Tensor,
+        frontier_mask: Tensor,
+        owner_indices: Tensor,
+    ) -> tuple[list[tuple[str, ...]], list[str]]:
+        """Convert a completed owner batch into human-readable diagnostic IDs."""
+        width = frontier_node_indices.size(1)
+        packed = torch.cat(
+            [
+                frontier_node_indices.detach().to(dtype=torch.long),
+                frontier_mask.detach().to(dtype=torch.long),
+                owner_indices.detach().to(dtype=torch.long).unsqueeze(1),
+            ],
+            dim=1,
+        ).cpu().tolist()
+        node_ids = tuple(self.tree.all_node_ids)
+        frontier_ids: list[tuple[str, ...]] = []
+        owner_ids: list[str] = []
+        for row in packed:
+            indices = row[:width]
+            mask = row[width:2 * width]
+            owner_index = int(row[2 * width])
+            active_indices = [
+                int(index)
+                for index, active in zip(indices, mask)
+                if active
+            ]
+            if not active_indices:
+                raise RuntimeError("packed frontier contains no active node")
+            if any(index < 0 or index >= len(node_ids) for index in active_indices):
+                raise RuntimeError("packed frontier contains an invalid node index")
+            if owner_index < 0 or owner_index >= len(node_ids):
+                raise RuntimeError("packed owner contains an invalid node index")
+            frontier_ids.append(tuple(node_ids[index] for index in active_indices))
+            owner_ids.append(node_ids[owner_index])
+        return frontier_ids, owner_ids
 
     def _batched_frontier_owners(
         self,
@@ -682,38 +808,18 @@ class MemoryTreeInference:
         frontier_mask: Tensor,
         posterior: Tensor,
     ) -> tuple[list[tuple[str, ...]], list[str], Tensor]:
-        """Resolve hard credible-set owners at the diagnostic boundary."""
-        node_ids = tuple(self.tree.all_node_ids)
-        indices_cpu = frontier_node_indices.detach().cpu().tolist()
-        masks_cpu = frontier_mask.detach().cpu().tolist()
-        owner_ids: list[str] = []
-        frontier_ids: list[tuple[str, ...]] = []
-        owner_indices: list[int] = []
-        for row, (indices, mask) in enumerate(zip(indices_cpu, masks_cpu)):
-            active_indices = [
-                int(index)
-                for index, active in zip(indices, mask)
-                if active
-            ]
-            active_ids = tuple(node_ids[index] for index in active_indices)
-            if not active_ids:
-                raise RuntimeError("packed frontier contains no active node")
-            owner_id = self._posterior_owner(
-                active_ids,
-                posterior[row].masked_select(frontier_mask[row]),
-            )
-            frontier_ids.append(active_ids)
-            owner_ids.append(owner_id)
-            owner_indices.append(node_ids.index(owner_id))
-        return (
-            frontier_ids,
-            owner_ids,
-            torch.as_tensor(
-                owner_indices,
-                dtype=torch.long,
-                device=frontier_node_indices.device,
-            ),
+        """Compatibility wrapper returning IDs plus device owner indices."""
+        owner_indices = self._posterior_owner_indices_batch(
+            frontier_node_indices,
+            frontier_mask,
+            posterior,
         )
+        frontier_ids, owner_ids = self._materialize_batched_frontier_diagnostics(
+            frontier_node_indices,
+            frontier_mask,
+            owner_indices,
+        )
+        return frontier_ids, owner_ids, owner_indices
 
     def run_sequence_batch_compact(
         self,
@@ -860,10 +966,10 @@ class MemoryTreeInference:
                 frontier_projected_z=projected_flat,
                 frontier_query=query_flat,
                 update_memory_state=False,
-                # Keep the existing diagnostic visit accounting. It is not a
-                # predictive state transition and is order-independent under
-                # the packed counter update.
-                update_search_state=True,
+                # Frozen/fast-adapt evaluation is read-only, including the
+                # routing diagnostic counters.  This keeps checkpoint-level
+                # results independent of evaluation order and batch schedule.
+                update_search_state=False,
                 materialize_diagnostics=False,
             )
             frontier_energy = self._batched_event_nll(
@@ -890,7 +996,7 @@ class MemoryTreeInference:
                 dim=-1,
             ).masked_fill(~static_memory_output["frontier_mask"], 0.0)
 
-            frontier_ids, owner_ids, owner_indices = self._batched_frontier_owners(
+            owner_indices = self._posterior_owner_indices_batch(
                 static_memory_output["frontier_node_indices"],
                 static_memory_output["frontier_mask"],
                 posterior,
@@ -969,6 +1075,12 @@ class MemoryTreeInference:
         event_results: list[Optional[dict[str, Any]]] = (
             [None] * z_flat.size(0) if need_events else []
         )
+        if need_events:
+            frontier_ids, owner_ids = self._materialize_batched_frontier_diagnostics(
+                static_memory_output["frontier_node_indices"],
+                static_memory_output["frontier_mask"],
+                owner_indices,
+            )
 
         # Static tensors are copied to CPU only when the caller asks for event
         # rows. The numerical hot path remains entirely device-side.
@@ -1387,7 +1499,10 @@ class MemoryTreeInference:
         posterior: Tensor,
     ) -> str:
         config = self.tree.frontier_routing.config
-        order = posterior[: len(frontier_ids)].argsort(descending=True)
+        order = posterior[: len(frontier_ids)].argsort(
+            descending=True,
+            stable=True,
+        )
         cumulative = posterior.index_select(0, order).cumsum(dim=0)
         count = min(
             int((cumulative < config.credible_mass).sum().item()) + 1,
@@ -2260,6 +2375,10 @@ class MemoryTreeInference:
                         else precomputed_memory_query[event_index].reshape(1, -1)
                     ),
                     update_memory_state=False,
+                    update_search_state=(
+                        self.config.allow_memory_writes
+                        or self.config.update_memory_usage
+                    ),
                 )
                 pre_action_params = self._controller_effective_parameters(
                     memory_output,

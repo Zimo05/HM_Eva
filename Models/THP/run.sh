@@ -62,48 +62,48 @@ esac
 # Complete dataset-specific defaults. Environment values always take priority.
 case "$DATASET" in
   amazon)
-    EPOCHS="${EPOCHS:-25}"
+    EPOCHS="${EPOCHS:-80}"
     BATCH_SIZE="${BATCH_SIZE:-32}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   retweet)
-    EPOCHS="${EPOCHS:-25}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-8}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   taxi)
-    EPOCHS="${EPOCHS:-25}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-80}"
+    BATCH_SIZE="${BATCH_SIZE:-128}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   stackoverflow)
-    EPOCHS="${EPOCHS:-25}"
+    EPOCHS="${EPOCHS:-80}"
     BATCH_SIZE="${BATCH_SIZE:-32}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   taobao)
-    EPOCHS="${EPOCHS:-25}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-80}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   mobike)
-    EPOCHS="${EPOCHS:-25}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-100}"
+    BATCH_SIZE="${BATCH_SIZE:-128}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   mimic)
-    EPOCHS="${EPOCHS:-25}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-100}"
+    BATCH_SIZE="${BATCH_SIZE:-4}"
     SELECTION_METRIC="${SELECTION_METRIC:-accuracy}"
     ;;
   covid_policy_tracker)
-    EPOCHS="${EPOCHS:-25}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-100}"
+    BATCH_SIZE="${BATCH_SIZE:-4}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   dws_8|dws_10|dws_13|dws_15|dws_17|dws_20)
-    EPOCHS="${EPOCHS:-25}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-80}"
+    BATCH_SIZE="${BATCH_SIZE:-8}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   *)
@@ -113,23 +113,22 @@ case "$DATASET" in
     ;;
 esac
 
-LEARNING_RATE="${LEARNING_RATE:-0.0003}"
-D_MODEL="${D_MODEL:-128}"
-D_RNN="${D_RNN:-128}"
-D_INNER="${D_INNER:-256}"
-D_K="${D_K:-32}"
-D_V="${D_V:-32}"
+LEARNING_RATE="${LEARNING_RATE:-0.0001}"
+D_MODEL="${D_MODEL:-64}"
+D_RNN="${D_RNN:-256}"
+D_INNER="${D_INNER:-128}"
+D_K="${D_K:-16}"
+D_V="${D_V:-16}"
 NUM_HEADS="${NUM_HEADS:-4}"
-NUM_LAYERS="${NUM_LAYERS:-2}"
+NUM_LAYERS="${NUM_LAYERS:-4}"
 DROPOUT="${DROPOUT:-0.1}"
-LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.01}"
+LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.1}"
 INTEGRAL_METHOD="${INTEGRAL_METHOD:-trapezoid}"
 MC_SAMPLES="${MC_SAMPLES:-20}"
 EVENT_LOSS_WEIGHT="${EVENT_LOSS_WEIGHT:-1.0}"
 TYPE_LOSS_WEIGHT="${TYPE_LOSS_WEIGHT:-1.0}"
 TIME_LOSS_WEIGHT="${TIME_LOSS_WEIGHT:-0.1}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-0.00001}"
 SEED="${SEED:-2024}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 GPU="${GPU:-0}"
@@ -216,7 +215,6 @@ nohup "$PYTHON_BIN" "$THP_DIR/run_experiment.py" \
   --type-loss-weight "$TYPE_LOSS_WEIGHT" \
   --time-loss-weight "$TIME_LOSS_WEIGHT" \
   --grad-clip "$GRAD_CLIP" \
-  --weight-decay "$WEIGHT_DECAY" \
   --selection-metric "$SELECTION_METRIC" \
   --seed "$SEED" \
   --num-workers "$NUM_WORKERS" \

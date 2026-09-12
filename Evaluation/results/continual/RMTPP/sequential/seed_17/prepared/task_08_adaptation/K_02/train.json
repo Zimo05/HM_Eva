@@ -1,0 +1,18 @@
+[
+  {
+    "dim_process": 8,
+    "seq_idx": 0,
+    "time_since_start": [
+      0.46458967,
+      0.8560216
+    ],
+    "time_since_last_event": [
+      0.46458967,
+      0.39143193000000004
+    ],
+    "type_event": [
+      5,
+      5
+    ]
+  }
+]

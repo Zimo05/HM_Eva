@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import random
+import re
 import shutil
 import sys
 import tarfile
@@ -58,20 +59,28 @@ def parse_args():
         ),
         default="dws",
     )
+    parser.add_argument(
+        "--dataset-label",
+        default=None,
+        help=(
+            "Optional display/run label for prepared data; defaults to the "
+            "canonical dataset name."
+        ),
+    )
     parser.add_argument("--variant", choices=("8", "13", "15", "17", "20"), default="13")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument(
-        "--mc-samples", type=int, default=20,
+        "--mc-samples", type=int, default=32,
         help="Monte Carlo samples per interval for training log-likelihood.",
     )
     parser.add_argument("--thinning-num-sample", type=int, default=1)
     parser.add_argument("--thinning-num-exp", type=int, default=500)
     parser.add_argument("--dtime-max", type=float, default=120.0)
-    parser.add_argument("--early-stop-patience", type=int, default=15)
-    parser.add_argument("--lr-patience", type=int, default=5)
+    parser.add_argument("--early-stop-patience", type=int, default=20)
+    parser.add_argument("--lr-patience", type=int, default=6)
     parser.add_argument("--lr-factor", type=float, default=0.3)
     parser.add_argument("--min-delta", type=float, default=1e-3)
     parser.add_argument(
@@ -124,8 +133,19 @@ def validate_args(args):
         raise ValueError("--gpu must be -1 or a non-negative CUDA index")
 
 
+def _normalise_dataset_label(label):
+    """Turn a benchmark label into a safe, stable native run name."""
+
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(label).strip())
+    return value.strip("._-") or "dataset"
+
+
 def prepare_paths(args):
-    if args.dataset == "dws":
+    dataset_label = getattr(args, "dataset_label", None)
+    if dataset_label:
+        run_name = _normalise_dataset_label(dataset_label)
+        result_group = run_name
+    elif args.dataset == "dws":
         run_name, result_group = "dws_{}".format(args.variant), "DWS"
     elif args.dataset == "amazon":
         run_name, result_group = "amazon", "Amazon"
@@ -657,7 +677,7 @@ def adapt_dataset(args, paths):
     private_root = paths["output"] / "prepared_data"
     if args.dataset == "dws":
         adapter.dws(output_dir=private_root, variants=[args.variant])
-        return private_root / paths["run_name"]
+        return private_root / "dws_{}".format(args.variant)
     target = private_root / args.dataset
     getattr(adapter, args.dataset)(output_dir=target)
     return target

@@ -1,0 +1,240 @@
+THP dataset: taobao
+Device: cuda:3
+Adapting dataset with seed=7
+Training command: /home/zt/miniconda3/bin/python /home/zt/zimo/Benchmark/Models/THP/Main.py -data /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/prepared/task_09_adaptation/K_16 -epoch 20 -batch_size 32 -num_workers 0 -d_model 64 -d_rnn 256 -d_inner_hid 128 -d_k 16 -d_v 16 -n_head 4 -n_layers 4 -dropout 0.1 -lr 0.0001 -smooth 0.1 -seed 7 -device cuda:3 -integral_method trapezoid -mc_samples 20 -event_loss_weight 1.0 -type_loss_weight 1.0 -time_loss_weight 0.1 -grad_clip 1.0 -selection_metric ll -log /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16/csv/epoch_metrics.csv -test_log /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16/csv/test_metrics.csv -prediction_log /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16/predictions.jsonl.gz -save /tmp/thp_experiment_inc3e10l/best_model.pt -load /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/checkpoint/task_08.pt
+[Info] Loading train data...
+[Info] Loading dev data...
+[Info] Loading test data...
+[Info] parameters: Namespace(data='/home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/prepared/task_09_adaptation/K_16', epoch=20, batch_size=32, num_workers=0, d_model=64, d_rnn=256, d_inner_hid=128, d_k=16, d_v=16, n_head=4, n_layers=4, dropout=0.1, lr=0.0001, smooth=0.1, seed=7, device=device(type='cuda', index=3), target_predicate_ids=(), integral_method='trapezoid', mc_samples=20, event_loss_weight=1.0, type_loss_weight=1.0, time_loss_weight=0.1, grad_clip=1.0, log='/home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16/csv/epoch_metrics.csv', save='/tmp/thp_experiment_inc3e10l/best_model.pt', test_log='/home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16/csv/test_metrics.csv', prediction_log='/home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16/predictions.jsonl.gz', load='/home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/checkpoint/task_08.pt', evaluate_only=False, selection_metric='ll')
+[Info] Number of parameters: 480970
+[Info] Loaded initial checkpoint /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/checkpoint/task_08.pt
+[ Epoch 1 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.81444, accuracy:  0.00000, RMSE:  1.66746, elapse: 0.014 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.81872, accuracy:  0.20000, RMSE:  1.67599, elapse: 0.000 min
+  - [Info] Maximum ll: -3.81872, Maximum accuracy:  0.20000, Minimum RMSE:  1.67599
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 2 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.84001, accuracy:  0.26667, RMSE:  1.67692, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.79669, accuracy:  0.20000, RMSE:  1.67183, elapse: 0.000 min
+  - [Info] Maximum ll: -3.79669, Maximum accuracy:  0.20000, Minimum RMSE:  1.67183
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 3 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.79510, accuracy:  0.20000, RMSE:  1.66779, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.77570, accuracy:  0.20000, RMSE:  1.66919, elapse: 0.000 min
+  - [Info] Maximum ll: -3.77570, Maximum accuracy:  0.20000, Minimum RMSE:  1.66919
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 4 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.77755, accuracy:  0.20000, RMSE:  1.68460, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.75563, accuracy:  0.20000, RMSE:  1.66847, elapse: 0.000 min
+  - [Info] Maximum ll: -3.75563, Maximum accuracy:  0.20000, Minimum RMSE:  1.66847
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 5 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.75246, accuracy:  0.20000, RMSE:  1.66842, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.73629, accuracy:  0.20000, RMSE:  1.66827, elapse: 0.000 min
+  - [Info] Maximum ll: -3.73629, Maximum accuracy:  0.20000, Minimum RMSE:  1.66827
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 6 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.72496, accuracy:  0.26667, RMSE:  1.65707, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.71735, accuracy:  0.26667, RMSE:  1.66816, elapse: 0.000 min
+  - [Info] Maximum ll: -3.71735, Maximum accuracy:  0.26667, Minimum RMSE:  1.66816
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 7 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.71559, accuracy:  0.26667, RMSE:  1.65792, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.69849, accuracy:  0.26667, RMSE:  1.66828, elapse: 0.000 min
+  - [Info] Maximum ll: -3.69849, Maximum accuracy:  0.26667, Minimum RMSE:  1.66816
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 8 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.70258, accuracy:  0.26667, RMSE:  1.66452, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.67957, accuracy:  0.26667, RMSE:  1.66841, elapse: 0.000 min
+  - [Info] Maximum ll: -3.67957, Maximum accuracy:  0.26667, Minimum RMSE:  1.66816
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 9 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.66420, accuracy:  0.26667, RMSE:  1.67909, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.66065, accuracy:  0.26667, RMSE:  1.66832, elapse: 0.000 min
+  - [Info] Maximum ll: -3.66065, Maximum accuracy:  0.26667, Minimum RMSE:  1.66816
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 10 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.65312, accuracy:  0.26667, RMSE:  1.66064, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.64176, accuracy:  0.26667, RMSE:  1.66806, elapse: 0.000 min
+  - [Info] Maximum ll: -3.64176, Maximum accuracy:  0.26667, Minimum RMSE:  1.66806
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 11 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.63954, accuracy:  0.26667, RMSE:  1.66567, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.62317, accuracy:  0.26667, RMSE:  1.66755, elapse: 0.000 min
+  - [Info] Maximum ll: -3.62317, Maximum accuracy:  0.26667, Minimum RMSE:  1.66755
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 12 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.60856, accuracy:  0.26667, RMSE:  1.67148, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.60467, accuracy:  0.26667, RMSE:  1.66716, elapse: 0.000 min
+  - [Info] Maximum ll: -3.60467, Maximum accuracy:  0.26667, Minimum RMSE:  1.66716
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 13 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.61279, accuracy:  0.26667, RMSE:  1.67690, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.58638, accuracy:  0.26667, RMSE:  1.66665, elapse: 0.000 min
+  - [Info] Maximum ll: -3.58638, Maximum accuracy:  0.26667, Minimum RMSE:  1.66665
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 14 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.58152, accuracy:  0.26667, RMSE:  1.67156, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.56857, accuracy:  0.26667, RMSE:  1.66535, elapse: 0.000 min
+  - [Info] Maximum ll: -3.56857, Maximum accuracy:  0.26667, Minimum RMSE:  1.66535
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 15 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.56985, accuracy:  0.26667, RMSE:  1.67690, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.55122, accuracy:  0.26667, RMSE:  1.66358, elapse: 0.000 min
+  - [Info] Maximum ll: -3.55122, Maximum accuracy:  0.26667, Minimum RMSE:  1.66358
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 16 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.55207, accuracy:  0.26667, RMSE:  1.66813, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.53424, accuracy:  0.26667, RMSE:  1.66179, elapse: 0.000 min
+  - [Info] Maximum ll: -3.53424, Maximum accuracy:  0.26667, Minimum RMSE:  1.66179
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 17 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.54676, accuracy:  0.26667, RMSE:  1.71256, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.51784, accuracy:  0.26667, RMSE:  1.65960, elapse: 0.000 min
+  - [Info] Maximum ll: -3.51784, Maximum accuracy:  0.26667, Minimum RMSE:  1.65960
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 18 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.52374, accuracy:  0.26667, RMSE:  1.66993, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.50189, accuracy:  0.26667, RMSE:  1.65749, elapse: 0.000 min
+  - [Info] Maximum ll: -3.50189, Maximum accuracy:  0.26667, Minimum RMSE:  1.65749
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 19 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.49703, accuracy:  0.26667, RMSE:  1.65638, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.48638, accuracy:  0.26667, RMSE:  1.65549, elapse: 0.000 min
+  - [Info] Maximum ll: -3.48638, Maximum accuracy:  0.26667, Minimum RMSE:  1.65549
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[ Epoch 20 ]
+
+  - (Training)   :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Training)    loglikelihood: -3.48118, accuracy:  0.26667, RMSE:  1.64920, elapse: 0.001 min
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Validation)  loglikelihood: -3.47154, accuracy:  0.26667, RMSE:  1.65331, elapse: 0.000 min
+  - [Info] Maximum ll: -3.47154, Maximum accuracy:  0.26667, Minimum RMSE:  1.65331
+  - [Info] Saved best checkpoint: /tmp/thp_experiment_inc3e10l/best_model.pt
+[Info] Restored epoch 20 selected by ll=-3.47154
+
+  - (Validation) :   0%|          | 0/1 [00:00<?, ?it/s]
+                                                        
+  - (Final Test)   loglikelihood: -3.38716, accuracy:  0.16114, RMSE:  2.00097, elapse: 0.004 min
+[Info] Final test metrics saved to /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16/csv/test_metrics.csv
+Saved likelihood, RMSE and accuracy plots for train/validation
+Archive contains only log/, csv/, and plot/
+Result directory: /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16
+Archive: /home/zt/zimo/Benchmark/Evaluation/results/continual/THP/sequential/seed_7/native/task_09/adaptation/K_16.tar.gz

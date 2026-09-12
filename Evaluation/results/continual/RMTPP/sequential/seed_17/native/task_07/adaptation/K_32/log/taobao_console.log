@@ -1,0 +1,61 @@
+2026-09-12 17:41:36,941 INFO Preparing taobao with seed=17
+2026-09-12 17:41:36,943 INFO Time stats: median=0.332698, mean=1.043965, p99=10.191778, max=12.700410
+2026-09-12 17:41:36,956 CRITICAL Load pipeline config class RunnerConfig
+2026-09-12 17:41:37,058 CRITICAL train model RMTPP using GPU with torch backend
+2026-09-12 17:41:37,069 INFO Save the config to /tmp/rmtpp_baseline_cache/taobao_uzu6_q79/runtime/350911_140625546351808_260912-174136/RMTPP_train_output.yaml
+2026-09-12 17:41:37,069 INFO Save the log to /tmp/rmtpp_baseline_cache/taobao_uzu6_q79/runtime/350911_140625546351808_260912-174136/log
+2026-09-12 17:41:40,435 INFO Num of model parameters 9560
+2026-09-12 17:41:41,480 INFO [Epoch 1/25] lr=1.00e-03 | train LL=-3.196675, RMSE=3.169484, accuracy=0.193548 | valid LL=-3.196675, RMSE=3.182747, accuracy=0.129032
+2026-09-12 17:41:41,483 INFO Saved new best checkpoint at epoch 1 (loglike=-3.196675)
+2026-09-12 17:41:41,514 INFO [Epoch 2/25] lr=1.00e-03 | train LL=-3.083942, RMSE=3.015490, accuracy=0.225806 | valid LL=-3.083942, RMSE=2.920735, accuracy=0.161290
+2026-09-12 17:41:41,516 INFO Saved new best checkpoint at epoch 2 (loglike=-3.083942)
+2026-09-12 17:41:41,547 INFO [Epoch 3/25] lr=1.00e-03 | train LL=-3.039789, RMSE=2.927853, accuracy=0.290323 | valid LL=-3.039789, RMSE=2.832407, accuracy=0.193548
+2026-09-12 17:41:41,549 INFO Saved new best checkpoint at epoch 3 (loglike=-3.039789)
+2026-09-12 17:41:41,580 INFO [Epoch 4/25] lr=1.00e-03 | train LL=-2.989197, RMSE=2.888830, accuracy=0.322581 | valid LL=-2.989197, RMSE=2.804530, accuracy=0.258065
+2026-09-12 17:41:41,583 INFO Saved new best checkpoint at epoch 4 (loglike=-2.989197)
+2026-09-12 17:41:41,614 INFO [Epoch 5/25] lr=1.00e-03 | train LL=-2.950291, RMSE=2.886317, accuracy=0.354839 | valid LL=-2.950291, RMSE=2.824118, accuracy=0.354839
+2026-09-12 17:41:41,616 INFO Saved new best checkpoint at epoch 5 (loglike=-2.950291)
+2026-09-12 17:41:41,648 INFO [Epoch 6/25] lr=1.00e-03 | train LL=-2.916045, RMSE=2.898402, accuracy=0.354839 | valid LL=-2.916045, RMSE=2.783275, accuracy=0.322581
+2026-09-12 17:41:41,650 INFO Saved new best checkpoint at epoch 6 (loglike=-2.916045)
+2026-09-12 17:41:41,680 INFO [Epoch 7/25] lr=1.00e-03 | train LL=-2.892169, RMSE=2.912192, accuracy=0.387097 | valid LL=-2.892169, RMSE=2.790030, accuracy=0.290323
+2026-09-12 17:41:41,682 INFO Saved new best checkpoint at epoch 7 (loglike=-2.892169)
+2026-09-12 17:41:41,714 INFO [Epoch 8/25] lr=1.00e-03 | train LL=-2.870236, RMSE=2.893916, accuracy=0.387097 | valid LL=-2.870236, RMSE=2.788098, accuracy=0.322581
+2026-09-12 17:41:41,716 INFO Saved new best checkpoint at epoch 8 (loglike=-2.870236)
+2026-09-12 17:41:41,747 INFO [Epoch 9/25] lr=1.00e-03 | train LL=-2.844256, RMSE=2.845200, accuracy=0.387097 | valid LL=-2.844256, RMSE=2.759407, accuracy=0.322581
+2026-09-12 17:41:41,749 INFO Saved new best checkpoint at epoch 9 (loglike=-2.844256)
+2026-09-12 17:41:41,781 INFO [Epoch 10/25] lr=1.00e-03 | train LL=-2.815108, RMSE=2.788038, accuracy=0.387097 | valid LL=-2.815108, RMSE=2.725616, accuracy=0.354839
+2026-09-12 17:41:41,783 INFO Saved new best checkpoint at epoch 10 (loglike=-2.815108)
+2026-09-12 17:41:41,814 INFO [Epoch 11/25] lr=1.00e-03 | train LL=-2.783803, RMSE=2.736174, accuracy=0.354839 | valid LL=-2.783803, RMSE=2.699696, accuracy=0.354839
+2026-09-12 17:41:41,816 INFO Saved new best checkpoint at epoch 11 (loglike=-2.783803)
+2026-09-12 17:41:41,848 INFO [Epoch 12/25] lr=1.00e-03 | train LL=-2.763879, RMSE=2.701113, accuracy=0.354839 | valid LL=-2.763879, RMSE=2.668462, accuracy=0.354839
+2026-09-12 17:41:41,850 INFO Saved new best checkpoint at epoch 12 (loglike=-2.763879)
+2026-09-12 17:41:41,881 INFO [Epoch 13/25] lr=1.00e-03 | train LL=-2.741217, RMSE=2.695895, accuracy=0.354839 | valid LL=-2.741217, RMSE=2.667509, accuracy=0.354839
+2026-09-12 17:41:41,883 INFO Saved new best checkpoint at epoch 13 (loglike=-2.741217)
+2026-09-12 17:41:41,916 INFO [Epoch 14/25] lr=1.00e-03 | train LL=-2.720454, RMSE=2.715049, accuracy=0.419355 | valid LL=-2.720454, RMSE=2.682109, accuracy=0.387097
+2026-09-12 17:41:41,918 INFO Saved new best checkpoint at epoch 14 (loglike=-2.720454)
+2026-09-12 17:41:41,949 INFO [Epoch 15/25] lr=1.00e-03 | train LL=-2.713209, RMSE=2.741756, accuracy=0.419355 | valid LL=-2.713209, RMSE=2.705114, accuracy=0.419355
+2026-09-12 17:41:41,951 INFO Saved new best checkpoint at epoch 15 (loglike=-2.713209)
+2026-09-12 17:41:41,982 INFO [Epoch 16/25] lr=1.00e-03 | train LL=-2.697155, RMSE=2.755833, accuracy=0.419355 | valid LL=-2.697155, RMSE=2.711075, accuracy=0.387097
+2026-09-12 17:41:41,985 INFO Saved new best checkpoint at epoch 16 (loglike=-2.697155)
+2026-09-12 17:41:42,016 INFO [Epoch 17/25] lr=1.00e-03 | train LL=-2.675739, RMSE=2.762355, accuracy=0.419355 | valid LL=-2.675739, RMSE=2.703785, accuracy=0.387097
+2026-09-12 17:41:42,018 INFO Saved new best checkpoint at epoch 17 (loglike=-2.675739)
+2026-09-12 17:41:42,049 INFO [Epoch 18/25] lr=1.00e-03 | train LL=-2.658194, RMSE=2.758378, accuracy=0.419355 | valid LL=-2.658194, RMSE=3.081318, accuracy=0.354839
+2026-09-12 17:41:42,051 INFO Saved new best checkpoint at epoch 18 (loglike=-2.658194)
+2026-09-12 17:41:42,083 INFO [Epoch 19/25] lr=1.00e-03 | train LL=-2.645078, RMSE=2.744186, accuracy=0.451613 | valid LL=-2.645078, RMSE=3.051860, accuracy=0.387097
+2026-09-12 17:41:42,085 INFO Saved new best checkpoint at epoch 19 (loglike=-2.645078)
+2026-09-12 17:41:42,116 INFO [Epoch 20/25] lr=1.00e-03 | train LL=-2.631427, RMSE=2.727303, accuracy=0.451613 | valid LL=-2.631427, RMSE=3.023956, accuracy=0.354839
+2026-09-12 17:41:42,118 INFO Saved new best checkpoint at epoch 20 (loglike=-2.631427)
+2026-09-12 17:41:42,151 INFO [Epoch 21/25] lr=1.00e-03 | train LL=-2.617306, RMSE=2.716048, accuracy=0.419355 | valid LL=-2.617306, RMSE=3.003945, accuracy=0.387097
+2026-09-12 17:41:42,153 INFO Saved new best checkpoint at epoch 21 (loglike=-2.617306)
+2026-09-12 17:41:42,185 INFO [Epoch 22/25] lr=1.00e-03 | train LL=-2.604140, RMSE=2.714600, accuracy=0.419355 | valid LL=-2.604140, RMSE=2.997640, accuracy=0.387097
+2026-09-12 17:41:42,187 INFO Saved new best checkpoint at epoch 22 (loglike=-2.604140)
+2026-09-12 17:41:42,219 INFO [Epoch 23/25] lr=1.00e-03 | train LL=-2.589689, RMSE=2.723131, accuracy=0.419355 | valid LL=-2.589689, RMSE=3.002587, accuracy=0.387097
+2026-09-12 17:41:42,222 INFO Saved new best checkpoint at epoch 23 (loglike=-2.589689)
+2026-09-12 17:41:42,253 INFO [Epoch 24/25] lr=1.00e-03 | train LL=-2.573711, RMSE=2.738070, accuracy=0.419355 | valid LL=-2.573711, RMSE=3.014060, accuracy=0.387097
+2026-09-12 17:41:42,255 INFO Saved new best checkpoint at epoch 24 (loglike=-2.573711)
+2026-09-12 17:41:42,287 INFO [Epoch 25/25] lr=1.00e-03 | train LL=-2.561046, RMSE=2.750375, accuracy=0.419355 | valid LL=-2.561046, RMSE=3.022886, accuracy=0.419355
+2026-09-12 17:41:42,289 INFO Saved new best checkpoint at epoch 25 (loglike=-2.561046)
+2026-09-12 17:41:42,361 INFO Final test from best epoch 25: LL=-4.940185, RMSE=2.355252, accuracy=0.195960
+2026-09-12 17:41:44,700 INFO Saved plots to /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_07/adaptation/K_32/plot
+2026-09-12 17:41:44,700 INFO RMTPP taobao experiment complete
+2026-09-12 17:41:44,700 INFO Archive contains only log/, csv/, and plot/

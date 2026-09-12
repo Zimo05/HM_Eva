@@ -65,6 +65,31 @@ def stationary_command(
         if batch:
             command += ["--batch-size", str(batch)]
         return command, MODELS_ROOT / spec.model, env
+    if spec.model in {"S2P2", "AttNHP"}:
+        script = MODELS_ROOT / "EasyTPP" / "run_experiment.py"
+        dataset = f"dws_{args.variant}" if spec.dataset == "dws" else spec.dataset
+        command = [
+            python,
+            str(script),
+            "--model", spec.model,
+            "--dataset", dataset,
+            "--seed", str(args.seed),
+            "--device", device,
+            "--output-dir", str(native),
+            "--archive", str(result_dir / "native.tar.gz"),
+            "--overwrite",
+        ]
+        if spec.dataset == "dws":
+            command += ["--variant", args.variant]
+        if prepared is not None:
+            command += ["--prepared-data-dir", str(prepared)]
+        if epochs:
+            command += ["--epochs", str(epochs)]
+        if batch:
+            command += ["--batch-size", str(batch)]
+        if getattr(args, "smoke", False):
+            command += ["--max-sequences", "4", "--max-events-per-sequence", "16"]
+        return command, MODELS_ROOT / "EasyTPP", env
     if spec.model == "THP":
         script = MODELS_ROOT / "THP" / "run_experiment.py"
         dataset = f"dws_{args.variant}" if spec.dataset == "dws" else spec.dataset

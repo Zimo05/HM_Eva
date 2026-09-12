@@ -1,0 +1,32 @@
+2026-09-12 17:45:13,690 INFO Preparing taobao with seed=17
+2026-09-12 17:45:13,717 INFO Time stats: median=0.662504, mean=1.417621, p99=10.201814, max=28.863838
+2026-09-12 17:45:13,730 CRITICAL Load pipeline config class RunnerConfig
+2026-09-12 17:45:13,826 CRITICAL train model RMTPP using GPU with torch backend
+2026-09-12 17:45:13,837 INFO Save the config to /tmp/rmtpp_baseline_cache/taobao_555dvrl1/runtime/355669_140113889080512_260912-174513/RMTPP_train_output.yaml
+2026-09-12 17:45:13,837 INFO Save the log to /tmp/rmtpp_baseline_cache/taobao_555dvrl1/runtime/355669_140113889080512_260912-174513/log
+2026-09-12 17:45:17,411 INFO Num of model parameters 9560
+2026-09-12 17:45:18,988 INFO [Epoch 1/25] lr=1.00e-03 | train LL=-72.322141, RMSE=3.434646, accuracy=0.239036 | valid LL=-4.285217, RMSE=3.072908, accuracy=0.249639
+2026-09-12 17:45:18,991 INFO Saved new best checkpoint at epoch 1 (loglike=-4.285217)
+2026-09-12 17:45:19,367 INFO [Epoch 2/25] lr=1.00e-03 | train LL=-50.116240, RMSE=3.485081, accuracy=0.252749 | valid LL=-4.341706, RMSE=3.114497, accuracy=0.275181
+2026-09-12 17:45:19,668 INFO [Epoch 3/25] lr=1.00e-03 | train LL=-30.365634, RMSE=3.432926, accuracy=0.253613 | valid LL=-4.361804, RMSE=3.060940, accuracy=0.265542
+2026-09-12 17:45:19,959 INFO [Epoch 4/25] lr=1.00e-03 | train LL=-16.308878, RMSE=3.348789, accuracy=0.251884 | valid LL=-4.373156, RMSE=2.977277, accuracy=0.268916
+2026-09-12 17:45:20,253 INFO [Epoch 5/25] lr=1.00e-03 | train LL=-9.740562, RMSE=3.324116, accuracy=0.248919 | valid LL=-4.384788, RMSE=2.961804, accuracy=0.266024
+2026-09-12 17:45:20,556 INFO [Epoch 6/25] lr=1.00e-03 | train LL=-7.808812, RMSE=3.319791, accuracy=0.250772 | valid LL=-4.395337, RMSE=2.949256, accuracy=0.262651
+2026-09-12 17:45:20,556 INFO Reduced learning rate from 1.00e-03 to 3.00e-04
+2026-09-12 17:45:20,848 INFO [Epoch 7/25] lr=3.00e-04 | train LL=-7.542578, RMSE=3.331384, accuracy=0.252007 | valid LL=-4.396802, RMSE=2.966237, accuracy=0.266024
+2026-09-12 17:45:21,142 INFO [Epoch 8/25] lr=3.00e-04 | train LL=-7.340726, RMSE=3.353425, accuracy=0.252749 | valid LL=-4.397632, RMSE=2.976762, accuracy=0.268434
+2026-09-12 17:45:21,442 INFO [Epoch 9/25] lr=3.00e-04 | train LL=-7.210386, RMSE=3.369964, accuracy=0.252625 | valid LL=-4.398245, RMSE=2.984884, accuracy=0.263614
+2026-09-12 17:45:21,746 INFO [Epoch 10/25] lr=3.00e-04 | train LL=-7.102173, RMSE=3.391640, accuracy=0.255219 | valid LL=-4.398757, RMSE=2.996191, accuracy=0.271325
+2026-09-12 17:45:22,093 INFO [Epoch 11/25] lr=3.00e-04 | train LL=-6.996171, RMSE=3.402802, accuracy=0.254972 | valid LL=-4.399307, RMSE=2.998784, accuracy=0.268434
+2026-09-12 17:45:22,093 INFO Reduced learning rate from 3.00e-04 to 9.00e-05
+2026-09-12 17:45:22,408 INFO [Epoch 12/25] lr=9.00e-05 | train LL=-6.966453, RMSE=3.407514, accuracy=0.255096 | valid LL=-4.399553, RMSE=3.016314, accuracy=0.270843
+2026-09-12 17:45:22,718 INFO [Epoch 13/25] lr=9.00e-05 | train LL=-6.942246, RMSE=3.413817, accuracy=0.254849 | valid LL=-4.399577, RMSE=3.018687, accuracy=0.270843
+2026-09-12 17:45:23,013 INFO [Epoch 14/25] lr=9.00e-05 | train LL=-6.920826, RMSE=3.414496, accuracy=0.254972 | valid LL=-4.399508, RMSE=3.021313, accuracy=0.272289
+2026-09-12 17:45:23,316 INFO [Epoch 15/25] lr=9.00e-05 | train LL=-6.894121, RMSE=3.416425, accuracy=0.255343 | valid LL=-4.399554, RMSE=3.024284, accuracy=0.271325
+2026-09-12 17:45:23,617 INFO [Epoch 16/25] lr=9.00e-05 | train LL=-6.874445, RMSE=3.420543, accuracy=0.254107 | valid LL=-4.399503, RMSE=3.025777, accuracy=0.271325
+2026-09-12 17:45:23,617 INFO Reduced learning rate from 9.00e-05 to 2.70e-05
+2026-09-12 17:45:23,617 INFO Early stopping at epoch 16 after 15 epochs without loglike improvement
+2026-09-12 17:45:23,714 INFO Final test from best epoch 1: LL=-4.633898, RMSE=3.134557, accuracy=0.231701
+2026-09-12 17:45:26,112 INFO Saved plots to /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_08/train/plot
+2026-09-12 17:45:26,113 INFO RMTPP taobao experiment complete
+2026-09-12 17:45:26,113 INFO Archive contains only log/, csv/, and plot/

@@ -1,0 +1,34 @@
+2026-09-12 17:41:50,717 INFO Preparing taobao with seed=17
+2026-09-12 17:41:50,743 INFO Time stats: median=0.734036, mean=1.507722, p99=9.810006, max=25.760088
+2026-09-12 17:41:50,757 CRITICAL Load pipeline config class RunnerConfig
+2026-09-12 17:41:50,878 CRITICAL train model RMTPP using GPU with torch backend
+2026-09-12 17:41:50,888 INFO Save the config to /tmp/rmtpp_baseline_cache/taobao_oqwkgxsz/runtime/351146_139757998687424_260912-174150/RMTPP_train_output.yaml
+2026-09-12 17:41:50,889 INFO Save the log to /tmp/rmtpp_baseline_cache/taobao_oqwkgxsz/runtime/351146_139757998687424_260912-174150/log
+2026-09-12 17:41:54,318 INFO Num of model parameters 9560
+2026-09-12 17:41:55,791 INFO [Epoch 1/25] lr=1.00e-03 | train LL=-10.519140, RMSE=4.074500, accuracy=0.236773 | valid LL=-4.461555, RMSE=4.106201, accuracy=0.218809
+2026-09-12 17:41:55,793 INFO Saved new best checkpoint at epoch 1 (loglike=-4.461555)
+2026-09-12 17:41:56,101 INFO [Epoch 2/25] lr=1.00e-03 | train LL=-6.474940, RMSE=4.081068, accuracy=0.233163 | valid LL=-4.443558, RMSE=3.292551, accuracy=0.222590
+2026-09-12 17:41:56,103 INFO Saved new best checkpoint at epoch 2 (loglike=-4.443558)
+2026-09-12 17:41:56,408 INFO [Epoch 3/25] lr=1.00e-03 | train LL=-5.178344, RMSE=4.238290, accuracy=0.240010 | valid LL=-4.505419, RMSE=3.455456, accuracy=0.219754
+2026-09-12 17:41:56,705 INFO [Epoch 4/25] lr=1.00e-03 | train LL=-4.942739, RMSE=3.852467, accuracy=0.243745 | valid LL=-4.498032, RMSE=3.195010, accuracy=0.230624
+2026-09-12 17:41:57,014 INFO [Epoch 5/25] lr=1.00e-03 | train LL=-4.801405, RMSE=3.739896, accuracy=0.252832 | valid LL=-4.484090, RMSE=3.079102, accuracy=0.231569
+2026-09-12 17:41:57,302 INFO [Epoch 6/25] lr=1.00e-03 | train LL=-4.763753, RMSE=3.707498, accuracy=0.249969 | valid LL=-4.473012, RMSE=3.056189, accuracy=0.238185
+2026-09-12 17:41:57,597 INFO [Epoch 7/25] lr=1.00e-03 | train LL=-4.746915, RMSE=3.746416, accuracy=0.250093 | valid LL=-4.465219, RMSE=3.092031, accuracy=0.237240
+2026-09-12 17:41:57,597 INFO Reduced learning rate from 1.00e-03 to 3.00e-04
+2026-09-12 17:41:57,887 INFO [Epoch 8/25] lr=3.00e-04 | train LL=-4.743580, RMSE=3.757208, accuracy=0.248226 | valid LL=-4.463943, RMSE=3.106548, accuracy=0.235822
+2026-09-12 17:41:58,184 INFO [Epoch 9/25] lr=3.00e-04 | train LL=-4.740871, RMSE=3.766200, accuracy=0.245985 | valid LL=-4.463138, RMSE=3.108296, accuracy=0.236767
+2026-09-12 17:41:58,475 INFO [Epoch 10/25] lr=3.00e-04 | train LL=-4.738657, RMSE=3.787201, accuracy=0.243620 | valid LL=-4.462681, RMSE=3.119133, accuracy=0.235350
+2026-09-12 17:41:58,786 INFO [Epoch 11/25] lr=3.00e-04 | train LL=-4.736510, RMSE=3.787160, accuracy=0.244740 | valid LL=-4.462577, RMSE=3.119541, accuracy=0.231096
+2026-09-12 17:41:59,075 INFO [Epoch 12/25] lr=3.00e-04 | train LL=-4.734640, RMSE=3.784779, accuracy=0.244367 | valid LL=-4.462503, RMSE=3.115056, accuracy=0.228261
+2026-09-12 17:41:59,075 INFO Reduced learning rate from 3.00e-04 to 9.00e-05
+2026-09-12 17:41:59,375 INFO [Epoch 13/25] lr=9.00e-05 | train LL=-4.734085, RMSE=3.784293, accuracy=0.245487 | valid LL=-4.462519, RMSE=3.114139, accuracy=0.229206
+2026-09-12 17:41:59,668 INFO [Epoch 14/25] lr=9.00e-05 | train LL=-4.733542, RMSE=3.781894, accuracy=0.245114 | valid LL=-4.462511, RMSE=3.116757, accuracy=0.229206
+2026-09-12 17:41:59,986 INFO [Epoch 15/25] lr=9.00e-05 | train LL=-4.732998, RMSE=3.779544, accuracy=0.245114 | valid LL=-4.462521, RMSE=3.120650, accuracy=0.228733
+2026-09-12 17:42:00,308 INFO [Epoch 16/25] lr=9.00e-05 | train LL=-4.732484, RMSE=3.778850, accuracy=0.244616 | valid LL=-4.462516, RMSE=3.128026, accuracy=0.227316
+2026-09-12 17:42:00,598 INFO [Epoch 17/25] lr=9.00e-05 | train LL=-4.731899, RMSE=3.781264, accuracy=0.245612 | valid LL=-4.462605, RMSE=3.127912, accuracy=0.227788
+2026-09-12 17:42:00,598 INFO Reduced learning rate from 9.00e-05 to 2.70e-05
+2026-09-12 17:42:00,599 INFO Early stopping at epoch 17 after 15 epochs without loglike improvement
+2026-09-12 17:42:00,694 INFO Final test from best epoch 2: LL=-4.384772, RMSE=3.292105, accuracy=0.225515
+2026-09-12 17:42:03,124 INFO Saved plots to /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_07/train/plot
+2026-09-12 17:42:03,124 INFO RMTPP taobao experiment complete
+2026-09-12 17:42:03,125 INFO Archive contains only log/, csv/, and plot/

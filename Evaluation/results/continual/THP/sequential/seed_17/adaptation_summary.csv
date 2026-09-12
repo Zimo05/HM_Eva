@@ -1,0 +1,10 @@
+protocol,task_id,K_min,K_max,K_count,adaptation_auc,status
+baseline,1,0,32,7,-0.23682484375000018,available
+baseline,2,0,32,7,0.03318703125000021,available
+baseline,3,0,32,7,-0.2826809375000001,available
+baseline,4,0,32,7,-0.1825421875,available
+baseline,5,0,32,7,-0.7310090625000002,available
+baseline,6,0,32,7,-0.23983843750000006,available
+baseline,7,0,32,7,-0.5194554687499998,available
+baseline,8,0,32,7,-0.487268125,available
+baseline,9,0,32,7,-0.22435906249999987,available

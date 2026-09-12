@@ -42,6 +42,7 @@ def main() -> None:
         project_root / "_data_configuration_common.py",
         project_root / "Models" / "RMTPP" / "run_experiment.py",
         project_root / "Models" / "THP" / "run_experiment.py",
+        project_root / "Models" / "EasyTPP" / "run_experiment.py",
         project_root / "Models" / "TPP-LLM" / "scripts" / "train_tpp_llm.py",
         project_root / "Models" / "FullyNN" / "run_experiment.py",
         project_root / "Models" / "HawkesMemory" / "Memory" / "Train" / "Train.py",

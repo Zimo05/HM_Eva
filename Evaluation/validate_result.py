@@ -28,7 +28,7 @@ def validate(path: Path) -> list[str]:
             errors.append(f"input hash changed: {source}")
     if manifest.get("dataset") == "dws" and not manifest.get("arguments", {}).get("checkpoint"):
         prepared = path / "prepared" / "split_manifest.json"
-        if manifest.get("model") == "HM" and prepared.exists():
+        if manifest.get("model") in {"HM", "S2P2", "AttNHP"} and prepared.exists():
             split = json.loads(prepared.read_text(encoding="utf-8"))
             if not split.get("oracle_fields_hidden_from_model"):
                 errors.append("DWS split lacks oracle-isolation declaration")

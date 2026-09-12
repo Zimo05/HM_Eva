@@ -3,8 +3,16 @@ from __future__ import annotations
 import csv
 import json
 import pickle
+import sys
 from pathlib import Path
 from typing import Any, Mapping
+
+# Public Evaluation entry points are commonly launched from the Evaluation
+# directory, while this shared adapter lives one level below the repository
+# root.  Make the root helper importable in both launch modes.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from _data_configuration_common import DWS_SPLIT_RATIOS, dws_split_indices, load_dws_file
 
@@ -495,7 +503,7 @@ def prepare_continual_baseline_dataset(
             if model == "TPP_LLM":
                 payload = [dict(record, type_text=[f"event_{value}" for value in record["type_event"]]) for record in records]
             write_json(output / f"{split}.json", payload)
-    elif model == "THP":
+    elif model in {"THP", "S2P2", "AttNHP"}:
         for split, records in (("train", train), ("dev", dev), ("test", test)):
             streams = []
             for record in records:

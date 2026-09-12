@@ -1,0 +1,71 @@
+[38;20m2026-09-12 17:27:02,718 - run_experiment.py[pid:336574;line:678:main] - INFO: Preparing taobao with seed=17[0m
+[38;20m2026-09-12 17:27:02,719 - run_experiment.py[pid:336574;line:686:main] - INFO: Time stats: median=3.204915, mean=3.204915, p99=3.204915, max=3.204915[0m
+[31;1m2026-09-12 17:27:02,733 - config.py[pid:336574;line:34:build_from_yaml_file] - CRITICAL: Load pipeline config class RunnerConfig[0m
+[31;1m2026-09-12 17:27:02,833 - runner_config.py[pid:336574;line:141:update_config] - CRITICAL: train model RMTPP using GPU with torch backend[0m
+[38;20m2026-09-12 17:27:02,843 - runner_config.py[pid:336574;line:35:__init__] - INFO: Save the config to /tmp/rmtpp_baseline_cache/taobao_yj95a3_m/runtime/336574_140490571056320_260912-172702/RMTPP_train_output.yaml[0m
+[38;20m2026-09-12 17:27:02,844 - base_runner.py[pid:336574;line:176:save_log] - INFO: Save the log to /tmp/rmtpp_baseline_cache/taobao_yj95a3_m/runtime/336574_140490571056320_260912-172702/log[0m
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 1 examples [00:00, 227.05 examples/s]
+1.602457685 2.266217391255993
+min_dt: 3.20491537
+max_dt: 3.20491537
+[38;20m2026-09-12 17:27:06,230 - tpp_runner.py[pid:336574;line:62:_init_model] - INFO: Num of model parameters 9560[0m
+Generating validation split: 0 examples [00:00, ? examples/s]Generating validation split: 1 examples [00:00, 21.63 examples/s]
+Generating test split: 0 examples [00:00, ? examples/s]Generating test split: 16 examples [00:00, 2348.19 examples/s]
+[38;20m2026-09-12 17:27:07,472 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 1/25] lr=1.00e-03 | train LL=-3.081884, RMSE=2.334914, accuracy=1.000000 | valid LL=-3.081884, RMSE=2.995540, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:07,474 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 1 (loglike=-3.081884)[0m
+[38;20m2026-09-12 17:27:07,543 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 2/25] lr=1.00e-03 | train LL=-3.001177, RMSE=2.313680, accuracy=1.000000 | valid LL=-3.001177, RMSE=2.990430, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:07,545 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 2 (loglike=-3.001177)[0m
+[38;20m2026-09-12 17:27:07,608 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 3/25] lr=1.00e-03 | train LL=-2.927047, RMSE=2.298122, accuracy=1.000000 | valid LL=-2.927047, RMSE=2.986685, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:07,610 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 3 (loglike=-2.927047)[0m
+[38;20m2026-09-12 17:27:07,684 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 4/25] lr=1.00e-03 | train LL=-2.859693, RMSE=2.286497, accuracy=1.000000 | valid LL=-2.859693, RMSE=2.983888, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:07,686 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 4 (loglike=-2.859693)[0m
+[38;20m2026-09-12 17:27:07,747 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 5/25] lr=1.00e-03 | train LL=-2.799157, RMSE=2.276831, accuracy=1.000000 | valid LL=-2.799157, RMSE=2.981562, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:07,749 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 5 (loglike=-2.799157)[0m
+[38;20m2026-09-12 17:27:07,823 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 6/25] lr=1.00e-03 | train LL=-2.745140, RMSE=2.267527, accuracy=1.000000 | valid LL=-2.745140, RMSE=2.979323, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:07,825 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 6 (loglike=-2.745140)[0m
+[38;20m2026-09-12 17:27:07,886 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 7/25] lr=1.00e-03 | train LL=-2.697137, RMSE=2.258424, accuracy=1.000000 | valid LL=-2.697137, RMSE=2.977132, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:07,888 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 7 (loglike=-2.697137)[0m
+[38;20m2026-09-12 17:27:07,952 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 8/25] lr=1.00e-03 | train LL=-2.654652, RMSE=2.249873, accuracy=1.000000 | valid LL=-2.654652, RMSE=2.975074, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:07,954 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 8 (loglike=-2.654652)[0m
+[38;20m2026-09-12 17:27:08,030 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 9/25] lr=1.00e-03 | train LL=-2.617156, RMSE=2.241899, accuracy=1.000000 | valid LL=-2.617156, RMSE=2.973155, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,032 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 9 (loglike=-2.617156)[0m
+[38;20m2026-09-12 17:27:08,091 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 10/25] lr=1.00e-03 | train LL=-2.584064, RMSE=2.234289, accuracy=1.000000 | valid LL=-2.584064, RMSE=2.971323, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,093 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 10 (loglike=-2.584064)[0m
+[38;20m2026-09-12 17:27:08,168 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 11/25] lr=1.00e-03 | train LL=-2.554750, RMSE=2.226725, accuracy=1.000000 | valid LL=-2.554750, RMSE=2.969503, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,170 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 11 (loglike=-2.554750)[0m
+[38;20m2026-09-12 17:27:08,246 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 12/25] lr=1.00e-03 | train LL=-2.528588, RMSE=2.218825, accuracy=1.000000 | valid LL=-2.528588, RMSE=2.967602, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,248 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 12 (loglike=-2.528588)[0m
+[38;20m2026-09-12 17:27:08,314 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 13/25] lr=1.00e-03 | train LL=-2.504964, RMSE=2.210131, accuracy=1.000000 | valid LL=-2.504964, RMSE=2.965510, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,317 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 13 (loglike=-2.504964)[0m
+[38;20m2026-09-12 17:27:08,388 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 14/25] lr=1.00e-03 | train LL=-2.483304, RMSE=2.200113, accuracy=1.000000 | valid LL=-2.483304, RMSE=2.963099, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,390 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 14 (loglike=-2.483304)[0m
+[38;20m2026-09-12 17:27:08,453 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 15/25] lr=1.00e-03 | train LL=-2.463091, RMSE=2.188209, accuracy=1.000000 | valid LL=-2.463091, RMSE=2.960234, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,455 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 15 (loglike=-2.463091)[0m
+[38;20m2026-09-12 17:27:08,518 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 16/25] lr=1.00e-03 | train LL=-2.443898, RMSE=2.173911, accuracy=1.000000 | valid LL=-2.443898, RMSE=2.956793, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,520 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 16 (loglike=-2.443898)[0m
+[38;20m2026-09-12 17:27:08,592 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 17/25] lr=1.00e-03 | train LL=-2.425428, RMSE=2.156849, accuracy=1.000000 | valid LL=-2.425428, RMSE=2.952687, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,594 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 17 (loglike=-2.425428)[0m
+[38;20m2026-09-12 17:27:08,657 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 18/25] lr=1.00e-03 | train LL=-2.407516, RMSE=2.136743, accuracy=1.000000 | valid LL=-2.407516, RMSE=2.947848, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,659 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 18 (loglike=-2.407516)[0m
+[38;20m2026-09-12 17:27:08,733 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 19/25] lr=1.00e-03 | train LL=-2.390115, RMSE=2.113381, accuracy=1.000000 | valid LL=-2.390115, RMSE=2.942226, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,735 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 19 (loglike=-2.390115)[0m
+[38;20m2026-09-12 17:27:08,799 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 20/25] lr=1.00e-03 | train LL=-2.373270, RMSE=2.086658, accuracy=1.000000 | valid LL=-2.373270, RMSE=2.935794, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,801 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 20 (loglike=-2.373270)[0m
+[38;20m2026-09-12 17:27:08,859 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 21/25] lr=1.00e-03 | train LL=-2.357085, RMSE=2.056581, accuracy=1.000000 | valid LL=-2.357085, RMSE=2.928556, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,862 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 21 (loglike=-2.357085)[0m
+[38;20m2026-09-12 17:27:08,933 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 22/25] lr=1.00e-03 | train LL=-2.341689, RMSE=2.023220, accuracy=1.000000 | valid LL=-2.341689, RMSE=2.920528, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:08,935 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 22 (loglike=-2.341689)[0m
+[38;20m2026-09-12 17:27:08,998 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 23/25] lr=1.00e-03 | train LL=-2.327204, RMSE=1.986637, accuracy=1.000000 | valid LL=-2.327204, RMSE=2.911724, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:09,000 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 23 (loglike=-2.327204)[0m
+[38;20m2026-09-12 17:27:09,071 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 24/25] lr=1.00e-03 | train LL=-2.313738, RMSE=1.946880, accuracy=1.000000 | valid LL=-2.313738, RMSE=2.902155, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:09,074 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 24 (loglike=-2.313738)[0m
+[38;20m2026-09-12 17:27:09,135 - run_experiment.py[pid:336574;line:476:train_and_test] - INFO: [Epoch 25/25] lr=1.00e-03 | train LL=-2.301385, RMSE=1.904039, accuracy=1.000000 | valid LL=-2.301385, RMSE=2.891845, accuracy=1.000000[0m
+[38;20m2026-09-12 17:27:09,137 - run_experiment.py[pid:336574;line:502:train_and_test] - INFO: Saved new best checkpoint at epoch 25 (loglike=-2.301385)[0m
+[38;20m2026-09-12 17:27:09,295 - run_experiment.py[pid:336574;line:548:train_and_test] - INFO: Final test from best epoch 25: LL=-1494.658734, RMSE=5.043732, accuracy=0.265947[0m
+findfont: Failed to find font weight semibold, now using 700.
+[38;20m2026-09-12 17:27:11,563 - run_experiment.py[pid:336574;line:627:plot_metrics] - INFO: Saved plots to /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_03/adaptation/K_02/plot[0m
+[38;20m2026-09-12 17:27:11,563 - run_experiment.py[pid:336574;line:699:main] - INFO: RMTPP taobao experiment complete[0m
+[38;20m2026-09-12 17:27:11,564 - run_experiment.py[pid:336574;line:700:main] - INFO: Archive contains only log/, csv/, and plot/[0m
+[38;20m2026-09-12 17:27:11,613 - run_experiment.py[pid:336574;line:646:create_archive] - INFO: Saved archive to /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_03/adaptation/K_02.tar.gz[0m
+Result directory: /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_03/adaptation/K_02
+Archive: /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_03/adaptation/K_02.tar.gz

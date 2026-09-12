@@ -160,7 +160,11 @@ class EventSampler(nn.Module):
         result_non_accepted_unfiltered = torch.gather(exp_numbers, 3, first_accepted_indexer.unsqueeze(3))
         
         # [batch_size, max_len, num_sample,1]
-        result = torch.where(non_accepted_filter.unsqueeze(3), torch.tensor(self.dtime_max), result_non_accepted_unfiltered)
+        # Keep the fallback on the same device/dtype as the sampled values.
+        # ``torch.tensor(self.dtime_max)`` defaults to CPU and breaks CUDA
+        # evaluation when the adaptive thinning path rejects every draw.
+        fallback = torch.full_like(result_non_accepted_unfiltered, self.dtime_max)
+        result = torch.where(non_accepted_filter.unsqueeze(3), fallback, result_non_accepted_unfiltered)
         
         # [batch_size, max_len, num_sample]
         result = result.squeeze(dim=-1)

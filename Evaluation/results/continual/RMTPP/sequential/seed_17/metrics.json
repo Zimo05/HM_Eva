@@ -1,0 +1,3595 @@
+{
+  "nll_per_event": 5.91864083478369,
+  "accuracy": 0.14370959721531576,
+  "time_rmse": 2.9021735277814704,
+  "continual_summary": [
+    {
+      "checkpoint_task": 0,
+      "seen_law_count": 1,
+      "clnll": 1507.3306744017405,
+      "average_forgetting": 0.0,
+      "average_bwt": null,
+      "bwt_law_count": 0
+    },
+    {
+      "checkpoint_task": 1,
+      "seen_law_count": 2,
+      "clnll": 272.81914651600215,
+      "average_forgetting": 0.0,
+      "average_bwt": 1092.6876963983564,
+      "bwt_law_count": 1
+    },
+    {
+      "checkpoint_task": 2,
+      "seen_law_count": 3,
+      "clnll": 56.466462406304004,
+      "average_forgetting": 0.0,
+      "average_bwt": 782.1937723590888,
+      "bwt_law_count": 2
+    },
+    {
+      "checkpoint_task": 3,
+      "seen_law_count": 3,
+      "clnll": 42.653371633003474,
+      "average_forgetting": 0.0,
+      "average_bwt": 535.2756056793597,
+      "bwt_law_count": 3
+    },
+    {
+      "checkpoint_task": 4,
+      "seen_law_count": 4,
+      "clnll": 77.17700435159841,
+      "average_forgetting": 23.422975740774216,
+      "average_bwt": 504.04497135832753,
+      "bwt_law_count": 3
+    },
+    {
+      "checkpoint_task": 5,
+      "seen_law_count": 5,
+      "clnll": 7.905280202070015,
+      "average_forgetting": 0.0,
+      "average_bwt": 446.5091385057451,
+      "bwt_law_count": 4
+    },
+    {
+      "checkpoint_task": 6,
+      "seen_law_count": 5,
+      "clnll": 20.841976894637774,
+      "average_forgetting": 13.070001196508661,
+      "average_bwt": 344.2706141120283,
+      "bwt_law_count": 5
+    },
+    {
+      "checkpoint_task": 7,
+      "seen_law_count": 6,
+      "clnll": 14.276257877730513,
+      "average_forgetting": 7.068341277139871,
+      "average_bwt": 348.8586057759691,
+      "bwt_law_count": 5
+    },
+    {
+      "checkpoint_task": 8,
+      "seen_law_count": 6,
+      "clnll": 12.395740787959374,
+      "average_forgetting": 5.195470775463605,
+      "average_bwt": 292.59602190307874,
+      "bwt_law_count": 6
+    },
+    {
+      "checkpoint_task": 9,
+      "seen_law_count": 7,
+      "clnll": 8.2615612992784,
+      "average_forgetting": 1.6626589603227349,
+      "average_bwt": 296.1551410168396,
+      "bwt_law_count": 6
+    }
+  ],
+  "transfer": [
+    {
+      "task": 0,
+      "shift_type": "initial",
+      "recurrence_of": null,
+      "adaptation_gain_nll": 7753.637217140107,
+      "forward_transfer_nll": null,
+      "fwt_eligible": false,
+      "fwt_status": "excluded_not_unseen_law_task"
+    },
+    {
+      "task": 1,
+      "shift_type": "novel",
+      "recurrence_of": null,
+      "adaptation_gain_nll": 803.9205355514348,
+      "forward_transfer_nll": 8383.520914396886,
+      "fwt_eligible": true,
+      "fwt_status": "available"
+    },
+    {
+      "task": 2,
+      "shift_type": "novel",
+      "recurrence_of": null,
+      "adaptation_gain_nll": 114.02015100129199,
+      "forward_transfer_nll": 6231.954707687338,
+      "fwt_eligible": true,
+      "fwt_status": "available"
+    },
+    {
+      "task": 3,
+      "shift_type": "exact_recurrence",
+      "recurrence_of": "A_1",
+      "adaptation_gain_nll": 29.77592876926782,
+      "forward_transfer_nll": null,
+      "fwt_eligible": false,
+      "fwt_status": "excluded_not_unseen_law_task"
+    },
+    {
+      "task": 4,
+      "shift_type": "near_recurrence",
+      "recurrence_of": "B_1",
+      "adaptation_gain_nll": 1.1910428091906207,
+      "forward_transfer_nll": 6570.170351306418,
+      "fwt_eligible": true,
+      "fwt_status": "available"
+    },
+    {
+      "task": 5,
+      "shift_type": "specialization",
+      "recurrence_of": "A_1",
+      "adaptation_gain_nll": 0.34311594486954355,
+      "forward_transfer_nll": 7227.266710831661,
+      "fwt_eligible": true,
+      "fwt_status": "available"
+    },
+    {
+      "task": 6,
+      "shift_type": "transient_anomaly",
+      "recurrence_of": "C_1",
+      "adaptation_gain_nll": 0.8902133633863079,
+      "forward_transfer_nll": null,
+      "fwt_eligible": false,
+      "fwt_status": "excluded_not_unseen_law_task"
+    },
+    {
+      "task": 7,
+      "shift_type": "merge",
+      "recurrence_of": "A_1|A_2",
+      "adaptation_gain_nll": 0.08170409420517366,
+      "forward_transfer_nll": 7570.0870151031195,
+      "fwt_eligible": true,
+      "fwt_status": "available"
+    },
+    {
+      "task": 8,
+      "shift_type": "long_gap_recurrence",
+      "recurrence_of": "A_1",
+      "adaptation_gain_nll": 0.013045132998060538,
+      "forward_transfer_nll": null,
+      "fwt_eligible": false,
+      "fwt_status": "excluded_not_unseen_law_task"
+    },
+    {
+      "task": 9,
+      "shift_type": "mixture",
+      "recurrence_of": null,
+      "adaptation_gain_nll": 0.3172516976939326,
+      "forward_transfer_nll": 8119.616917015011,
+      "fwt_eligible": true,
+      "fwt_status": "available"
+    }
+  ],
+  "adaptation_auc": -448.36276543514805,
+  "adaptation": {
+    "points": [
+      {
+        "task_id": 1,
+        "K": 0,
+        "pre_nll": 412.98124397880537,
+        "adapted_nll": 412.98124397880537,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 1,
+        "K": 1,
+        "pre_nll": 412.98124397880537,
+        "adapted_nll": 412.98124397880537,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 1,
+        "K": 2,
+        "pre_nll": 412.98124397880537,
+        "adapted_nll": 3048.622832369942,
+        "protocol": "baseline",
+        "gain_nll": -2635.641588391137
+      },
+      {
+        "task_id": 1,
+        "K": 4,
+        "pre_nll": 412.98124397880537,
+        "adapted_nll": 2640.188342967245,
+        "protocol": "baseline",
+        "gain_nll": -2227.2070989884396
+      },
+      {
+        "task_id": 1,
+        "K": 8,
+        "pre_nll": 412.98124397880537,
+        "adapted_nll": 1463.704479768786,
+        "protocol": "baseline",
+        "gain_nll": -1050.7232357899807
+      },
+      {
+        "task_id": 1,
+        "K": 16,
+        "pre_nll": 412.98124397880537,
+        "adapted_nll": 3327.147880539499,
+        "protocol": "baseline",
+        "gain_nll": -2914.166636560694
+      },
+      {
+        "task_id": 1,
+        "K": 32,
+        "pre_nll": 412.98124397880537,
+        "adapted_nll": 2991.138246628131,
+        "protocol": "baseline",
+        "gain_nll": -2578.157002649326
+      },
+      {
+        "task_id": 2,
+        "K": 0,
+        "pre_nll": 87.78897715988083,
+        "adapted_nll": 87.78897715988083,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 2,
+        "K": 1,
+        "pre_nll": 87.78897715988083,
+        "adapted_nll": 87.78897715988083,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 2,
+        "K": 2,
+        "pre_nll": 87.78897715988083,
+        "adapted_nll": 20.77311941410129,
+        "protocol": "baseline",
+        "gain_nll": 67.01585774577954
+      },
+      {
+        "task_id": 2,
+        "K": 4,
+        "pre_nll": 87.78897715988083,
+        "adapted_nll": 20.685529419066533,
+        "protocol": "baseline",
+        "gain_nll": 67.10344774081429
+      },
+      {
+        "task_id": 2,
+        "K": 8,
+        "pre_nll": 87.78897715988083,
+        "adapted_nll": 226.1469867179742,
+        "protocol": "baseline",
+        "gain_nll": -138.35800955809336
+      },
+      {
+        "task_id": 2,
+        "K": 16,
+        "pre_nll": 87.78897715988083,
+        "adapted_nll": 247.10624069016882,
+        "protocol": "baseline",
+        "gain_nll": -159.317263530288
+      },
+      {
+        "task_id": 2,
+        "K": 32,
+        "pre_nll": 87.78897715988083,
+        "adapted_nll": 20.28904892316286,
+        "protocol": "baseline",
+        "gain_nll": 67.49992823671798
+      },
+      {
+        "task_id": 3,
+        "K": 0,
+        "pre_nll": 1921.751226692836,
+        "adapted_nll": 1921.751226692836,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 3,
+        "K": 1,
+        "pre_nll": 1921.751226692836,
+        "adapted_nll": 1921.751226692836,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 3,
+        "K": 2,
+        "pre_nll": 1921.751226692836,
+        "adapted_nll": 1494.6587340529932,
+        "protocol": "baseline",
+        "gain_nll": 427.09249263984293
+      },
+      {
+        "task_id": 3,
+        "K": 4,
+        "pre_nll": 1921.751226692836,
+        "adapted_nll": 1733.764842983317,
+        "protocol": "baseline",
+        "gain_nll": 187.98638370951903
+      },
+      {
+        "task_id": 3,
+        "K": 8,
+        "pre_nll": 1921.751226692836,
+        "adapted_nll": 1514.8259322865554,
+        "protocol": "baseline",
+        "gain_nll": 406.9252944062807
+      },
+      {
+        "task_id": 3,
+        "K": 16,
+        "pre_nll": 1921.751226692836,
+        "adapted_nll": 1517.1768891069676,
+        "protocol": "baseline",
+        "gain_nll": 404.57433758586853
+      },
+      {
+        "task_id": 3,
+        "K": 32,
+        "pre_nll": 1921.751226692836,
+        "adapted_nll": 1681.9575564278705,
+        "protocol": "baseline",
+        "gain_nll": 239.7936702649656
+      },
+      {
+        "task_id": 4,
+        "K": 0,
+        "pre_nll": 43.48236420398622,
+        "adapted_nll": 43.48236420398622,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 4,
+        "K": 1,
+        "pre_nll": 43.48236420398622,
+        "adapted_nll": 43.48236420398622,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 4,
+        "K": 2,
+        "pre_nll": 43.48236420398622,
+        "adapted_nll": 14.798633965920276,
+        "protocol": "baseline",
+        "gain_nll": 28.683730238065948
+      },
+      {
+        "task_id": 4,
+        "K": 4,
+        "pre_nll": 43.48236420398622,
+        "adapted_nll": 20.00146484375,
+        "protocol": "baseline",
+        "gain_nll": 23.480899360236222
+      },
+      {
+        "task_id": 4,
+        "K": 8,
+        "pre_nll": 43.48236420398622,
+        "adapted_nll": 395.5482283464567,
+        "protocol": "baseline",
+        "gain_nll": -352.0658641424705
+      },
+      {
+        "task_id": 4,
+        "K": 16,
+        "pre_nll": 43.48236420398622,
+        "adapted_nll": 364.4906803641732,
+        "protocol": "baseline",
+        "gain_nll": -321.008316160187
+      },
+      {
+        "task_id": 4,
+        "K": 32,
+        "pre_nll": 43.48236420398622,
+        "adapted_nll": 367.8548228346457,
+        "protocol": "baseline",
+        "gain_nll": -324.3724586306595
+      },
+      {
+        "task_id": 5,
+        "K": 0,
+        "pre_nll": 26.899750931766054,
+        "adapted_nll": 26.899750931766054,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 5,
+        "K": 1,
+        "pre_nll": 26.899750931766054,
+        "adapted_nll": 26.899750931766054,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 5,
+        "K": 2,
+        "pre_nll": 26.899750931766054,
+        "adapted_nll": 9.921327587442661,
+        "protocol": "baseline",
+        "gain_nll": 16.978423344323392
+      },
+      {
+        "task_id": 5,
+        "K": 4,
+        "pre_nll": 26.899750931766054,
+        "adapted_nll": 625.6691513761468,
+        "protocol": "baseline",
+        "gain_nll": -598.7694004443807
+      },
+      {
+        "task_id": 5,
+        "K": 8,
+        "pre_nll": 26.899750931766054,
+        "adapted_nll": 277.01261467889907,
+        "protocol": "baseline",
+        "gain_nll": -250.11286374713302
+      },
+      {
+        "task_id": 5,
+        "K": 16,
+        "pre_nll": 26.899750931766054,
+        "adapted_nll": 405.20452981651374,
+        "protocol": "baseline",
+        "gain_nll": -378.3047788847477
+      },
+      {
+        "task_id": 5,
+        "K": 32,
+        "pre_nll": 26.899750931766054,
+        "adapted_nll": 55.16263618119266,
+        "protocol": "baseline",
+        "gain_nll": -28.262885249426606
+      },
+      {
+        "task_id": 6,
+        "K": 0,
+        "pre_nll": 7.723690654306515,
+        "adapted_nll": 7.723690654306515,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 6,
+        "K": 1,
+        "pre_nll": 7.723690654306515,
+        "adapted_nll": 7.723690654306515,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 6,
+        "K": 2,
+        "pre_nll": 7.723690654306515,
+        "adapted_nll": 7.899340314196693,
+        "protocol": "baseline",
+        "gain_nll": -0.175649659890178
+      },
+      {
+        "task_id": 6,
+        "K": 4,
+        "pre_nll": 7.723690654306515,
+        "adapted_nll": 967.5830454096742,
+        "protocol": "baseline",
+        "gain_nll": -959.8593547553677
+      },
+      {
+        "task_id": 6,
+        "K": 8,
+        "pre_nll": 7.723690654306515,
+        "adapted_nll": 967.3093534057256,
+        "protocol": "baseline",
+        "gain_nll": -959.585662751419
+      },
+      {
+        "task_id": 6,
+        "K": 16,
+        "pre_nll": 7.723690654306515,
+        "adapted_nll": 781.7190893385982,
+        "protocol": "baseline",
+        "gain_nll": -773.9953986842917
+      },
+      {
+        "task_id": 6,
+        "K": 32,
+        "pre_nll": 7.723690654306515,
+        "adapted_nll": 751.2073050345508,
+        "protocol": "baseline",
+        "gain_nll": -743.4836143802443
+      },
+      {
+        "task_id": 7,
+        "K": 0,
+        "pre_nll": 4.44360992739899,
+        "adapted_nll": 4.44360992739899,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 7,
+        "K": 1,
+        "pre_nll": 4.44360992739899,
+        "adapted_nll": 4.44360992739899,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 7,
+        "K": 2,
+        "pre_nll": 4.44360992739899,
+        "adapted_nll": 5.158474885574495,
+        "protocol": "baseline",
+        "gain_nll": -0.7148649581755047
+      },
+      {
+        "task_id": 7,
+        "K": 4,
+        "pre_nll": 4.44360992739899,
+        "adapted_nll": 5.041908341224747,
+        "protocol": "baseline",
+        "gain_nll": -0.5982984138257574
+      },
+      {
+        "task_id": 7,
+        "K": 8,
+        "pre_nll": 4.44360992739899,
+        "adapted_nll": 5.00104462594697,
+        "protocol": "baseline",
+        "gain_nll": -0.5574346985479801
+      },
+      {
+        "task_id": 7,
+        "K": 16,
+        "pre_nll": 4.44360992739899,
+        "adapted_nll": 272.99280303030304,
+        "protocol": "baseline",
+        "gain_nll": -268.54919310290404
+      },
+      {
+        "task_id": 7,
+        "K": 32,
+        "pre_nll": 4.44360992739899,
+        "adapted_nll": 4.940185053661616,
+        "protocol": "baseline",
+        "gain_nll": -0.4965751262626261
+      },
+      {
+        "task_id": 8,
+        "K": 0,
+        "pre_nll": 4.497316535841232,
+        "adapted_nll": 4.497316535841232,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 8,
+        "K": 1,
+        "pre_nll": 4.497316535841232,
+        "adapted_nll": 4.497316535841232,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 8,
+        "K": 2,
+        "pre_nll": 4.497316535841232,
+        "adapted_nll": 51.072996889810426,
+        "protocol": "baseline",
+        "gain_nll": -46.57568035396919
+      },
+      {
+        "task_id": 8,
+        "K": 4,
+        "pre_nll": 4.497316535841232,
+        "adapted_nll": 21.547752517772512,
+        "protocol": "baseline",
+        "gain_nll": -17.05043598193128
+      },
+      {
+        "task_id": 8,
+        "K": 8,
+        "pre_nll": 4.497316535841232,
+        "adapted_nll": 20.385500592417063,
+        "protocol": "baseline",
+        "gain_nll": -15.888184056575831
+      },
+      {
+        "task_id": 8,
+        "K": 16,
+        "pre_nll": 4.497316535841232,
+        "adapted_nll": 77.49544579383887,
+        "protocol": "baseline",
+        "gain_nll": -72.99812925799763
+      },
+      {
+        "task_id": 8,
+        "K": 32,
+        "pre_nll": 4.497316535841232,
+        "adapted_nll": 26.453226821682463,
+        "protocol": "baseline",
+        "gain_nll": -21.95591028584123
+      },
+      {
+        "task_id": 9,
+        "K": 0,
+        "pre_nll": 5.816835631762201,
+        "adapted_nll": 5.816835631762201,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 9,
+        "K": 1,
+        "pre_nll": 5.816835631762201,
+        "adapted_nll": 5.816835631762201,
+        "protocol": "baseline",
+        "gain_nll": 0.0
+      },
+      {
+        "task_id": 9,
+        "K": 2,
+        "pre_nll": 5.816835631762201,
+        "adapted_nll": 6.326946111015193,
+        "protocol": "baseline",
+        "gain_nll": -0.510110479252992
+      },
+      {
+        "task_id": 9,
+        "K": 4,
+        "pre_nll": 5.816835631762201,
+        "adapted_nll": 1668.3590009208103,
+        "protocol": "baseline",
+        "gain_nll": -1662.5421652890482
+      },
+      {
+        "task_id": 9,
+        "K": 8,
+        "pre_nll": 5.816835631762201,
+        "adapted_nll": 1110.211556169429,
+        "protocol": "baseline",
+        "gain_nll": -1104.394720537667
+      },
+      {
+        "task_id": 9,
+        "K": 16,
+        "pre_nll": 5.816835631762201,
+        "adapted_nll": 255.41620626151013,
+        "protocol": "baseline",
+        "gain_nll": -249.59937062974794
+      },
+      {
+        "task_id": 9,
+        "K": 32,
+        "pre_nll": 5.816835631762201,
+        "adapted_nll": 711.556514732965,
+        "protocol": "baseline",
+        "gain_nll": -705.7396791012028
+      }
+    ],
+    "summary": [
+      {
+        "protocol": "baseline",
+        "task_id": 1,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": -2266.7087110692137,
+        "status": "available"
+      },
+      {
+        "protocol": "baseline",
+        "task_id": 2,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": -59.37880199928625,
+        "status": "available"
+      },
+      {
+        "protocol": "baseline",
+        "task_id": 3,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": 325.60597092737976,
+        "status": "available"
+      },
+      {
+        "protocol": "baseline",
+        "task_id": 4,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": -263.93769857451673,
+        "status": "available"
+      },
+      {
+        "protocol": "baseline",
+        "task_id": 5,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": -251.16494304412,
+        "status": "available"
+      },
+      {
+        "protocol": "baseline",
+        "task_id": 6,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": -746.0365379536846,
+        "status": "available"
+      },
+      {
+        "protocol": "baseline",
+        "task_id": 7,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": -101.02420997234306,
+        "status": "available"
+      },
+      {
+        "protocol": "baseline",
+        "task_id": 8,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": -39.62402394371575,
+        "status": "available"
+      },
+      {
+        "protocol": "baseline",
+        "task_id": 9,
+        "K_min": 0,
+        "K_max": 32,
+        "K_count": 7,
+        "adaptation_auc": -632.9959332868319,
+        "status": "available"
+      }
+    ],
+    "average_adaptation_auc": -448.36276543514805,
+    "status": "available"
+  },
+  "fwt": {
+    "rows": [
+      {
+        "task_id": 0,
+        "pre_nll": 9066.180067404912,
+        "post_nll": 1312.542850264805,
+        "scratch_nll": null,
+        "shift_type": "initial",
+        "recurrence_of": null,
+        "new_persistent_regimes": [
+          "A_1"
+        ],
+        "adaptation_gain_nll": 7753.637217140107,
+        "fwt_nll": null,
+        "fwt_eligible": false,
+        "fwt_status": "excluded_not_unseen_law_task"
+      },
+      {
+        "task_id": 1,
+        "pre_nll": 825.4499027237354,
+        "post_nll": 21.529367172300585,
+        "scratch_nll": 9208.970817120622,
+        "shift_type": "novel",
+        "recurrence_of": null,
+        "new_persistent_regimes": [
+          "B_1"
+        ],
+        "adaptation_gain_nll": 803.9205355514348,
+        "fwt_nll": 8383.520914396886,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 2,
+        "pre_nll": 122.81841892764858,
+        "post_nll": 8.798267926356589,
+        "scratch_nll": 6354.773126614987,
+        "shift_type": "novel",
+        "recurrence_of": null,
+        "new_persistent_regimes": [
+          "C_1"
+        ],
+        "adaptation_gain_nll": 114.02015100129199,
+        "fwt_nll": 6231.954707687338,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 3,
+        "pre_nll": 126.35735789980733,
+        "post_nll": 96.5814291305395,
+        "scratch_nll": 8797.094412331406,
+        "shift_type": "exact_recurrence",
+        "recurrence_of": "A_1",
+        "new_persistent_regimes": [],
+        "adaptation_gain_nll": 29.77592876926782,
+        "fwt_nll": null,
+        "fwt_eligible": false,
+        "fwt_status": "excluded_not_unseen_law_task"
+      },
+      {
+        "task_id": 4,
+        "pre_nll": 7.380833766704488,
+        "post_nll": 6.189790957513868,
+        "scratch_nll": 6577.551185073122,
+        "shift_type": "near_recurrence",
+        "recurrence_of": "B_1",
+        "new_persistent_regimes": [
+          "B_prime_1"
+        ],
+        "adaptation_gain_nll": 1.1910428091906207,
+        "fwt_nll": 6570.170351306418,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 5,
+        "pre_nll": 4.817584200953337,
+        "post_nll": 4.474468256083793,
+        "scratch_nll": 7232.084295032614,
+        "shift_type": "specialization",
+        "recurrence_of": "A_1",
+        "new_persistent_regimes": [
+          "A_2"
+        ],
+        "adaptation_gain_nll": 0.34311594486954355,
+        "fwt_nll": 7227.266710831661,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 6,
+        "pre_nll": 7.565999388753056,
+        "post_nll": 6.675786025366748,
+        "scratch_nll": 5367.148655256724,
+        "shift_type": "transient_anomaly",
+        "recurrence_of": "C_1",
+        "new_persistent_regimes": [],
+        "adaptation_gain_nll": 0.8902133633863079,
+        "fwt_nll": null,
+        "fwt_eligible": false,
+        "fwt_status": "excluded_not_unseen_law_task"
+      },
+      {
+        "task_id": 7,
+        "pre_nll": 4.46647560506655,
+        "post_nll": 4.384771510861376,
+        "scratch_nll": 7574.5534907081865,
+        "shift_type": "merge",
+        "recurrence_of": "A_1|A_2",
+        "new_persistent_regimes": [
+          "A_merge"
+        ],
+        "adaptation_gain_nll": 0.08170409420517366,
+        "fwt_nll": 7570.0870151031195,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 8,
+        "pre_nll": 4.646943543989336,
+        "post_nll": 4.633898410991275,
+        "scratch_nll": 9611.546291808047,
+        "shift_type": "long_gap_recurrence",
+        "recurrence_of": "A_1",
+        "new_persistent_regimes": [],
+        "adaptation_gain_nll": 0.013045132998060538,
+        "fwt_nll": null,
+        "fwt_eligible": false,
+        "fwt_status": "excluded_not_unseen_law_task"
+      },
+      {
+        "task_id": 9,
+        "pre_nll": 6.235892532477623,
+        "post_nll": 5.91864083478369,
+        "scratch_nll": 8125.8528095474885,
+        "shift_type": "mixture",
+        "recurrence_of": null,
+        "new_persistent_regimes": [
+          "E_1"
+        ],
+        "adaptation_gain_nll": 0.3172516976939326,
+        "fwt_nll": 8119.616917015011,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      }
+    ],
+    "average_fwt": 7350.436102723405,
+    "eligible_task_count": 6,
+    "status": "available"
+  },
+  "rrr": {
+    "rows": [
+      {
+        "regime_id": "A_1",
+        "first_task": 0,
+        "return_task": 3,
+        "shift_type": "exact_recurrence",
+        "first_pre_nll": 9066.180067404912,
+        "first_post_nll": 1312.542850264805,
+        "return_pre_nll": 126.35735789980733,
+        "first_gain_nll": 7753.637217140107,
+        "rrr": 1.1529843941812017,
+        "status": "available"
+      },
+      {
+        "regime_id": "A_1",
+        "first_task": 0,
+        "return_task": 8,
+        "shift_type": "long_gap_recurrence",
+        "first_pre_nll": 9066.180067404912,
+        "first_post_nll": 1312.542850264805,
+        "return_pre_nll": 4.646943543989336,
+        "first_gain_nll": 7753.637217140107,
+        "rrr": 1.1686815967904192,
+        "status": "available"
+      }
+    ],
+    "average_rrr": 1.1608329954858103,
+    "status": "available"
+  },
+  "recurrence_retention_ratio": 1.1529843941812017,
+  "recurrence_retention_regime": "A_1",
+  "recurrence_retention_ratio_A": 1.1529843941812017,
+  "cl_metrics": {
+    "frozen_anchor_matrix": [
+      {
+        "checkpoint_task": 0,
+        "A_1": 1507.3306744017405,
+        "A_2": 1019.3823882293508,
+        "A_merge": 763.8086856617647,
+        "B_1": 683.2524499520499,
+        "B_prime_1": 853.197376284963,
+        "C_1": 1404.815688285055,
+        "E_1": 831.8400515912481
+      },
+      {
+        "checkpoint_task": 1,
+        "A_1": 414.6429780033841,
+        "A_2": 224.78085730298056,
+        "A_merge": 46.45686753216912,
+        "B_1": 130.99531502862024,
+        "B_prime_1": 201.09293569208702,
+        "C_1": 377.64634068187644,
+        "E_1": 102.23967058133391
+      },
+      {
+        "checkpoint_task": 2,
+        "A_1": 49.42787695265289,
+        "A_2": 91.17144974267492,
+        "A_merge": 4.784701717601103,
+        "B_1": 24.51056775953009,
+        "B_prime_1": 30.515614260847478,
+        "C_1": 95.46094250672904,
+        "E_1": 6.894180882101566
+      },
+      {
+        "checkpoint_task": 3,
+        "A_1": 33.29829888808315,
+        "A_2": 81.09826946908942,
+        "A_merge": 4.606816789215686,
+        "B_1": 17.378775604621193,
+        "B_prime_1": 30.15356707954817,
+        "C_1": 77.28304040630607,
+        "E_1": 6.136150343035181
+      },
+      {
+        "checkpoint_task": 4,
+        "A_1": 54.25252296350012,
+        "A_2": 93.8215902453271,
+        "A_merge": 5.405056583180147,
+        "B_1": 25.891001483457206,
+        "B_prime_1": 87.0559995442864,
+        "C_1": 141.50849341514996,
+        "E_1": 44.81983344534746
+      },
+      {
+        "checkpoint_task": 5,
+        "A_1": 4.581139431502296,
+        "A_2": 4.720023551954408,
+        "A_merge": 4.535537779564951,
+        "B_1": 8.078317456095661,
+        "B_prime_1": 11.909022335569567,
+        "C_1": 10.237898235228146,
+        "E_1": 5.244832619809796
+      },
+      {
+        "checkpoint_task": 6,
+        "A_1": 5.20177971847051,
+        "A_2": 7.400579326771281,
+        "A_merge": 4.365837785309436,
+        "B_1": 7.4117949363911535,
+        "B_prime_1": 68.85846520701351,
+        "C_1": 15.337265284542426,
+        "E_1": 17.906772516782695
+      },
+      {
+        "checkpoint_task": 7,
+        "A_1": 4.672307926184433,
+        "A_2": 5.78304797021028,
+        "A_merge": 4.387621112898285,
+        "B_1": 7.419995392292016,
+        "B_prime_1": 51.94777736896366,
+        "C_1": 11.446797495834401,
+        "E_1": 8.05667316089632
+      },
+      {
+        "checkpoint_task": 8,
+        "A_1": 4.656712433149021,
+        "A_2": 5.930319959270018,
+        "A_merge": 4.341741584329045,
+        "B_1": 7.454452525623352,
+        "B_prime_1": 41.68156405017332,
+        "C_1": 10.309654175211485,
+        "E_1": 7.01772866422178
+      },
+      {
+        "checkpoint_task": 9,
+        "A_1": 4.694276923570825,
+        "A_2": 5.325794471457439,
+        "A_merge": 4.505937643612133,
+        "B_1": 7.130982528170702,
+        "B_prime_1": 22.664530586974063,
+        "C_1": 8.69820789140605,
+        "E_1": 4.811199049757583
+      }
+    ],
+    "law_metrics": [
+      {
+        "checkpoint_task": 0,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 1507.3306744017405,
+        "best_nll_since_first_seen": 1507.3306744017405,
+        "forgetting_nll": 0.0,
+        "bwt_nll": null
+      },
+      {
+        "checkpoint_task": 1,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 414.6429780033841,
+        "best_nll_since_first_seen": 414.6429780033841,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 1092.6876963983564
+      },
+      {
+        "checkpoint_task": 1,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 130.99531502862024,
+        "best_nll_since_first_seen": 130.99531502862024,
+        "forgetting_nll": 0.0,
+        "bwt_nll": null
+      },
+      {
+        "checkpoint_task": 2,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 49.42787695265289,
+        "best_nll_since_first_seen": 49.42787695265289,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 1457.9027974490875
+      },
+      {
+        "checkpoint_task": 2,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 24.51056775953009,
+        "best_nll_since_first_seen": 24.51056775953009,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 106.48474726909015
+      },
+      {
+        "checkpoint_task": 2,
+        "regime_id": "C_1",
+        "first_seen_task": 2,
+        "baseline_checkpoint_task": 2,
+        "baseline_nll_per_event": 95.46094250672904,
+        "current_nll_per_event": 95.46094250672904,
+        "best_nll_since_first_seen": 95.46094250672904,
+        "forgetting_nll": 0.0,
+        "bwt_nll": null
+      },
+      {
+        "checkpoint_task": 3,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 33.29829888808315,
+        "best_nll_since_first_seen": 33.29829888808315,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 1474.0323755136574
+      },
+      {
+        "checkpoint_task": 3,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 17.378775604621193,
+        "best_nll_since_first_seen": 17.378775604621193,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 113.61653942399904
+      },
+      {
+        "checkpoint_task": 3,
+        "regime_id": "C_1",
+        "first_seen_task": 2,
+        "baseline_checkpoint_task": 2,
+        "baseline_nll_per_event": 95.46094250672904,
+        "current_nll_per_event": 77.28304040630607,
+        "best_nll_since_first_seen": 77.28304040630607,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 18.17790210042297
+      },
+      {
+        "checkpoint_task": 4,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 54.25252296350012,
+        "best_nll_since_first_seen": 33.29829888808315,
+        "forgetting_nll": 20.954224075416967,
+        "bwt_nll": 1453.0781514382404
+      },
+      {
+        "checkpoint_task": 4,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 25.891001483457206,
+        "best_nll_since_first_seen": 17.378775604621193,
+        "forgetting_nll": 8.512225878836013,
+        "bwt_nll": 105.10431354516304
+      },
+      {
+        "checkpoint_task": 4,
+        "regime_id": "B_prime_1",
+        "first_seen_task": 4,
+        "baseline_checkpoint_task": 4,
+        "baseline_nll_per_event": 87.0559995442864,
+        "current_nll_per_event": 87.0559995442864,
+        "best_nll_since_first_seen": 87.0559995442864,
+        "forgetting_nll": 0.0,
+        "bwt_nll": null
+      },
+      {
+        "checkpoint_task": 4,
+        "regime_id": "C_1",
+        "first_seen_task": 2,
+        "baseline_checkpoint_task": 2,
+        "baseline_nll_per_event": 95.46094250672904,
+        "current_nll_per_event": 141.50849341514996,
+        "best_nll_since_first_seen": 77.28304040630607,
+        "forgetting_nll": 64.22545300884389,
+        "bwt_nll": -46.04755090842092
+      },
+      {
+        "checkpoint_task": 5,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 4.581139431502296,
+        "best_nll_since_first_seen": 4.581139431502296,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 1502.749534970238
+      },
+      {
+        "checkpoint_task": 5,
+        "regime_id": "A_2",
+        "first_seen_task": 5,
+        "baseline_checkpoint_task": 5,
+        "baseline_nll_per_event": 4.720023551954408,
+        "current_nll_per_event": 4.720023551954408,
+        "best_nll_since_first_seen": 4.720023551954408,
+        "forgetting_nll": 0.0,
+        "bwt_nll": null
+      },
+      {
+        "checkpoint_task": 5,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 8.078317456095661,
+        "best_nll_since_first_seen": 8.078317456095661,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 122.91699757252458
+      },
+      {
+        "checkpoint_task": 5,
+        "regime_id": "B_prime_1",
+        "first_seen_task": 4,
+        "baseline_checkpoint_task": 4,
+        "baseline_nll_per_event": 87.0559995442864,
+        "current_nll_per_event": 11.909022335569567,
+        "best_nll_since_first_seen": 11.909022335569567,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 75.14697720871683
+      },
+      {
+        "checkpoint_task": 5,
+        "regime_id": "C_1",
+        "first_seen_task": 2,
+        "baseline_checkpoint_task": 2,
+        "baseline_nll_per_event": 95.46094250672904,
+        "current_nll_per_event": 10.237898235228146,
+        "best_nll_since_first_seen": 10.237898235228146,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 85.2230442715009
+      },
+      {
+        "checkpoint_task": 6,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 5.20177971847051,
+        "best_nll_since_first_seen": 4.581139431502296,
+        "forgetting_nll": 0.6206402869682135,
+        "bwt_nll": 1502.12889468327
+      },
+      {
+        "checkpoint_task": 6,
+        "regime_id": "A_2",
+        "first_seen_task": 5,
+        "baseline_checkpoint_task": 5,
+        "baseline_nll_per_event": 4.720023551954408,
+        "current_nll_per_event": 7.400579326771281,
+        "best_nll_since_first_seen": 4.720023551954408,
+        "forgetting_nll": 2.680555774816873,
+        "bwt_nll": -2.680555774816873
+      },
+      {
+        "checkpoint_task": 6,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 7.4117949363911535,
+        "best_nll_since_first_seen": 7.4117949363911535,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 123.5835200922291
+      },
+      {
+        "checkpoint_task": 6,
+        "regime_id": "B_prime_1",
+        "first_seen_task": 4,
+        "baseline_checkpoint_task": 4,
+        "baseline_nll_per_event": 87.0559995442864,
+        "current_nll_per_event": 68.85846520701351,
+        "best_nll_since_first_seen": 11.909022335569567,
+        "forgetting_nll": 56.94944287144394,
+        "bwt_nll": 18.197534337272884
+      },
+      {
+        "checkpoint_task": 6,
+        "regime_id": "C_1",
+        "first_seen_task": 2,
+        "baseline_checkpoint_task": 2,
+        "baseline_nll_per_event": 95.46094250672904,
+        "current_nll_per_event": 15.337265284542426,
+        "best_nll_since_first_seen": 10.237898235228146,
+        "forgetting_nll": 5.09936704931428,
+        "bwt_nll": 80.12367722218661
+      },
+      {
+        "checkpoint_task": 7,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 4.672307926184433,
+        "best_nll_since_first_seen": 4.581139431502296,
+        "forgetting_nll": 0.09116849468213672,
+        "bwt_nll": 1502.658366475556
+      },
+      {
+        "checkpoint_task": 7,
+        "regime_id": "A_2",
+        "first_seen_task": 5,
+        "baseline_checkpoint_task": 5,
+        "baseline_nll_per_event": 4.720023551954408,
+        "current_nll_per_event": 5.78304797021028,
+        "best_nll_since_first_seen": 4.720023551954408,
+        "forgetting_nll": 1.0630244182558721,
+        "bwt_nll": -1.0630244182558721
+      },
+      {
+        "checkpoint_task": 7,
+        "regime_id": "A_merge",
+        "first_seen_task": 7,
+        "baseline_checkpoint_task": 7,
+        "baseline_nll_per_event": 4.387621112898285,
+        "current_nll_per_event": 4.387621112898285,
+        "best_nll_since_first_seen": 4.387621112898285,
+        "forgetting_nll": 0.0,
+        "bwt_nll": null
+      },
+      {
+        "checkpoint_task": 7,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 7.419995392292016,
+        "best_nll_since_first_seen": 7.4117949363911535,
+        "forgetting_nll": 0.00820045590086238,
+        "bwt_nll": 123.57531963632823
+      },
+      {
+        "checkpoint_task": 7,
+        "regime_id": "B_prime_1",
+        "first_seen_task": 4,
+        "baseline_checkpoint_task": 4,
+        "baseline_nll_per_event": 87.0559995442864,
+        "current_nll_per_event": 51.94777736896366,
+        "best_nll_since_first_seen": 11.909022335569567,
+        "forgetting_nll": 40.0387550333941,
+        "bwt_nll": 35.10822217532273
+      },
+      {
+        "checkpoint_task": 7,
+        "regime_id": "C_1",
+        "first_seen_task": 2,
+        "baseline_checkpoint_task": 2,
+        "baseline_nll_per_event": 95.46094250672904,
+        "current_nll_per_event": 11.446797495834401,
+        "best_nll_since_first_seen": 10.237898235228146,
+        "forgetting_nll": 1.2088992606062554,
+        "bwt_nll": 84.01414501089464
+      },
+      {
+        "checkpoint_task": 8,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 4.656712433149021,
+        "best_nll_since_first_seen": 4.581139431502296,
+        "forgetting_nll": 0.07557300164672487,
+        "bwt_nll": 1502.6739619685914
+      },
+      {
+        "checkpoint_task": 8,
+        "regime_id": "A_2",
+        "first_seen_task": 5,
+        "baseline_checkpoint_task": 5,
+        "baseline_nll_per_event": 4.720023551954408,
+        "current_nll_per_event": 5.930319959270018,
+        "best_nll_since_first_seen": 4.720023551954408,
+        "forgetting_nll": 1.2102964073156102,
+        "bwt_nll": -1.2102964073156102
+      },
+      {
+        "checkpoint_task": 8,
+        "regime_id": "A_merge",
+        "first_seen_task": 7,
+        "baseline_checkpoint_task": 7,
+        "baseline_nll_per_event": 4.387621112898285,
+        "current_nll_per_event": 4.341741584329045,
+        "best_nll_since_first_seen": 4.341741584329045,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 0.04587952856924016
+      },
+      {
+        "checkpoint_task": 8,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 7.454452525623352,
+        "best_nll_since_first_seen": 7.4117949363911535,
+        "forgetting_nll": 0.04265758923219831,
+        "bwt_nll": 123.54086250299689
+      },
+      {
+        "checkpoint_task": 8,
+        "regime_id": "B_prime_1",
+        "first_seen_task": 4,
+        "baseline_checkpoint_task": 4,
+        "baseline_nll_per_event": 87.0559995442864,
+        "current_nll_per_event": 41.68156405017332,
+        "best_nll_since_first_seen": 11.909022335569567,
+        "forgetting_nll": 29.772541714603754,
+        "bwt_nll": 45.37443549411307
+      },
+      {
+        "checkpoint_task": 8,
+        "regime_id": "C_1",
+        "first_seen_task": 2,
+        "baseline_checkpoint_task": 2,
+        "baseline_nll_per_event": 95.46094250672904,
+        "current_nll_per_event": 10.309654175211485,
+        "best_nll_since_first_seen": 10.237898235228146,
+        "forgetting_nll": 0.07175593998333873,
+        "bwt_nll": 85.15128833151755
+      },
+      {
+        "checkpoint_task": 9,
+        "regime_id": "A_1",
+        "first_seen_task": 0,
+        "baseline_checkpoint_task": 0,
+        "baseline_nll_per_event": 1507.3306744017405,
+        "current_nll_per_event": 4.694276923570825,
+        "best_nll_since_first_seen": 4.581139431502296,
+        "forgetting_nll": 0.11313749206852819,
+        "bwt_nll": 1502.6363974781696
+      },
+      {
+        "checkpoint_task": 9,
+        "regime_id": "A_2",
+        "first_seen_task": 5,
+        "baseline_checkpoint_task": 5,
+        "baseline_nll_per_event": 4.720023551954408,
+        "current_nll_per_event": 5.325794471457439,
+        "best_nll_since_first_seen": 4.720023551954408,
+        "forgetting_nll": 0.6057709195030307,
+        "bwt_nll": -0.6057709195030307
+      },
+      {
+        "checkpoint_task": 9,
+        "regime_id": "A_merge",
+        "first_seen_task": 7,
+        "baseline_checkpoint_task": 7,
+        "baseline_nll_per_event": 4.387621112898285,
+        "current_nll_per_event": 4.505937643612133,
+        "best_nll_since_first_seen": 4.341741584329045,
+        "forgetting_nll": 0.16419605928308822,
+        "bwt_nll": -0.11831653071384807
+      },
+      {
+        "checkpoint_task": 9,
+        "regime_id": "B_1",
+        "first_seen_task": 1,
+        "baseline_checkpoint_task": 1,
+        "baseline_nll_per_event": 130.99531502862024,
+        "current_nll_per_event": 7.130982528170702,
+        "best_nll_since_first_seen": 7.130982528170702,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 123.86433250044954
+      },
+      {
+        "checkpoint_task": 9,
+        "regime_id": "B_prime_1",
+        "first_seen_task": 4,
+        "baseline_checkpoint_task": 4,
+        "baseline_nll_per_event": 87.0559995442864,
+        "current_nll_per_event": 22.664530586974063,
+        "best_nll_since_first_seen": 11.909022335569567,
+        "forgetting_nll": 10.755508251404496,
+        "bwt_nll": 64.39146895731233
+      },
+      {
+        "checkpoint_task": 9,
+        "regime_id": "C_1",
+        "first_seen_task": 2,
+        "baseline_checkpoint_task": 2,
+        "baseline_nll_per_event": 95.46094250672904,
+        "current_nll_per_event": 8.69820789140605,
+        "best_nll_since_first_seen": 8.69820789140605,
+        "forgetting_nll": 0.0,
+        "bwt_nll": 86.76273461532298
+      },
+      {
+        "checkpoint_task": 9,
+        "regime_id": "E_1",
+        "first_seen_task": 9,
+        "baseline_checkpoint_task": 9,
+        "baseline_nll_per_event": 4.811199049757583,
+        "current_nll_per_event": 4.811199049757583,
+        "best_nll_since_first_seen": 4.811199049757583,
+        "forgetting_nll": 0.0,
+        "bwt_nll": null
+      }
+    ],
+    "continual_summary": [
+      {
+        "checkpoint_task": 0,
+        "seen_law_count": 1,
+        "clnll": 1507.3306744017405,
+        "average_forgetting": 0.0,
+        "average_bwt": null,
+        "bwt_law_count": 0
+      },
+      {
+        "checkpoint_task": 1,
+        "seen_law_count": 2,
+        "clnll": 272.81914651600215,
+        "average_forgetting": 0.0,
+        "average_bwt": 1092.6876963983564,
+        "bwt_law_count": 1
+      },
+      {
+        "checkpoint_task": 2,
+        "seen_law_count": 3,
+        "clnll": 56.466462406304004,
+        "average_forgetting": 0.0,
+        "average_bwt": 782.1937723590888,
+        "bwt_law_count": 2
+      },
+      {
+        "checkpoint_task": 3,
+        "seen_law_count": 3,
+        "clnll": 42.653371633003474,
+        "average_forgetting": 0.0,
+        "average_bwt": 535.2756056793597,
+        "bwt_law_count": 3
+      },
+      {
+        "checkpoint_task": 4,
+        "seen_law_count": 4,
+        "clnll": 77.17700435159841,
+        "average_forgetting": 23.422975740774216,
+        "average_bwt": 504.04497135832753,
+        "bwt_law_count": 3
+      },
+      {
+        "checkpoint_task": 5,
+        "seen_law_count": 5,
+        "clnll": 7.905280202070015,
+        "average_forgetting": 0.0,
+        "average_bwt": 446.5091385057451,
+        "bwt_law_count": 4
+      },
+      {
+        "checkpoint_task": 6,
+        "seen_law_count": 5,
+        "clnll": 20.841976894637774,
+        "average_forgetting": 13.070001196508661,
+        "average_bwt": 344.2706141120283,
+        "bwt_law_count": 5
+      },
+      {
+        "checkpoint_task": 7,
+        "seen_law_count": 6,
+        "clnll": 14.276257877730513,
+        "average_forgetting": 7.068341277139871,
+        "average_bwt": 348.8586057759691,
+        "bwt_law_count": 5
+      },
+      {
+        "checkpoint_task": 8,
+        "seen_law_count": 6,
+        "clnll": 12.395740787959374,
+        "average_forgetting": 5.195470775463605,
+        "average_bwt": 292.59602190307874,
+        "bwt_law_count": 6
+      },
+      {
+        "checkpoint_task": 9,
+        "seen_law_count": 7,
+        "clnll": 8.2615612992784,
+        "average_forgetting": 1.6626589603227349,
+        "average_bwt": 296.1551410168396,
+        "bwt_law_count": 6
+      }
+    ],
+    "task_boundaries": [
+      {
+        "task_id": 0,
+        "pre_nll": 9066.180067404912,
+        "post_nll": 1312.542850264805,
+        "scratch_nll": null,
+        "shift_type": "initial",
+        "recurrence_of": null,
+        "new_persistent_regimes": [
+          "A_1"
+        ],
+        "adaptation_gain_nll": 7753.637217140107,
+        "fwt_nll": null,
+        "fwt_eligible": false,
+        "fwt_status": "excluded_not_unseen_law_task"
+      },
+      {
+        "task_id": 1,
+        "pre_nll": 825.4499027237354,
+        "post_nll": 21.529367172300585,
+        "scratch_nll": 9208.970817120622,
+        "shift_type": "novel",
+        "recurrence_of": null,
+        "new_persistent_regimes": [
+          "B_1"
+        ],
+        "adaptation_gain_nll": 803.9205355514348,
+        "fwt_nll": 8383.520914396886,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 2,
+        "pre_nll": 122.81841892764858,
+        "post_nll": 8.798267926356589,
+        "scratch_nll": 6354.773126614987,
+        "shift_type": "novel",
+        "recurrence_of": null,
+        "new_persistent_regimes": [
+          "C_1"
+        ],
+        "adaptation_gain_nll": 114.02015100129199,
+        "fwt_nll": 6231.954707687338,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 3,
+        "pre_nll": 126.35735789980733,
+        "post_nll": 96.5814291305395,
+        "scratch_nll": 8797.094412331406,
+        "shift_type": "exact_recurrence",
+        "recurrence_of": "A_1",
+        "new_persistent_regimes": [],
+        "adaptation_gain_nll": 29.77592876926782,
+        "fwt_nll": null,
+        "fwt_eligible": false,
+        "fwt_status": "excluded_not_unseen_law_task"
+      },
+      {
+        "task_id": 4,
+        "pre_nll": 7.380833766704488,
+        "post_nll": 6.189790957513868,
+        "scratch_nll": 6577.551185073122,
+        "shift_type": "near_recurrence",
+        "recurrence_of": "B_1",
+        "new_persistent_regimes": [
+          "B_prime_1"
+        ],
+        "adaptation_gain_nll": 1.1910428091906207,
+        "fwt_nll": 6570.170351306418,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 5,
+        "pre_nll": 4.817584200953337,
+        "post_nll": 4.474468256083793,
+        "scratch_nll": 7232.084295032614,
+        "shift_type": "specialization",
+        "recurrence_of": "A_1",
+        "new_persistent_regimes": [
+          "A_2"
+        ],
+        "adaptation_gain_nll": 0.34311594486954355,
+        "fwt_nll": 7227.266710831661,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 6,
+        "pre_nll": 7.565999388753056,
+        "post_nll": 6.675786025366748,
+        "scratch_nll": 5367.148655256724,
+        "shift_type": "transient_anomaly",
+        "recurrence_of": "C_1",
+        "new_persistent_regimes": [],
+        "adaptation_gain_nll": 0.8902133633863079,
+        "fwt_nll": null,
+        "fwt_eligible": false,
+        "fwt_status": "excluded_not_unseen_law_task"
+      },
+      {
+        "task_id": 7,
+        "pre_nll": 4.46647560506655,
+        "post_nll": 4.384771510861376,
+        "scratch_nll": 7574.5534907081865,
+        "shift_type": "merge",
+        "recurrence_of": "A_1|A_2",
+        "new_persistent_regimes": [
+          "A_merge"
+        ],
+        "adaptation_gain_nll": 0.08170409420517366,
+        "fwt_nll": 7570.0870151031195,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      },
+      {
+        "task_id": 8,
+        "pre_nll": 4.646943543989336,
+        "post_nll": 4.633898410991275,
+        "scratch_nll": 9611.546291808047,
+        "shift_type": "long_gap_recurrence",
+        "recurrence_of": "A_1",
+        "new_persistent_regimes": [],
+        "adaptation_gain_nll": 0.013045132998060538,
+        "fwt_nll": null,
+        "fwt_eligible": false,
+        "fwt_status": "excluded_not_unseen_law_task"
+      },
+      {
+        "task_id": 9,
+        "pre_nll": 6.235892532477623,
+        "post_nll": 5.91864083478369,
+        "scratch_nll": 8125.8528095474885,
+        "shift_type": "mixture",
+        "recurrence_of": null,
+        "new_persistent_regimes": [
+          "E_1"
+        ],
+        "adaptation_gain_nll": 0.3172516976939326,
+        "fwt_nll": 8119.616917015011,
+        "fwt_eligible": true,
+        "fwt_status": "available"
+      }
+    ],
+    "fwt": {
+      "rows": [
+        {
+          "task_id": 0,
+          "pre_nll": 9066.180067404912,
+          "post_nll": 1312.542850264805,
+          "scratch_nll": null,
+          "shift_type": "initial",
+          "recurrence_of": null,
+          "new_persistent_regimes": [
+            "A_1"
+          ],
+          "adaptation_gain_nll": 7753.637217140107,
+          "fwt_nll": null,
+          "fwt_eligible": false,
+          "fwt_status": "excluded_not_unseen_law_task"
+        },
+        {
+          "task_id": 1,
+          "pre_nll": 825.4499027237354,
+          "post_nll": 21.529367172300585,
+          "scratch_nll": 9208.970817120622,
+          "shift_type": "novel",
+          "recurrence_of": null,
+          "new_persistent_regimes": [
+            "B_1"
+          ],
+          "adaptation_gain_nll": 803.9205355514348,
+          "fwt_nll": 8383.520914396886,
+          "fwt_eligible": true,
+          "fwt_status": "available"
+        },
+        {
+          "task_id": 2,
+          "pre_nll": 122.81841892764858,
+          "post_nll": 8.798267926356589,
+          "scratch_nll": 6354.773126614987,
+          "shift_type": "novel",
+          "recurrence_of": null,
+          "new_persistent_regimes": [
+            "C_1"
+          ],
+          "adaptation_gain_nll": 114.02015100129199,
+          "fwt_nll": 6231.954707687338,
+          "fwt_eligible": true,
+          "fwt_status": "available"
+        },
+        {
+          "task_id": 3,
+          "pre_nll": 126.35735789980733,
+          "post_nll": 96.5814291305395,
+          "scratch_nll": 8797.094412331406,
+          "shift_type": "exact_recurrence",
+          "recurrence_of": "A_1",
+          "new_persistent_regimes": [],
+          "adaptation_gain_nll": 29.77592876926782,
+          "fwt_nll": null,
+          "fwt_eligible": false,
+          "fwt_status": "excluded_not_unseen_law_task"
+        },
+        {
+          "task_id": 4,
+          "pre_nll": 7.380833766704488,
+          "post_nll": 6.189790957513868,
+          "scratch_nll": 6577.551185073122,
+          "shift_type": "near_recurrence",
+          "recurrence_of": "B_1",
+          "new_persistent_regimes": [
+            "B_prime_1"
+          ],
+          "adaptation_gain_nll": 1.1910428091906207,
+          "fwt_nll": 6570.170351306418,
+          "fwt_eligible": true,
+          "fwt_status": "available"
+        },
+        {
+          "task_id": 5,
+          "pre_nll": 4.817584200953337,
+          "post_nll": 4.474468256083793,
+          "scratch_nll": 7232.084295032614,
+          "shift_type": "specialization",
+          "recurrence_of": "A_1",
+          "new_persistent_regimes": [
+            "A_2"
+          ],
+          "adaptation_gain_nll": 0.34311594486954355,
+          "fwt_nll": 7227.266710831661,
+          "fwt_eligible": true,
+          "fwt_status": "available"
+        },
+        {
+          "task_id": 6,
+          "pre_nll": 7.565999388753056,
+          "post_nll": 6.675786025366748,
+          "scratch_nll": 5367.148655256724,
+          "shift_type": "transient_anomaly",
+          "recurrence_of": "C_1",
+          "new_persistent_regimes": [],
+          "adaptation_gain_nll": 0.8902133633863079,
+          "fwt_nll": null,
+          "fwt_eligible": false,
+          "fwt_status": "excluded_not_unseen_law_task"
+        },
+        {
+          "task_id": 7,
+          "pre_nll": 4.46647560506655,
+          "post_nll": 4.384771510861376,
+          "scratch_nll": 7574.5534907081865,
+          "shift_type": "merge",
+          "recurrence_of": "A_1|A_2",
+          "new_persistent_regimes": [
+            "A_merge"
+          ],
+          "adaptation_gain_nll": 0.08170409420517366,
+          "fwt_nll": 7570.0870151031195,
+          "fwt_eligible": true,
+          "fwt_status": "available"
+        },
+        {
+          "task_id": 8,
+          "pre_nll": 4.646943543989336,
+          "post_nll": 4.633898410991275,
+          "scratch_nll": 9611.546291808047,
+          "shift_type": "long_gap_recurrence",
+          "recurrence_of": "A_1",
+          "new_persistent_regimes": [],
+          "adaptation_gain_nll": 0.013045132998060538,
+          "fwt_nll": null,
+          "fwt_eligible": false,
+          "fwt_status": "excluded_not_unseen_law_task"
+        },
+        {
+          "task_id": 9,
+          "pre_nll": 6.235892532477623,
+          "post_nll": 5.91864083478369,
+          "scratch_nll": 8125.8528095474885,
+          "shift_type": "mixture",
+          "recurrence_of": null,
+          "new_persistent_regimes": [
+            "E_1"
+          ],
+          "adaptation_gain_nll": 0.3172516976939326,
+          "fwt_nll": 8119.616917015011,
+          "fwt_eligible": true,
+          "fwt_status": "available"
+        }
+      ],
+      "average_fwt": 7350.436102723405,
+      "eligible_task_count": 6,
+      "status": "available"
+    },
+    "adaptation": {
+      "points": [
+        {
+          "task_id": 1,
+          "K": 0,
+          "pre_nll": 412.98124397880537,
+          "adapted_nll": 412.98124397880537,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 1,
+          "K": 1,
+          "pre_nll": 412.98124397880537,
+          "adapted_nll": 412.98124397880537,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 1,
+          "K": 2,
+          "pre_nll": 412.98124397880537,
+          "adapted_nll": 3048.622832369942,
+          "protocol": "baseline",
+          "gain_nll": -2635.641588391137
+        },
+        {
+          "task_id": 1,
+          "K": 4,
+          "pre_nll": 412.98124397880537,
+          "adapted_nll": 2640.188342967245,
+          "protocol": "baseline",
+          "gain_nll": -2227.2070989884396
+        },
+        {
+          "task_id": 1,
+          "K": 8,
+          "pre_nll": 412.98124397880537,
+          "adapted_nll": 1463.704479768786,
+          "protocol": "baseline",
+          "gain_nll": -1050.7232357899807
+        },
+        {
+          "task_id": 1,
+          "K": 16,
+          "pre_nll": 412.98124397880537,
+          "adapted_nll": 3327.147880539499,
+          "protocol": "baseline",
+          "gain_nll": -2914.166636560694
+        },
+        {
+          "task_id": 1,
+          "K": 32,
+          "pre_nll": 412.98124397880537,
+          "adapted_nll": 2991.138246628131,
+          "protocol": "baseline",
+          "gain_nll": -2578.157002649326
+        },
+        {
+          "task_id": 2,
+          "K": 0,
+          "pre_nll": 87.78897715988083,
+          "adapted_nll": 87.78897715988083,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 2,
+          "K": 1,
+          "pre_nll": 87.78897715988083,
+          "adapted_nll": 87.78897715988083,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 2,
+          "K": 2,
+          "pre_nll": 87.78897715988083,
+          "adapted_nll": 20.77311941410129,
+          "protocol": "baseline",
+          "gain_nll": 67.01585774577954
+        },
+        {
+          "task_id": 2,
+          "K": 4,
+          "pre_nll": 87.78897715988083,
+          "adapted_nll": 20.685529419066533,
+          "protocol": "baseline",
+          "gain_nll": 67.10344774081429
+        },
+        {
+          "task_id": 2,
+          "K": 8,
+          "pre_nll": 87.78897715988083,
+          "adapted_nll": 226.1469867179742,
+          "protocol": "baseline",
+          "gain_nll": -138.35800955809336
+        },
+        {
+          "task_id": 2,
+          "K": 16,
+          "pre_nll": 87.78897715988083,
+          "adapted_nll": 247.10624069016882,
+          "protocol": "baseline",
+          "gain_nll": -159.317263530288
+        },
+        {
+          "task_id": 2,
+          "K": 32,
+          "pre_nll": 87.78897715988083,
+          "adapted_nll": 20.28904892316286,
+          "protocol": "baseline",
+          "gain_nll": 67.49992823671798
+        },
+        {
+          "task_id": 3,
+          "K": 0,
+          "pre_nll": 1921.751226692836,
+          "adapted_nll": 1921.751226692836,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 3,
+          "K": 1,
+          "pre_nll": 1921.751226692836,
+          "adapted_nll": 1921.751226692836,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 3,
+          "K": 2,
+          "pre_nll": 1921.751226692836,
+          "adapted_nll": 1494.6587340529932,
+          "protocol": "baseline",
+          "gain_nll": 427.09249263984293
+        },
+        {
+          "task_id": 3,
+          "K": 4,
+          "pre_nll": 1921.751226692836,
+          "adapted_nll": 1733.764842983317,
+          "protocol": "baseline",
+          "gain_nll": 187.98638370951903
+        },
+        {
+          "task_id": 3,
+          "K": 8,
+          "pre_nll": 1921.751226692836,
+          "adapted_nll": 1514.8259322865554,
+          "protocol": "baseline",
+          "gain_nll": 406.9252944062807
+        },
+        {
+          "task_id": 3,
+          "K": 16,
+          "pre_nll": 1921.751226692836,
+          "adapted_nll": 1517.1768891069676,
+          "protocol": "baseline",
+          "gain_nll": 404.57433758586853
+        },
+        {
+          "task_id": 3,
+          "K": 32,
+          "pre_nll": 1921.751226692836,
+          "adapted_nll": 1681.9575564278705,
+          "protocol": "baseline",
+          "gain_nll": 239.7936702649656
+        },
+        {
+          "task_id": 4,
+          "K": 0,
+          "pre_nll": 43.48236420398622,
+          "adapted_nll": 43.48236420398622,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 4,
+          "K": 1,
+          "pre_nll": 43.48236420398622,
+          "adapted_nll": 43.48236420398622,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 4,
+          "K": 2,
+          "pre_nll": 43.48236420398622,
+          "adapted_nll": 14.798633965920276,
+          "protocol": "baseline",
+          "gain_nll": 28.683730238065948
+        },
+        {
+          "task_id": 4,
+          "K": 4,
+          "pre_nll": 43.48236420398622,
+          "adapted_nll": 20.00146484375,
+          "protocol": "baseline",
+          "gain_nll": 23.480899360236222
+        },
+        {
+          "task_id": 4,
+          "K": 8,
+          "pre_nll": 43.48236420398622,
+          "adapted_nll": 395.5482283464567,
+          "protocol": "baseline",
+          "gain_nll": -352.0658641424705
+        },
+        {
+          "task_id": 4,
+          "K": 16,
+          "pre_nll": 43.48236420398622,
+          "adapted_nll": 364.4906803641732,
+          "protocol": "baseline",
+          "gain_nll": -321.008316160187
+        },
+        {
+          "task_id": 4,
+          "K": 32,
+          "pre_nll": 43.48236420398622,
+          "adapted_nll": 367.8548228346457,
+          "protocol": "baseline",
+          "gain_nll": -324.3724586306595
+        },
+        {
+          "task_id": 5,
+          "K": 0,
+          "pre_nll": 26.899750931766054,
+          "adapted_nll": 26.899750931766054,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 5,
+          "K": 1,
+          "pre_nll": 26.899750931766054,
+          "adapted_nll": 26.899750931766054,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 5,
+          "K": 2,
+          "pre_nll": 26.899750931766054,
+          "adapted_nll": 9.921327587442661,
+          "protocol": "baseline",
+          "gain_nll": 16.978423344323392
+        },
+        {
+          "task_id": 5,
+          "K": 4,
+          "pre_nll": 26.899750931766054,
+          "adapted_nll": 625.6691513761468,
+          "protocol": "baseline",
+          "gain_nll": -598.7694004443807
+        },
+        {
+          "task_id": 5,
+          "K": 8,
+          "pre_nll": 26.899750931766054,
+          "adapted_nll": 277.01261467889907,
+          "protocol": "baseline",
+          "gain_nll": -250.11286374713302
+        },
+        {
+          "task_id": 5,
+          "K": 16,
+          "pre_nll": 26.899750931766054,
+          "adapted_nll": 405.20452981651374,
+          "protocol": "baseline",
+          "gain_nll": -378.3047788847477
+        },
+        {
+          "task_id": 5,
+          "K": 32,
+          "pre_nll": 26.899750931766054,
+          "adapted_nll": 55.16263618119266,
+          "protocol": "baseline",
+          "gain_nll": -28.262885249426606
+        },
+        {
+          "task_id": 6,
+          "K": 0,
+          "pre_nll": 7.723690654306515,
+          "adapted_nll": 7.723690654306515,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 6,
+          "K": 1,
+          "pre_nll": 7.723690654306515,
+          "adapted_nll": 7.723690654306515,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 6,
+          "K": 2,
+          "pre_nll": 7.723690654306515,
+          "adapted_nll": 7.899340314196693,
+          "protocol": "baseline",
+          "gain_nll": -0.175649659890178
+        },
+        {
+          "task_id": 6,
+          "K": 4,
+          "pre_nll": 7.723690654306515,
+          "adapted_nll": 967.5830454096742,
+          "protocol": "baseline",
+          "gain_nll": -959.8593547553677
+        },
+        {
+          "task_id": 6,
+          "K": 8,
+          "pre_nll": 7.723690654306515,
+          "adapted_nll": 967.3093534057256,
+          "protocol": "baseline",
+          "gain_nll": -959.585662751419
+        },
+        {
+          "task_id": 6,
+          "K": 16,
+          "pre_nll": 7.723690654306515,
+          "adapted_nll": 781.7190893385982,
+          "protocol": "baseline",
+          "gain_nll": -773.9953986842917
+        },
+        {
+          "task_id": 6,
+          "K": 32,
+          "pre_nll": 7.723690654306515,
+          "adapted_nll": 751.2073050345508,
+          "protocol": "baseline",
+          "gain_nll": -743.4836143802443
+        },
+        {
+          "task_id": 7,
+          "K": 0,
+          "pre_nll": 4.44360992739899,
+          "adapted_nll": 4.44360992739899,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 7,
+          "K": 1,
+          "pre_nll": 4.44360992739899,
+          "adapted_nll": 4.44360992739899,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 7,
+          "K": 2,
+          "pre_nll": 4.44360992739899,
+          "adapted_nll": 5.158474885574495,
+          "protocol": "baseline",
+          "gain_nll": -0.7148649581755047
+        },
+        {
+          "task_id": 7,
+          "K": 4,
+          "pre_nll": 4.44360992739899,
+          "adapted_nll": 5.041908341224747,
+          "protocol": "baseline",
+          "gain_nll": -0.5982984138257574
+        },
+        {
+          "task_id": 7,
+          "K": 8,
+          "pre_nll": 4.44360992739899,
+          "adapted_nll": 5.00104462594697,
+          "protocol": "baseline",
+          "gain_nll": -0.5574346985479801
+        },
+        {
+          "task_id": 7,
+          "K": 16,
+          "pre_nll": 4.44360992739899,
+          "adapted_nll": 272.99280303030304,
+          "protocol": "baseline",
+          "gain_nll": -268.54919310290404
+        },
+        {
+          "task_id": 7,
+          "K": 32,
+          "pre_nll": 4.44360992739899,
+          "adapted_nll": 4.940185053661616,
+          "protocol": "baseline",
+          "gain_nll": -0.4965751262626261
+        },
+        {
+          "task_id": 8,
+          "K": 0,
+          "pre_nll": 4.497316535841232,
+          "adapted_nll": 4.497316535841232,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 8,
+          "K": 1,
+          "pre_nll": 4.497316535841232,
+          "adapted_nll": 4.497316535841232,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 8,
+          "K": 2,
+          "pre_nll": 4.497316535841232,
+          "adapted_nll": 51.072996889810426,
+          "protocol": "baseline",
+          "gain_nll": -46.57568035396919
+        },
+        {
+          "task_id": 8,
+          "K": 4,
+          "pre_nll": 4.497316535841232,
+          "adapted_nll": 21.547752517772512,
+          "protocol": "baseline",
+          "gain_nll": -17.05043598193128
+        },
+        {
+          "task_id": 8,
+          "K": 8,
+          "pre_nll": 4.497316535841232,
+          "adapted_nll": 20.385500592417063,
+          "protocol": "baseline",
+          "gain_nll": -15.888184056575831
+        },
+        {
+          "task_id": 8,
+          "K": 16,
+          "pre_nll": 4.497316535841232,
+          "adapted_nll": 77.49544579383887,
+          "protocol": "baseline",
+          "gain_nll": -72.99812925799763
+        },
+        {
+          "task_id": 8,
+          "K": 32,
+          "pre_nll": 4.497316535841232,
+          "adapted_nll": 26.453226821682463,
+          "protocol": "baseline",
+          "gain_nll": -21.95591028584123
+        },
+        {
+          "task_id": 9,
+          "K": 0,
+          "pre_nll": 5.816835631762201,
+          "adapted_nll": 5.816835631762201,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 9,
+          "K": 1,
+          "pre_nll": 5.816835631762201,
+          "adapted_nll": 5.816835631762201,
+          "protocol": "baseline",
+          "gain_nll": 0.0
+        },
+        {
+          "task_id": 9,
+          "K": 2,
+          "pre_nll": 5.816835631762201,
+          "adapted_nll": 6.326946111015193,
+          "protocol": "baseline",
+          "gain_nll": -0.510110479252992
+        },
+        {
+          "task_id": 9,
+          "K": 4,
+          "pre_nll": 5.816835631762201,
+          "adapted_nll": 1668.3590009208103,
+          "protocol": "baseline",
+          "gain_nll": -1662.5421652890482
+        },
+        {
+          "task_id": 9,
+          "K": 8,
+          "pre_nll": 5.816835631762201,
+          "adapted_nll": 1110.211556169429,
+          "protocol": "baseline",
+          "gain_nll": -1104.394720537667
+        },
+        {
+          "task_id": 9,
+          "K": 16,
+          "pre_nll": 5.816835631762201,
+          "adapted_nll": 255.41620626151013,
+          "protocol": "baseline",
+          "gain_nll": -249.59937062974794
+        },
+        {
+          "task_id": 9,
+          "K": 32,
+          "pre_nll": 5.816835631762201,
+          "adapted_nll": 711.556514732965,
+          "protocol": "baseline",
+          "gain_nll": -705.7396791012028
+        }
+      ],
+      "summary": [
+        {
+          "protocol": "baseline",
+          "task_id": 1,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": -2266.7087110692137,
+          "status": "available"
+        },
+        {
+          "protocol": "baseline",
+          "task_id": 2,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": -59.37880199928625,
+          "status": "available"
+        },
+        {
+          "protocol": "baseline",
+          "task_id": 3,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": 325.60597092737976,
+          "status": "available"
+        },
+        {
+          "protocol": "baseline",
+          "task_id": 4,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": -263.93769857451673,
+          "status": "available"
+        },
+        {
+          "protocol": "baseline",
+          "task_id": 5,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": -251.16494304412,
+          "status": "available"
+        },
+        {
+          "protocol": "baseline",
+          "task_id": 6,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": -746.0365379536846,
+          "status": "available"
+        },
+        {
+          "protocol": "baseline",
+          "task_id": 7,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": -101.02420997234306,
+          "status": "available"
+        },
+        {
+          "protocol": "baseline",
+          "task_id": 8,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": -39.62402394371575,
+          "status": "available"
+        },
+        {
+          "protocol": "baseline",
+          "task_id": 9,
+          "K_min": 0,
+          "K_max": 32,
+          "K_count": 7,
+          "adaptation_auc": -632.9959332868319,
+          "status": "available"
+        }
+      ],
+      "average_adaptation_auc": -448.36276543514805,
+      "status": "available"
+    },
+    "rrr": {
+      "rows": [
+        {
+          "regime_id": "A_1",
+          "first_task": 0,
+          "return_task": 3,
+          "shift_type": "exact_recurrence",
+          "first_pre_nll": 9066.180067404912,
+          "first_post_nll": 1312.542850264805,
+          "return_pre_nll": 126.35735789980733,
+          "first_gain_nll": 7753.637217140107,
+          "rrr": 1.1529843941812017,
+          "status": "available"
+        },
+        {
+          "regime_id": "A_1",
+          "first_task": 0,
+          "return_task": 8,
+          "shift_type": "long_gap_recurrence",
+          "first_pre_nll": 9066.180067404912,
+          "first_post_nll": 1312.542850264805,
+          "return_pre_nll": 4.646943543989336,
+          "first_gain_nll": 7753.637217140107,
+          "rrr": 1.1686815967904192,
+          "status": "available"
+        }
+      ],
+      "average_rrr": 1.1608329954858103,
+      "status": "available"
+    },
+    "hm_state": [],
+    "metric_contract": {
+      "name": "canonical_cl_metrics",
+      "version": 1,
+      "primary_matrix": "frozen_anchor",
+      "persistent_regimes": [
+        "A_1",
+        "A_2",
+        "A_merge",
+        "B_1",
+        "B_prime_1",
+        "C_1",
+        "E_1"
+      ]
+    }
+  },
+  "tsr": null,
+  "tsr_note": "TSR is topology-specific and is not defined for flat baselines.",
+  "benchmark": "CL-core-v2",
+  "benchmark_version": 2,
+  "persistent_regimes": [
+    "A_1",
+    "A_2",
+    "A_merge",
+    "B_1",
+    "B_prime_1",
+    "C_1",
+    "E_1"
+  ],
+  "transient_regimes": [
+    "X_transient"
+  ],
+  "stages": [
+    {
+      "task": 0,
+      "evaluation": "pre_update",
+      "nll_per_event": 9066.180067404912,
+      "accuracy": 0.21521425132402502,
+      "time_rmse": 29.435063543605285,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "post_update",
+      "nll_per_event": 1312.542850264805,
+      "accuracy": 0.26095329802599904,
+      "time_rmse": 14.999349508443906,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 1507.3306744017405,
+      "accuracy": 0.2627507855934252,
+      "time_rmse": 14.758908725027275,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 683.2524499520499,
+      "accuracy": 0.07504195636538001,
+      "time_rmse": 13.11537290637471,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 1404.815688285055,
+      "accuracy": 0.23122276339400155,
+      "time_rmse": 10.984227326851759,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 853.197376284963,
+      "accuracy": 0.07841262251972268,
+      "time_rmse": 13.945565535732257,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 1019.3823882293508,
+      "accuracy": 0.23137155847436222,
+      "time_rmse": 13.140450107301517,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 485.9949565112346,
+      "accuracy": 0.23628895868567287,
+      "time_rmse": 11.410000010322706,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 763.8086856617647,
+      "accuracy": 0.2566176470588235,
+      "time_rmse": 14.335694344988706,
+      "num_events": 0
+    },
+    {
+      "task": 0,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 831.8400515912481,
+      "accuracy": 0.15837891596220785,
+      "time_rmse": 10.904835699519534,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "pre_update",
+      "nll_per_event": 825.4499027237354,
+      "accuracy": 0.08414396887159534,
+      "time_rmse": 14.629558075334058,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 9208.970817120622,
+      "accuracy": 0.08511673151750973,
+      "time_rmse": 30.615382036125222,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "post_update",
+      "nll_per_event": 21.529367172300585,
+      "accuracy": 0.17558365758754862,
+      "time_rmse": 10.151488894506649,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 414.6429780033841,
+      "accuracy": 0.05100314237370075,
+      "time_rmse": 8.387413728825859,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 130.99531502862024,
+      "accuracy": 0.17046271877247662,
+      "time_rmse": 8.241450252391678,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 377.64634068187644,
+      "accuracy": 0.047423737503204305,
+      "time_rmse": 8.011052979944335,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 201.09293569208702,
+      "accuracy": 0.19077217308152045,
+      "time_rmse": 6.898350271661733,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 224.78085730298056,
+      "accuracy": 0.06112654710785552,
+      "time_rmse": 8.97425093934468,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 92.22370501064569,
+      "accuracy": 0.05266972698719497,
+      "time_rmse": 6.128212894505358,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 46.45686753216912,
+      "accuracy": 0.05,
+      "time_rmse": 8.919486852436316,
+      "num_events": 0
+    },
+    {
+      "task": 1,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 102.23967058133391,
+      "accuracy": 0.1469418199900547,
+      "time_rmse": 7.473812253982715,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "pre_update",
+      "nll_per_event": 122.81841892764858,
+      "accuracy": 0.050129198966408266,
+      "time_rmse": 7.394837114911481,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 6354.773126614987,
+      "accuracy": 0.17829457364341086,
+      "time_rmse": 24.400541676539216,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "post_update",
+      "nll_per_event": 8.798267926356589,
+      "accuracy": 0.22170542635658916,
+      "time_rmse": 4.15926474321296,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 49.42787695265289,
+      "accuracy": 0.2622673434856176,
+      "time_rmse": 6.157216635778159,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 24.51056775953009,
+      "accuracy": 0.07648046032126589,
+      "time_rmse": 4.143408147971438,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 95.46094250672904,
+      "accuracy": 0.2304537298128685,
+      "time_rmse": 5.9021572207159325,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 30.515614260847478,
+      "accuracy": 0.07841262251972268,
+      "time_rmse": 4.919184813404003,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 91.17144974267492,
+      "accuracy": 0.22884566809800455,
+      "time_rmse": 4.17209530746202,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 8.087388777104977,
+      "accuracy": 0.2358057501812032,
+      "time_rmse": 4.448268576757436,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.784701717601103,
+      "accuracy": 0.2563725490196078,
+      "time_rmse": 4.898371265422984,
+      "num_events": 0
+    },
+    {
+      "task": 2,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 6.894180882101566,
+      "accuracy": 0.15713575335653904,
+      "time_rmse": 4.873420339846818,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "pre_update",
+      "nll_per_event": 126.35735789980733,
+      "accuracy": 0.25096339113680155,
+      "time_rmse": 4.841374153171008,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 8797.094412331406,
+      "accuracy": 0.22157996146435452,
+      "time_rmse": 28.24807421778496,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "post_update",
+      "nll_per_event": 96.5814291305395,
+      "accuracy": 0.23892100192678228,
+      "time_rmse": 4.666493957330856,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 33.29829888808315,
+      "accuracy": 0.2632342277012328,
+      "time_rmse": 5.711755604703829,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 17.378775604621193,
+      "accuracy": 0.06329417405897866,
+      "time_rmse": 3.9167587905179935,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 77.28304040630607,
+      "accuracy": 0.17918482440399897,
+      "time_rmse": 5.437673932136127,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 30.15356707954817,
+      "accuracy": 0.06741573033707865,
+      "time_rmse": 4.723094694256681,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 81.09826946908942,
+      "accuracy": 0.21874210659257387,
+      "time_rmse": 3.953381956379695,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 6.464175563239913,
+      "accuracy": 0.23556414592896835,
+      "time_rmse": 3.328751469142694,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.606816789215686,
+      "accuracy": 0.2482843137254902,
+      "time_rmse": 4.71164654920728,
+      "num_events": 0
+    },
+    {
+      "task": 3,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 6.136150343035181,
+      "accuracy": 0.178269517652909,
+      "time_rmse": 4.288545379557748,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "pre_update",
+      "nll_per_event": 7.380833766704488,
+      "accuracy": 0.07160867372667676,
+      "time_rmse": 2.8218322018197552,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 6577.551185073122,
+      "accuracy": 0.08119011598587998,
+      "time_rmse": 28.518805007078576,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "post_update",
+      "nll_per_event": 6.189790957513868,
+      "accuracy": 0.19768028240040342,
+      "time_rmse": 4.287288494038449,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 54.25252296350012,
+      "accuracy": 0.04230118443316413,
+      "time_rmse": 6.572415087116054,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 25.891001483457206,
+      "accuracy": 0.1865260129465356,
+      "time_rmse": 5.014845779003112,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 141.50849341514996,
+      "accuracy": 0.0425531914893617,
+      "time_rmse": 6.025925574633136,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 87.0559995442864,
+      "accuracy": 0.19746593354052117,
+      "time_rmse": 5.064406517900796,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 93.8215902453271,
+      "accuracy": 0.050770396564789086,
+      "time_rmse": 5.453549785608765,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 49.75546252114037,
+      "accuracy": 0.038656680357574295,
+      "time_rmse": 4.624590948360659,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 5.405056583180147,
+      "accuracy": 0.04240196078431373,
+      "time_rmse": 5.41106038823469,
+      "num_events": 0
+    },
+    {
+      "task": 4,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 44.81983344534746,
+      "accuracy": 0.15067130780706117,
+      "time_rmse": 5.371786692874579,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "pre_update",
+      "nll_per_event": 4.817584200953337,
+      "accuracy": 0.04917210235825389,
+      "time_rmse": 4.29096045579731,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 7232.084295032614,
+      "accuracy": 0.2212744606121425,
+      "time_rmse": 28.13635286839023,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "post_update",
+      "nll_per_event": 4.474468256083793,
+      "accuracy": 0.21976919217260413,
+      "time_rmse": 3.0732324715614845,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.581139431502296,
+      "accuracy": 0.2436548223350254,
+      "time_rmse": 3.3880570554448997,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 8.078317456095661,
+      "accuracy": 0.06617118197075042,
+      "time_rmse": 3.7627335530047112,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 10.237898235228146,
+      "accuracy": 0.15842091771340683,
+      "time_rmse": 3.180398004636031,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 11.909022335569567,
+      "accuracy": 0.07506574229022232,
+      "time_rmse": 3.334925110451523,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.720023551954408,
+      "accuracy": 0.21949987370548119,
+      "time_rmse": 3.7503759704598925,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 4.430205391927398,
+      "accuracy": 0.22372553756946123,
+      "time_rmse": 3.1660277881254313,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.535537779564951,
+      "accuracy": 0.23308823529411765,
+      "time_rmse": 3.2512343880372394,
+      "num_events": 0
+    },
+    {
+      "task": 5,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 5.244832619809796,
+      "accuracy": 0.16807558428642466,
+      "time_rmse": 3.19381809952688,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "pre_update",
+      "nll_per_event": 7.565999388753056,
+      "accuracy": 0.15843520782396087,
+      "time_rmse": 2.9435483692023374,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 5367.148655256724,
+      "accuracy": 0.17163814180929096,
+      "time_rmse": 24.915490414432686,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "post_update",
+      "nll_per_event": 6.675786025366748,
+      "accuracy": 0.21907090464547677,
+      "time_rmse": 3.211516621914977,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 5.20177971847051,
+      "accuracy": 0.24413826444283296,
+      "time_rmse": 4.721202966197278,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 7.4117949363911535,
+      "accuracy": 0.08007672021098058,
+      "time_rmse": 4.299050928700071,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 15.337265284542426,
+      "accuracy": 0.24301461163804153,
+      "time_rmse": 3.8212340754435523,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 68.85846520701351,
+      "accuracy": 0.07865168539325842,
+      "time_rmse": 4.322110597397613,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 7.400579326771281,
+      "accuracy": 0.22354129830765346,
+      "time_rmse": 3.936913087680754,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 7.369709008441048,
+      "accuracy": 0.2278328098574535,
+      "time_rmse": 3.3072771737486035,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.365837785309436,
+      "accuracy": 0.24044117647058824,
+      "time_rmse": 3.4432928712693838,
+      "num_events": 0
+    },
+    {
+      "task": 6,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 17.906772516782695,
+      "accuracy": 0.15067130780706117,
+      "time_rmse": 3.3793222583229197,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "pre_update",
+      "nll_per_event": 4.46647560506655,
+      "accuracy": 0.2360622802611753,
+      "time_rmse": 3.4505113098237334,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 7574.5534907081865,
+      "accuracy": 0.20140632847815168,
+      "time_rmse": 28.621456680632907,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "post_update",
+      "nll_per_event": 4.384771510861376,
+      "accuracy": 0.22551481667503767,
+      "time_rmse": 3.2921045588717943,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.672307926184433,
+      "accuracy": 0.24051244863427604,
+      "time_rmse": 4.305226470141794,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 7.419995392292016,
+      "accuracy": 0.07935746823303765,
+      "time_rmse": 3.9031449238839806,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 11.446797495834401,
+      "accuracy": 0.22430146116380414,
+      "time_rmse": 3.8296827852966073,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 51.94777736896366,
+      "accuracy": 0.08175950274922304,
+      "time_rmse": 3.908322035918373,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 5.78304797021028,
+      "accuracy": 0.22202576408183886,
+      "time_rmse": 3.886277464136908,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 4.458231013303334,
+      "accuracy": 0.22445035032616575,
+      "time_rmse": 3.3024560594203263,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.387621112898285,
+      "accuracy": 0.24068627450980393,
+      "time_rmse": 3.3831836291118518,
+      "num_events": 0
+    },
+    {
+      "task": 7,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 8.05667316089632,
+      "accuracy": 0.1419691695673794,
+      "time_rmse": 3.3887488701021136,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "pre_update",
+      "nll_per_event": 4.646943543989336,
+      "accuracy": 0.23315559864275326,
+      "time_rmse": 3.377196003308796,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 9611.546291808047,
+      "accuracy": 0.20649539505574407,
+      "time_rmse": 26.357378536117178,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "post_update",
+      "nll_per_event": 4.633898410991275,
+      "accuracy": 0.2317014057198255,
+      "time_rmse": 3.134556703152572,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.656712433149021,
+      "accuracy": 0.24147933284989123,
+      "time_rmse": 4.104756892929025,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 7.454452525623352,
+      "accuracy": 0.07791896427715177,
+      "time_rmse": 3.6568665823517317,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 10.309654175211485,
+      "accuracy": 0.23071007433991284,
+      "time_rmse": 3.590419635095844,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 41.68156405017332,
+      "accuracy": 0.08175950274922304,
+      "time_rmse": 3.686478523171527,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 5.930319959270018,
+      "accuracy": 0.22202576408183886,
+      "time_rmse": 3.6647217190403163,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 4.604346139617057,
+      "accuracy": 0.2302488523798019,
+      "time_rmse": 3.024353280706421,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.341741584329045,
+      "accuracy": 0.23529411764705882,
+      "time_rmse": 3.1419761781032625,
+      "num_events": 0
+    },
+    {
+      "task": 8,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 7.01772866422178,
+      "accuracy": 0.14420686225758328,
+      "time_rmse": 3.0809740616520696,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "pre_update",
+      "nll_per_event": 6.235892532477623,
+      "accuracy": 0.10641471904525111,
+      "time_rmse": 2.93556915709823,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "scratch_pre",
+      "nll_per_event": 8125.8528095474885,
+      "accuracy": 0.12431626056688215,
+      "time_rmse": 26.854102840783778,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "post_update",
+      "nll_per_event": 5.91864083478369,
+      "accuracy": 0.14370959721531576,
+      "time_rmse": 2.9021735277814704,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.694276923570825,
+      "accuracy": 0.15953589557650472,
+      "time_rmse": 4.035050484227063,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 7.130982528170702,
+      "accuracy": 0.09422200911052506,
+      "time_rmse": 3.5835849523410115,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "frozen_anchor",
+      "anchor": "C_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 8.69820789140605,
+      "accuracy": 0.09459113047936427,
+      "time_rmse": 3.5251644782194753,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "frozen_anchor",
+      "anchor": "B_prime_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 22.664530586974063,
+      "accuracy": 0.09634233803490318,
+      "time_rmse": 3.6043579277245885,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_2",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 5.325794471457439,
+      "accuracy": 0.1361454912856782,
+      "time_rmse": 3.5992380082049307,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "frozen_anchor",
+      "anchor": "X_transient",
+      "evaluation_scope": "diagnostic_only",
+      "nll_per_event": 4.954362513967745,
+      "accuracy": 0.17612949987919788,
+      "time_rmse": 2.955229548722513,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "frozen_anchor",
+      "anchor": "A_merge",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.505937643612133,
+      "accuracy": 0.14166666666666666,
+      "time_rmse": 3.043764201938724,
+      "num_events": 0
+    },
+    {
+      "task": 9,
+      "evaluation": "frozen_anchor",
+      "anchor": "E_1",
+      "evaluation_scope": "persistent",
+      "nll_per_event": 4.811199049757583,
+      "accuracy": 0.17727498756837395,
+      "time_rmse": 2.9938844642215092,
+      "num_events": 0
+    }
+  ],
+  "replay": [],
+  "benchmark_protocol": "/home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/benchmark_protocol.json",
+  "benchmark_protocol_sha256": "ca7817bd30e063a0a59bb0ca6e9bdee303f4a2f1e927f8538113fe29921b6d43"
+}

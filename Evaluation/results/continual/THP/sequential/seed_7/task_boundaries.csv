@@ -1,0 +1,11 @@
+task_id,pre_nll,post_nll,scratch_nll,shift_type,recurrence_of,new_persistent_regimes,adaptation_gain_nll,fwt_nll,fwt_eligible,fwt_status
+0,8.73305,3.42641,,initial,,"[""A_1""]",5.30664,,False,excluded_not_unseen_law_task
+1,4.10483,3.48013,9.0783,novel,,"[""B_1""]",0.6246999999999998,4.973470000000001,True,available
+2,3.31086,2.98634,6.72741,novel,,"[""C_1""]",0.3245199999999997,3.41655,True,available
+3,3.57897,3.28968,8.42872,exact_recurrence,A_1,[],0.2892899999999998,,False,excluded_not_unseen_law_task
+4,3.90254,3.25809,7.99288,near_recurrence,B_1,"[""B_prime_1""]",0.64445,4.09034,True,available
+5,3.87459,3.3107,8.57563,specialization,A_1,"[""A_2""]",0.5638899999999998,4.701040000000001,True,available
+6,3.39496,3.05576,7.28604,transient_anomaly,C_1,[],0.3392000000000004,,False,excluded_not_unseen_law_task
+7,3.444,3.17282,8.37135,merge,A_1|A_2,"[""A_merge""]",0.27117999999999975,4.92735,True,available
+8,3.21428,3.19048,8.29964,long_gap_recurrence,A_1,[],0.023800000000000043,,False,excluded_not_unseen_law_task
+9,3.66192,3.31368,8.10771,mixture,,"[""E_1""]",0.34823999999999966,4.445790000000001,True,available

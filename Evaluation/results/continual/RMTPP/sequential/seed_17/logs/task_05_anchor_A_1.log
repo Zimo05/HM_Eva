@@ -1,0 +1,18 @@
+[38;20m2026-09-12 17:35:21,276 - run_experiment.py[pid:344853;line:678:main] - INFO: Preparing taobao with seed=17[0m
+[38;20m2026-09-12 17:35:21,302 - run_experiment.py[pid:344853;line:686:main] - INFO: Time stats: median=0.738286, mean=1.525992, p99=10.032023, max=28.904158[0m
+[31;1m2026-09-12 17:35:21,315 - config.py[pid:344853;line:34:build_from_yaml_file] - CRITICAL: Load pipeline config class RunnerConfig[0m
+[31;1m2026-09-12 17:35:21,407 - runner_config.py[pid:344853;line:141:update_config] - CRITICAL: train model RMTPP using GPU with torch backend[0m
+[38;20m2026-09-12 17:35:21,418 - runner_config.py[pid:344853;line:35:__init__] - INFO: Save the config to /tmp/rmtpp_baseline_cache/taobao_5egt26l5/runtime/344853_140070308598976_260912-173521/RMTPP_train_output.yaml[0m
+[38;20m2026-09-12 17:35:21,418 - base_runner.py[pid:344853;line:176:save_log] - INFO: Save the log to /tmp/rmtpp_baseline_cache/taobao_5egt26l5/runtime/344853_140070308598976_260912-173521/log[0m
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 128 examples [00:00, 3163.26 examples/s]
+1.5139449461453975 2.098443035682038
+min_dt: 5.747e-05
+max_dt: 28.90415846
+[38;20m2026-09-12 17:35:25,053 - tpp_runner.py[pid:344853;line:62:_init_model] - INFO: Num of model parameters 9560[0m
+Generating validation split: 0 examples [00:00, ? examples/s]Generating validation split: 32 examples [00:00, 593.88 examples/s]
+Generating test split: 0 examples [00:00, ? examples/s]Generating test split: 64 examples [00:00, 2875.46 examples/s]
+[38;20m2026-09-12 17:35:26,205 - run_experiment.py[pid:344853;line:699:main] - INFO: RMTPP taobao experiment complete[0m
+[38;20m2026-09-12 17:35:26,206 - run_experiment.py[pid:344853;line:700:main] - INFO: Archive contains only log/, csv/, and plot/[0m
+[38;20m2026-09-12 17:35:26,210 - run_experiment.py[pid:344853;line:646:create_archive] - INFO: Saved archive to /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_05/anchors/A_1.tar.gz[0m
+Result directory: /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_05/anchors/A_1
+Archive: /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_05/anchors/A_1.tar.gz

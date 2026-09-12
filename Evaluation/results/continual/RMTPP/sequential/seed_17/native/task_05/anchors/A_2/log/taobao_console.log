@@ -1,0 +1,9 @@
+2026-09-12 17:36:04,436 INFO Preparing taobao with seed=17
+2026-09-12 17:36:04,462 INFO Time stats: median=0.738286, mean=1.525992, p99=10.032023, max=28.904158
+2026-09-12 17:36:04,476 CRITICAL Load pipeline config class RunnerConfig
+2026-09-12 17:36:04,564 CRITICAL train model RMTPP using GPU with torch backend
+2026-09-12 17:36:04,575 INFO Save the config to /tmp/rmtpp_baseline_cache/taobao_o3iqk1qz/runtime/345464_139716860904640_260912-173604/RMTPP_train_output.yaml
+2026-09-12 17:36:04,576 INFO Save the log to /tmp/rmtpp_baseline_cache/taobao_o3iqk1qz/runtime/345464_139716860904640_260912-173604/log
+2026-09-12 17:36:08,015 INFO Num of model parameters 9560
+2026-09-12 17:36:09,126 INFO RMTPP taobao experiment complete
+2026-09-12 17:36:09,127 INFO Archive contains only log/, csv/, and plot/

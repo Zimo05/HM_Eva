@@ -1,0 +1,15 @@
+[38;20m2026-09-12 17:43:44,501 - run_experiment.py[pid:353769;line:678:main] - INFO: Preparing taobao with seed=17[0m
+[38;20m2026-09-12 17:43:44,526 - run_experiment.py[pid:353769;line:686:main] - INFO: Time stats: median=0.662504, mean=1.417621, p99=10.201814, max=28.863838[0m
+[31;1m2026-09-12 17:43:44,540 - config.py[pid:353769;line:34:build_from_yaml_file] - CRITICAL: Load pipeline config class RunnerConfig[0m
+[31;1m2026-09-12 17:43:44,620 - runner_config.py[pid:353769;line:141:update_config] - CRITICAL: train model RMTPP using GPU with torch backend[0m
+[38;20m2026-09-12 17:43:44,630 - runner_config.py[pid:353769;line:35:__init__] - INFO: Save the config to /tmp/rmtpp_baseline_cache/taobao_kk1ow5od/runtime/353769_140707655193792_260912-174344/RMTPP_train_output.yaml[0m
+[38;20m2026-09-12 17:43:44,631 - base_runner.py[pid:353769;line:176:save_log] - INFO: Save the log to /tmp/rmtpp_baseline_cache/taobao_kk1ow5od/runtime/353769_140707655193792_260912-174344/log[0m
+1.4055006712291618 2.0319681846063022
+min_dt: 7.583e-05
+max_dt: 28.86383788
+[38;20m2026-09-12 17:43:48,144 - tpp_runner.py[pid:353769;line:62:_init_model] - INFO: Num of model parameters 9560[0m
+[38;20m2026-09-12 17:43:49,125 - run_experiment.py[pid:353769;line:699:main] - INFO: RMTPP taobao experiment complete[0m
+[38;20m2026-09-12 17:43:49,126 - run_experiment.py[pid:353769;line:700:main] - INFO: Archive contains only log/, csv/, and plot/[0m
+[38;20m2026-09-12 17:43:49,187 - run_experiment.py[pid:353769;line:646:create_archive] - INFO: Saved archive to /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_08/scratch_pre.tar.gz[0m
+Result directory: /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_08/scratch_pre
+Archive: /home/zt/zimo/Benchmark/Evaluation/results/continual/RMTPP/sequential/seed_17/native/task_08/scratch_pre.tar.gz

@@ -1,0 +1,3 @@
+regime_id,first_task,return_task,shift_type,first_pre_nll,first_post_nll,return_pre_nll,first_gain_nll,rrr,status
+A_1,0,3,exact_recurrence,9066.180067404912,1312.542850264805,126.35735789980733,7753.637217140107,1.1529843941812017,available
+A_1,0,8,long_gap_recurrence,9066.180067404912,1312.542850264805,4.646943543989336,7753.637217140107,1.1686815967904192,available

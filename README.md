@@ -132,9 +132,13 @@ DWS 入口额外支持 `--variant 8|13|20`；continual 入口支持非负的 `--
 | `RMTPP` | RNN-based TPP | 传统 recurrent baseline |
 | `FullyNN` | Neural TPP | 传统神经点过程 baseline |
 | `THP` | Transformer Hawkes Process | attention-based TPP baseline |
+| `S2P2` | Structured State-Space Point Process | EasyTPP state-space baseline |
+| `AttNHP` | Attentive Neural Hawkes Process | EasyTPP attention-based TPP baseline |
 | `TPP_LLM` | LLM-based TPP | 大模型方向 baseline |
 
 主指标是 test NLL/event、Accuracy、Macro-F1、time MAE/RMSE，以及 checkpoint bytes、参数规模、训练时间和可获得的 GPU 信息。
+
+S2P2 和 AttNHP 共用 `Models/EasyTPP/run_experiment.py`。它们读取现有 EasyTPP-compatible pickle，不改模型内部实现；训练只使用 train/validation，按 validation log-likelihood 保存 `checkpoint/best.pt`，然后对 test 只评估一次。thinning 的 `dtime_max` 只从 train split 的最大间隔乘以 1.2 得到。
 
 ### 5.2 DWS-13：主 synthetic 实验
 
@@ -145,6 +149,8 @@ python evaluate_dws_HM.py --variant 13 --seed 42 --device cuda:0
 python evaluate_dws_RMTPP.py --variant 13 --seed 42 --device cuda:0
 python evaluate_dws_FullyNN.py --variant 13 --seed 42 --device cuda:0
 python evaluate_dws_THP.py --variant 13 --seed 42 --device cuda:0
+python evaluate_dws_S2P2.py --variant 13 --seed 42 --device cuda:0
+python evaluate_dws_AttNHP.py --variant 13 --seed 42 --device cuda:0
 python evaluate_dws_TPP_LLM.py --variant 13 --seed 42 --device cuda:0
 ```
 
@@ -175,6 +181,8 @@ python evaluate_retweet_HM.py --seed 2024 --device cuda:0
 python evaluate_retweet_RMTPP.py --seed 2024 --device cuda:0
 python evaluate_retweet_FullyNN.py --seed 2024 --device cuda:0
 python evaluate_retweet_THP.py --seed 2024 --device cuda:0
+python evaluate_retweet_S2P2.py --seed 2024 --device cuda:0
+python evaluate_retweet_AttNHP.py --seed 2024 --device cuda:0
 python evaluate_retweet_TPP_LLM.py --seed 2024 --device cuda:0
 ```
 
@@ -189,6 +197,8 @@ python evaluate_taobao_HM.py --seed 2024 --device cuda:0
 python evaluate_taobao_RMTPP.py --seed 2024 --device cuda:0
 python evaluate_taobao_FullyNN.py --seed 2024 --device cuda:0
 python evaluate_taobao_THP.py --seed 2024 --device cuda:0
+python evaluate_taobao_S2P2.py --seed 2024 --device cuda:0
+python evaluate_taobao_AttNHP.py --seed 2024 --device cuda:0
 python evaluate_taobao_TPP_LLM.py --seed 2024 --device cuda:0
 ```
 
@@ -204,6 +214,8 @@ python evaluate_stackoverflow_RMTPP.py --seed 2024 --device cuda:0
 python evaluate_stackoverflow_FullyNN.py --seed 2024 --device cuda:0
 python evaluate_stackoverflow_THP.py --seed 2024 --device cuda:0
 python evaluate_stackoverflow_TPP_LLM.py --seed 2024 --device cuda:0
+python evaluate_stackoverflow_S2P2.py --seed 2024 --device cuda:0
+python evaluate_stackoverflow_AttNHP.py --seed 2024 --device cuda:0
 ```
 
 正式种子为 `2024, 2025, 2026`。
@@ -266,6 +278,8 @@ Sequential 表示模型按 task 顺序更新，只保留上一阶段模型状态
 ```bash
 python evaluate_continual_RMTPP_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_THP_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
+python evaluate_continual_S2P2_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
+python evaluate_continual_AttNHP_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_TPP_LLM.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 ```
 
@@ -278,6 +292,8 @@ Joint 在 task `t` 训练时可以访问 task `0..t` 的全部训练数据。它
 ```bash
 python evaluate_continual_RMTPP_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_THP_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
+python evaluate_continual_S2P2_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
+python evaluate_continual_AttNHP_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 ```
 
 ### 6.6 Byte-matched replay
@@ -292,6 +308,8 @@ python evaluate_continual_RMTPP_replay.py --seed 7 --task-start 0 --task-end 9 -
 
 结束后检查 `replay_manifest.csv`，其中 `actual_bytes` 必须小于等于 `budget_bytes`。缺少 HM `resource_manifest.json` 时脚本会拒绝运行。
 
+S2P2 和 AttNHP 的 replay 入口分别为 `evaluate_continual_S2P2_replay.py` 和 `evaluate_continual_AttNHP_replay.py`，使用同一份 HM resource manifest 和字节预算。
+
 ### 6.7 从中间 checkpoint 继续
 
 如果 task 0–4 已在另一台机器完成，可以把 `task_04_best.pt` 复制过来，再将 task 5–9 作为独立结果包运行：
@@ -300,7 +318,7 @@ python evaluate_continual_RMTPP_replay.py --seed 7 --task-start 0 --task-end 9 -
 python evaluate_continual_HM.py --seed 7 --task-start 5 --task-end 9 --checkpoint D:/shared/task_04_best.pt --run-id tasks_05_09 --device cuda:0
 ```
 
-RMTPP、THP 和 TPP-LLM continual 入口同样支持这种方式。请保证 checkpoint 的模型、策略、seed 和超参数与前半段一致。
+RMTPP、THP、S2P2、AttNHP 和 TPP-LLM continual 入口同样支持这种方式。请保证 checkpoint 的模型、策略、seed 和超参数与前半段一致。
 
 ## 7. HawkesMemory 消融实验
 
@@ -429,7 +447,7 @@ results/continual/RMTPP/replay/seed_7/
 
 事件级预测统一包含 `sequence_id`、`event_index`、`true_type`、`predicted_type`、`type_probabilities`、真实/预测时间间隔和 `event_nll`。
 
-RMTPP 与 FullyNN 的上游 EasyTPP API 当前不暴露逐事件 probability 和 likelihood term，因此这两个字段可能为 `null`，但 aggregate test NLL 是真实模型 NLL。THP、TPP-LLM 和 HM 会导出 probability 与 event NLL。
+RMTPP 与 FullyNN 的上游 EasyTPP API 当前不暴露逐事件 probability 和 likelihood term，因此这两个字段可能为 `null`，但 aggregate test NLL 是真实模型 NLL。THP、S2P2、AttNHP、TPP-LLM 和 HM 会导出 probability 与 event NLL。
 
 `resources.json` 不会伪造无法读取的资源数据。若父进程无法取得子训练进程的 CUDA peak allocation，`peak_gpu_memory_bytes` 会是 `null` 并附带说明；需要严格峰值显存时，应由运行同事同时使用统一的外部 GPU 监控方案。
 

@@ -323,6 +323,7 @@ class HawkesTree(
         precomputed_node_delta: Optional[torch.Tensor],
         precomputed_episodic_delta: Optional[torch.Tensor],
         precomputed_memory_info: Optional[Mapping[str, torch.Tensor]],
+        visit_chunk_size: int,
     ):
         output = self.frontier_routing(
             z_t,
@@ -339,6 +340,7 @@ class HawkesTree(
             precomputed_node_delta=precomputed_node_delta,
             precomputed_episodic_delta=precomputed_episodic_delta,
             precomputed_memory_info=precomputed_memory_info,
+            visit_chunk_size=visit_chunk_size,
         )
         batch_size = z_t.size(0)
         frontier_mass = output.frontier_mass
@@ -385,6 +387,10 @@ class HawkesTree(
             "router_evaluated_mask": evaluated_mask,
             "theta_sem_mix": theta_sem_mix,
             "theta_sem_leaf": None,
+            # Keep the raw effective theta available to tensor-only training
+            # paths without making them unpack the FrontierEffectiveParameters
+            # compatibility wrapper.
+            "effective_theta": output.effective_params.theta,
             "effective_params": output.effective_params,
             "episodic_delta": episodic,
             "frontier_semantic_theta": semantic,
@@ -445,6 +451,7 @@ class HawkesTree(
         precomputed_node_delta: Optional[torch.Tensor] = None,
         precomputed_episodic_delta: Optional[torch.Tensor] = None,
         precomputed_memory_info: Optional[Mapping[str, torch.Tensor]] = None,
+        visit_chunk_size: int = 64,
     ):
         return self._forward_frontier(
             z_t,
@@ -461,6 +468,7 @@ class HawkesTree(
             precomputed_node_delta=precomputed_node_delta,
             precomputed_episodic_delta=precomputed_episodic_delta,
             precomputed_memory_info=precomputed_memory_info,
+            visit_chunk_size=visit_chunk_size,
         )
 
 

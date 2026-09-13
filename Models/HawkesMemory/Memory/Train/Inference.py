@@ -980,6 +980,9 @@ class MemoryTreeInference:
                 # results independent of evaluation order and batch schedule.
                 update_search_state=False,
                 materialize_diagnostics=False,
+                visit_chunk_size=(
+                    self.wake_config.retrieval_visit_chunk_size
+                ),
             )
             frontier_energy = self._batched_event_nll(
                 static_memory_output["frontier_theta"],
@@ -1010,11 +1013,24 @@ class MemoryTreeInference:
                 static_memory_output["frontier_mask"],
                 posterior,
             )
+            owner_similarity, owner_valid = (
+                self.tree.episodic_memory.owner_similarity_from_packed(
+                    packed_memory_info=static_memory_output[
+                        "packed_memory_info"
+                    ],
+                    visited_node_indices=static_memory_output[
+                        "visited_node_indices"
+                    ],
+                    visited_node_mask=static_memory_output[
+                        "visited_node_mask"
+                    ],
+                    owner_indices=owner_indices,
+                )
+            )
             novelty, count, weighted_similarity = (
-                self.tree.episodic_memory.novelty_count_packed(
-                    query_flat,
-                    owner_indices,
-                    tuple(self.tree.all_node_ids),
+                self.tree.episodic_memory.novelty_from_similarity(
+                    owner_similarity,
+                    owner_valid,
                     temperature=self.controller.novelty_temperature,
                     count_exponent=self.controller.count_exponent,
                     eps=self.controller.controller_eps,
@@ -2388,6 +2404,9 @@ class MemoryTreeInference:
                         self.config.allow_memory_writes
                         or self.config.update_memory_usage
                     ),
+                    visit_chunk_size=(
+                        self.wake_config.retrieval_visit_chunk_size
+                    ),
                 )
                 pre_action_params = self._controller_effective_parameters(
                     memory_output,
@@ -3038,6 +3057,7 @@ class MemoryTreeInference:
             working_delta=self.tree.working_memory.delta,
             decays=self.hawkes.decays,
             update_memory_state=False,
+            visit_chunk_size=self.wake_config.retrieval_visit_chunk_size,
         )
         params = memory_output["effective_params"].select(0)
         if event_index == 0:

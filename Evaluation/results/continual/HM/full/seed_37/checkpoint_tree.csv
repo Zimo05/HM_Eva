@@ -1,0 +1,11 @@
+﻿checkpoint,checkpoint_sha256,checkpoint_task,episodic_bytes,episodic_rows,history_epochs,leaf_count,leaf_ids,max_depth,mean_leaf_depth,memory_rows,merge_count,nise,node_count,prune_count,semantic_bytes,split_count
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_00_best.pt,1a86eafabfd4711665a0f9000d3295ac90c2cb11a209df46d23706f56a063072,0,195019,12,12,1,"[""root""]",0,0.0,12,0,,1,0,1692,0
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_01_best.pt,04b6724d842b45493eded77c037734c76856ebe0da902d000891e02867545a68,1,402962,36,33,1,"[""root""]",0,0.0,36,2,,1,0,1692,2
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_02_best.pt,5a9d2cd62673ba9d0c3ba4986fd34ea9d2ab68d0db314cf29b18f57b8ab13d46,2,604444,60,63,1,"[""root""]",0,0.0,60,3,,1,0,1692,3
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_03_best.pt,6adddec9003355fca9ab1e54a764f1b9b486d7007a51431c00cdf75bb95b44b4,3,1053308,108,92,1,"[""root""]",0,0.0,108,5,,1,0,1692,6
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_04_best.pt,24cb74fcadf7abe5b2013550f0bd768872616efb5ba04192162b56f30983020f,4,191697,12,118,1,"[""root""]",0,0.0,12,6,,1,0,1692,7
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_05_best.pt,ae7ea604a0c974f0b37c083c6e486bb888c618c2c553d92cc701e7febf2486ed,5,503068,48,148,1,"[""root""]",0,0.0,48,7,,1,0,1692,8
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_06_best.pt,e24b5af5182331ff5a4db6bf8374130e98b775e0083164e1b7b26438c77a1cf1,6,596704,60,178,1,"[""root""]",0,0.0,60,7,,1,0,1692,8
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_07_best.pt,416f0baaf406f59df502a58c17ca29bcde3f21667c312318b2e5c5af58f48baa,7,705064,72,199,1,"[""root""]",0,0.0,72,7,,1,0,1692,8
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_08_best.pt,2ab5b9f9fb6c1b156047160a0930584be8eadee14e651c0cd436681fd9a2af28,8,712808,72,201,1,"[""root""]",0,0.0,72,7,,1,0,1692,9
+/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_37/checkpoint/task_09_best.pt,62b768972dba8d6dcc81a1650dd1dda975006731b819253fb2f33618ac62669b,9,721384,72,217,1,"[""root""]",0,0.0,72,8,,1,0,1692,10

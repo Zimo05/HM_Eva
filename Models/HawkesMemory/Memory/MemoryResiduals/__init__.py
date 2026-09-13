@@ -1,4 +1,4 @@
-from .EpisodicMemory import TreeEpisodicMemory
+from .EpisodicMemory import PackedMemoryReadSnapshot, TreeEpisodicMemory
 from .MemoryBank import (
     EffectiveHawkesParameters,
     EventWindow,
@@ -22,6 +22,7 @@ __all__ = [
     "MemoryBank",
     "MemoryItem",
     "MemoryQueryNet",
+    "PackedMemoryReadSnapshot",
     "ProbationCandidate",
     "SmoothSparseRetriever",
     "TreeEpisodicMemory",

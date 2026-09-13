@@ -1,0 +1,76 @@
+{
+  "format_version": 1,
+  "measurement": "torch serialized tree_state_dict (semantic tree plus episodic buffers)",
+  "stages": {
+    "0": {
+      "checkpoint_bytes": 6886002,
+      "tree_and_episodic_bytes": 6886002,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_00_best.pt",
+      "checkpoint_role": "best"
+    },
+    "1": {
+      "checkpoint_bytes": 7439930,
+      "tree_and_episodic_bytes": 7439930,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_01_best.pt",
+      "checkpoint_role": "best"
+    },
+    "2": {
+      "checkpoint_bytes": 7870354,
+      "tree_and_episodic_bytes": 7870354,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_02_best.pt",
+      "checkpoint_role": "best"
+    },
+    "3": {
+      "checkpoint_bytes": 7884642,
+      "tree_and_episodic_bytes": 7884642,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_03_best.pt",
+      "checkpoint_role": "best"
+    },
+    "4": {
+      "checkpoint_bytes": 7889042,
+      "tree_and_episodic_bytes": 7889042,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_04_best.pt",
+      "checkpoint_role": "best"
+    },
+    "5": {
+      "checkpoint_bytes": 8315954,
+      "tree_and_episodic_bytes": 8315954,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_05_best.pt",
+      "checkpoint_role": "best"
+    },
+    "6": {
+      "checkpoint_bytes": 8660418,
+      "tree_and_episodic_bytes": 8660418,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_06_best.pt",
+      "checkpoint_role": "best"
+    },
+    "7": {
+      "checkpoint_bytes": 9171826,
+      "tree_and_episodic_bytes": 9171826,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_07_best.pt",
+      "checkpoint_role": "best"
+    },
+    "8": {
+      "checkpoint_bytes": 9245194,
+      "tree_and_episodic_bytes": 9245194,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_08_best.pt",
+      "checkpoint_role": "best"
+    },
+    "9": {
+      "checkpoint_bytes": 9397250,
+      "tree_and_episodic_bytes": 9397250,
+      "measurement_warning": "No module named 'MemoryResiduals'",
+      "checkpoint": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_27/checkpoint/task_09_best.pt",
+      "checkpoint_role": "best"
+    }
+  }
+}

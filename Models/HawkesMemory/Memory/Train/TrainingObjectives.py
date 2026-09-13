@@ -1102,6 +1102,9 @@ class TrainingObjectivesMixin:
                 update_search_state=False,
                 detach_routing=True,
                 materialize_diagnostics=False,
+                visit_chunk_size=(
+                    self.wake_config.retrieval_visit_chunk_size
+                ),
             )
             # All three Global parameter variants share the same routing
             # reduction.  Cache the affine semantic/episodic bases once and
@@ -1117,13 +1120,13 @@ class TrainingObjectivesMixin:
             ).sum(dim=1)
             sequence_index = flat["sequence_index"]
             # The no-retrieval NLL is the only value needed before the causal
-            # controller gate is known.  Keep it detached; the final pass
-            # below evaluates full/no-retrieval/gated variants together.
+            # controller gate is known. Evaluate it directly from raw theta;
+            # the gated theta is causally unavailable until after Controller.
             with torch.no_grad():
-                pre_action_terms = self._batched_sequence_event_nll_variants(
+                pre_action_terms = self._batched_raw_theta_event_nll(
                     flat,
-                    memory_output["semantic_base"].detach().unsqueeze(1),
-                )[:, 0]
+                    memory_output["semantic_base"].detach(),
+                )
 
             # Posterior/mix remain useful for ownership, memory assignment,
             # prototype credit, and diagnostics, but are outside autograd.
@@ -1167,125 +1170,29 @@ class TrainingObjectivesMixin:
                     memory_output["frontier_node_indices"], posterior
                 )
             )
-            packed_memory_info = memory_output.get("packed_memory_info")
-            visited_indices = memory_output.get("visited_node_indices")
-            visited_mask = memory_output.get("visited_node_mask")
-            can_reuse_similarity = (
-                packed_memory_info is not None
-                and visited_indices is not None
-                and visited_mask is not None
-                and "similarity" in packed_memory_info
-                and "valid_mask" in packed_memory_info
+            owner_similarity, owner_valid = (
+                self.tree.episodic_memory.owner_similarity_from_packed(
+                    packed_memory_info=memory_output["packed_memory_info"],
+                    visited_node_indices=memory_output[
+                        "visited_node_indices"
+                    ],
+                    visited_node_mask=memory_output["visited_node_mask"],
+                    owner_indices=owner_indices,
+                )
             )
-            if can_reuse_similarity:
-                owner_slot_mask = (
-                    visited_indices == owner_indices[:, None]
-                ) & visited_mask
-                owner_slots = owner_slot_mask.to(torch.long).argmax(dim=1)
-                row = torch.arange(
-                    owner_indices.size(0),
-                    device=owner_indices.device,
+            novelty, soft_count, retrieval_similarity = (
+                self.tree.episodic_memory.novelty_from_similarity(
+                    owner_similarity,
+                    owner_valid,
+                    temperature=self.controller.novelty_temperature,
+                    count_exponent=self.controller.count_exponent,
+                    eps=self.controller.controller_eps,
+                    count_similarity_low=self.controller.count_similarity_low,
+                    count_similarity_high=self.controller.count_similarity_high,
+                    count_topk=self.controller.count_topk,
+                    count_saturation=self.controller.count_saturation,
                 )
-                owner_similarity = packed_memory_info["similarity"][
-                    row,
-                    owner_slots,
-                ]
-                owner_valid = packed_memory_info["valid_mask"][
-                    row,
-                    owner_slots,
-                ]
-                # The current retriever returns zero similarity for a valid
-                # row with no context aliases, while the legacy novelty path
-                # intentionally produced -inf for that edge case.  Preserve
-                # that behavior when the optional context mask is present.
-                context_valid = packed_memory_info.get("context_valid")
-                if context_valid is not None:
-                    owner_context_valid = context_valid[row, owner_slots]
-                    owner_similarity = torch.where(
-                        owner_valid & ~owner_context_valid.any(dim=-1),
-                        torch.full_like(owner_similarity, -torch.inf),
-                        owner_similarity,
-                    )
-                # Every final frontier node is also a visited node in the
-                # normal packed route.  Hand-built/legacy outputs can violate
-                # that invariant, though, and an async device assertion here
-                # would only surface at a later unrelated scalar read (usually
-                # ``bool(self.split_enabled)``).  Keep the hot path fully
-                # device-side: compute the normal reuse result, then rerun the
-                # original packed lookup only for missing owner rows.  The
-                # empty-row call is supported and avoids a CUDA-to-host branch
-                # when all owners are present.
-                owner_present = owner_slot_mask.any(dim=-1)
-                safe_owner_indices = owner_indices.clamp(
-                    0, len(self.tree.all_node_ids) - 1
-                )
-                novelty, soft_count, retrieval_similarity = (
-                    self.tree.episodic_memory.novelty_from_similarity(
-                        owner_similarity,
-                        owner_valid,
-                        temperature=self.controller.novelty_temperature,
-                        count_exponent=self.controller.count_exponent,
-                        eps=self.controller.controller_eps,
-                        count_similarity_low=(
-                            self.controller.count_similarity_low
-                        ),
-                        count_similarity_high=(
-                            self.controller.count_similarity_high
-                        ),
-                        count_topk=self.controller.count_topk,
-                        count_saturation=self.controller.count_saturation,
-                    )
-                )
-                missing_rows = torch.nonzero(
-                    ~owner_present,
-                    as_tuple=False,
-                ).reshape(-1)
-                fallback_novelty, fallback_count, fallback_similarity = (
-                    self.tree.episodic_memory.novelty_count_packed(
-                        memory_query.index_select(0, missing_rows),
-                        safe_owner_indices.index_select(0, missing_rows),
-                        self.tree.all_node_ids,
-                        temperature=self.controller.novelty_temperature,
-                        count_exponent=self.controller.count_exponent,
-                        eps=self.controller.controller_eps,
-                        count_similarity_low=(
-                            self.controller.count_similarity_low
-                        ),
-                        count_similarity_high=(
-                            self.controller.count_similarity_high
-                        ),
-                        count_topk=self.controller.count_topk,
-                        count_saturation=self.controller.count_saturation,
-                    )
-                )
-                novelty = novelty.index_copy(
-                    0, missing_rows, fallback_novelty
-                )
-                soft_count = soft_count.index_copy(
-                    0, missing_rows, fallback_count
-                )
-                retrieval_similarity = retrieval_similarity.index_copy(
-                    0, missing_rows, fallback_similarity
-                )
-            else:
-                novelty, soft_count, retrieval_similarity = (
-                    self.tree.episodic_memory.novelty_count_packed(
-                        memory_query,
-                        owner_indices,
-                        self.tree.all_node_ids,
-                        temperature=self.controller.novelty_temperature,
-                        count_exponent=self.controller.count_exponent,
-                        eps=self.controller.controller_eps,
-                        count_similarity_low=(
-                            self.controller.count_similarity_low
-                        ),
-                        count_similarity_high=(
-                            self.controller.count_similarity_high
-                        ),
-                        count_topk=self.controller.count_topk,
-                        count_saturation=self.controller.count_saturation,
-                    )
-                )
+            )
             retrieval_norm = memory_output[
                 "frontier_episodic_delta"
             ].detach().norm(dim=-1)
@@ -1310,26 +1217,17 @@ class TrainingObjectivesMixin:
                 + controller_output["probabilities"][:, 1, None]
                 * memory_output["episodic_base"]
             )
-            # All three definitions share the same event statistics.  Stack
-            # them as [N, 3, P] so softplus/intensity/integral launch as one
-            # variant-aware tensor computation.  Only the gated slice keeps
-            # the controller gradient; full and pre slices are detached
-            # targets/utility measurements.
-            theta_variants = torch.stack(
-                (
-                    memory_output["effective_params"].theta.detach(),
-                    memory_output["semantic_base"].detach(),
-                    gated_theta,
-                ),
-                dim=1,
-            )
-            variant_event_terms = self._batched_sequence_event_nll_variants(
+            # Full retrieval is a detached counterfactual used only for
+            # retrieval utility. Prediction is evaluated only after the
+            # Controller has produced p_R, preserving the recurrent order.
+            full_retrieval_event_terms = self._batched_raw_theta_event_nll(
                 flat,
-                theta_variants,
+                memory_output["effective_theta"].detach(),
             )
-            full_retrieval_event_terms = variant_event_terms[:, 0].detach()
-            pre_action_terms = variant_event_terms[:, 1].detach()
-            event_terms = variant_event_terms[:, 2]
+            event_terms = self._batched_raw_theta_event_nll(
+                flat,
+                gated_theta,
+            )
             batch_prediction_sum = event_terms.sum()
             batch_prediction = batch_prediction_sum / batch_event_count
             # Epochs 1/2/3 use 0.1, 0.0667, 0.0333; epoch 4+ is utility-only.

@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
@@ -17,6 +18,22 @@ from .MemoryBank import (
     effective_hawkes_law_key,
 )
 from .SimilarityFeatures import local_recurrence_count
+
+
+@dataclass(frozen=True)
+class PackedMemoryReadSnapshot:
+    """Immutable packed-memory inputs shared by one read transaction.
+
+    ``mirror`` is a detached tensor snapshot of the authoritative bank
+    dictionaries, while ``age_clock`` fixes the logical age used by every
+    microbatch in the transaction.  The tensors are intentionally shared
+    rather than cloned per consumer; callers must treat the mapping as
+    read-only.
+    """
+
+    node_ids: tuple[str, ...]
+    mirror: Mapping[str, Tensor]
+    age_clock: int
 
 
 class TreeEpisodicMemory(nn.Module):
@@ -300,6 +317,25 @@ class TreeEpisodicMemory(nn.Module):
         self._packed_mirror_signature = signature
         self._packed_mirror_rebuilds += 1
         return self._packed_mirror
+
+    def prepare_packed_read_snapshot(
+        self,
+        node_ids: Sequence[str],
+        reference: Tensor,
+    ) -> PackedMemoryReadSnapshot:
+        """Capture one bank mirror and logical age for a read transaction.
+
+        The returned snapshot is safe to reuse across microbatches: later
+        reads do not re-resolve the bank mirror or observe an advancing age
+        clock.  Persistent writes should remain outside the transaction.
+        """
+        ordered_node_ids = tuple(node_ids)
+        mirror = self._packed_bank_mirror(ordered_node_ids, reference)
+        return PackedMemoryReadSnapshot(
+            node_ids=ordered_node_ids,
+            mirror=mirror,
+            age_clock=int(self._age_clock),
+        )
 
     def get_bank(self, node_id: str) -> MemoryBank:
         if not node_id:
@@ -661,12 +697,17 @@ class TreeEpisodicMemory(nn.Module):
         update_state: bool = True,
         keep_gate: Optional[Tensor] = None,
         null_logit: Optional[float | Tensor] = None,
+        snapshot: Optional[PackedMemoryReadSnapshot] = None,
+        info_fields: Optional[Sequence[str]] = None,
+        visit_chunk_size: int = 64,
     ) -> Tuple[Tensor, Dict[str, Tensor]]:
         """Retrieve all ``prefix × visited-node × bank-row`` entries at once.
 
         Persistent dictionaries remain the source of truth. This method builds
         the fixed ``[node, capacity, *]`` mirror used by Wake, gathers the
         visited rows, and applies the existing batched retriever semantics.
+        Pass a :class:`PackedMemoryReadSnapshot` when several calls belong to
+        one transaction and must share the same mirror and age clock.
         """
         if query.ndim != 2 or query.size(-1) != self.key_dim:
             raise ValueError("query must have shape [N, key_dim]")
@@ -678,10 +719,46 @@ class TreeEpisodicMemory(nn.Module):
             raise ValueError("query and visited-node rows must align")
         if len(node_ids) == 0:
             raise ValueError("node_ids cannot be empty")
+        ordered_node_ids = tuple(node_ids)
+        if snapshot is None:
+            snapshot = self.prepare_packed_read_snapshot(
+                ordered_node_ids,
+                query,
+            )
+        elif snapshot.node_ids != ordered_node_ids:
+            raise ValueError("packed snapshot node ordering mismatch")
+        mirror = snapshot.mirror
+        if mirror["keys"].device != query.device:
+            raise ValueError("packed snapshot is on the wrong device")
+        if mirror["keys"].dtype != query.dtype:
+            raise ValueError("packed snapshot has the wrong dtype")
+        visit_chunk_size = int(visit_chunk_size)
+        if visit_chunk_size <= 0:
+            raise ValueError("visit_chunk_size must be positive")
+        available_info_fields = (
+            "alpha",
+            "similarity",
+            "effective_k",
+            "null_alpha",
+            "valid_mask",
+            "context_valid",
+        )
+        requested_info_fields = (
+            available_info_fields
+            if info_fields is None
+            else tuple(dict.fromkeys(info_fields))
+        )
+        unknown_info_fields = set(requested_info_fields).difference(
+            available_info_fields
+        )
+        if unknown_info_fields:
+            raise ValueError(
+                "unknown packed retrieval info fields: "
+                f"{sorted(unknown_info_fields)}"
+            )
 
-        node_count = len(node_ids)
+        node_count = len(ordered_node_ids)
         device = query.device
-        mirror = self._packed_bank_mirror(node_ids, query)
         capacity = int(mirror["keys"].size(1))
         if keep_gate is not None:
             if keep_gate.shape != (node_count, capacity):
@@ -699,7 +776,7 @@ class TreeEpisodicMemory(nn.Module):
         usage = mirror["usage"]
         valid = mirror["valid"]
         age_offset = (
-            self._age_clock - mirror["age_reference"]
+            snapshot.age_clock - mirror["age_reference"]
         ).to(query.dtype)
         age = (
             mirror["base_age"]
@@ -737,14 +814,13 @@ class TreeEpisodicMemory(nn.Module):
         # allocation seen in frontier training.  Chunking keeps peak memory
         # independent of the number of visited frontier rows while preserving
         # exactly the same per-row retriever calculation.
-        retrieval_chunk_size = 64
         credit = (
             query.new_zeros(node_count, capacity)
             if update_state
             else None
         )
-        for start in range(0, int(active_rows.numel()), retrieval_chunk_size):
-            stop = min(start + retrieval_chunk_size, int(active_rows.numel()))
+        for start in range(0, int(active_rows.numel()), visit_chunk_size):
+            stop = min(start + visit_chunk_size, int(active_rows.numel()))
             row_chunk = active_rows[start:stop]
             node_chunk = active_nodes[start:stop]
             retrieved, retrieval_info = self.retriever.forward_batched(
@@ -782,7 +858,7 @@ class TreeEpisodicMemory(nn.Module):
 
         if update_state:
             with torch.no_grad():
-                for node_index, node_id in enumerate(node_ids):
+                for node_index, node_id in enumerate(ordered_node_ids):
                     bank = self.banks.get(node_id)
                     if bank is not None and len(bank):
                         bank.cycle_usage.add_(
@@ -790,7 +866,7 @@ class TreeEpisodicMemory(nn.Module):
                         )
 
         shape = (*node_indices.shape, self.param_dim)
-        info = {
+        all_info = {
             "alpha": alpha.reshape(*node_indices.shape, capacity).detach(),
             "similarity": similarity.reshape(
                 *node_indices.shape, capacity
@@ -803,6 +879,10 @@ class TreeEpisodicMemory(nn.Module):
             "context_valid": gathered_context_valid.reshape(
                 *node_indices.shape, capacity, -1
             ).detach(),
+        }
+        info = {
+            key: all_info[key]
+            for key in requested_info_fields
         }
         return flat_delta.reshape(shape), info
 
@@ -871,6 +951,99 @@ class TreeEpisodicMemory(nn.Module):
         )
         return novelty, normalized_count, weighted_similarity
 
+    def owner_similarity_from_packed(
+        self,
+        packed_memory_info: Mapping[str, Tensor],
+        visited_node_indices: Tensor,
+        visited_node_mask: Tensor,
+        owner_indices: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Gather owner-bank similarities from an existing packed read.
+
+        ``owner_indices`` and ``visited_node_indices`` use the global node
+        index space.  The packed retrieval tensors are indexed by visited-node
+        slot, so resolving that slot explicitly avoids recomputing a second
+        query/key cosine pass for novelty and recurrence-count features.
+        """
+        if (
+            visited_node_indices.ndim != 2
+            or visited_node_mask.shape != visited_node_indices.shape
+            or owner_indices.ndim != 1
+            or owner_indices.size(0) != visited_node_indices.size(0)
+        ):
+            raise ValueError(
+                "owner and visited-node tensors must align as [B] and [B, V]"
+            )
+        if visited_node_mask.dtype != torch.bool:
+            raise ValueError("visited_node_mask must be boolean")
+        similarity = packed_memory_info.get("similarity")
+        valid = packed_memory_info.get("valid_mask")
+        if similarity is None or valid is None:
+            raise ValueError(
+                "packed memory info must contain similarity and valid_mask"
+            )
+        if (
+            similarity.ndim != 3
+            or valid.shape != similarity.shape
+            or similarity.shape[:2] != visited_node_indices.shape
+        ):
+            raise ValueError(
+                "packed similarity/valid tensors must have shape [B, V, C]"
+            )
+        if valid.dtype != torch.bool:
+            raise ValueError("packed valid_mask must be boolean")
+        if (
+            owner_indices.device != visited_node_indices.device
+            or similarity.device != visited_node_indices.device
+        ):
+            raise ValueError("packed owner inputs must share a device")
+
+        owner_match = visited_node_mask & visited_node_indices.eq(
+            owner_indices[:, None]
+        )
+        owner_present = owner_match.any(dim=1)
+        if owner_present.device.type == "cuda":
+            # Keep the production path asynchronous; an invalid topology is
+            # reported by the device without a CUDA-to-host synchronization.
+            torch._assert_async(
+                owner_present.all(),
+                "posterior owner must belong to visited path union",
+            )
+        elif not bool(owner_present.all()):
+            raise RuntimeError(
+                "posterior owner must belong to visited path union"
+            )
+
+        owner_slot = owner_match.to(torch.long).argmax(dim=1)
+        row_index = torch.arange(
+            owner_indices.size(0),
+            device=owner_indices.device,
+        )
+        owner_similarity = similarity[row_index, owner_slot]
+        owner_valid = valid[row_index, owner_slot]
+
+        # ``forward_batched`` maps rows with no valid context alias to a zero
+        # similarity, while the legacy novelty path used -inf for that case.
+        # Preserve that edge-case result while still reusing the first cosine.
+        context_valid = packed_memory_info.get("context_valid")
+        if context_valid is not None:
+            if (
+                context_valid.ndim != 4
+                or context_valid.shape[:2] != visited_node_indices.shape
+                or context_valid.shape[:3] != similarity.shape
+                or context_valid.dtype != torch.bool
+            ):
+                raise ValueError(
+                    "packed context_valid must have shape [B, V, C, A]"
+                )
+            owner_context_valid = context_valid[row_index, owner_slot]
+            owner_similarity = torch.where(
+                owner_valid & ~owner_context_valid.any(dim=-1),
+                torch.full_like(owner_similarity, -torch.inf),
+                owner_similarity,
+            )
+        return owner_similarity, owner_valid
+
     def novelty_count_packed(
         self,
         query: Tensor,
@@ -885,7 +1058,12 @@ class TreeEpisodicMemory(nn.Module):
         count_topk: Optional[int] = None,
         count_saturation: float = 3.0,
     ) -> Tuple[Tensor, Tensor, Tensor]:
-        """Vectorized novelty and local recurrence count for owner nodes."""
+        """Compatibility path for callers without an existing packed read.
+
+        Wake/Global and batched inference already have retrieval similarity
+        tensors, so those paths call :meth:`novelty_from_similarity` directly
+        and avoid this second cosine computation.
+        """
         if query.ndim != 2 or query.size(-1) != self.key_dim:
             raise ValueError("query must have shape [B, key_dim]")
         if node_indices.shape != (query.size(0),):

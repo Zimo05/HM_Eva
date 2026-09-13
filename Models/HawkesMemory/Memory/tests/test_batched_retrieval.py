@@ -145,6 +145,132 @@ class MaskedEntmaxTests(unittest.TestCase):
         )
         self.assertEqual(memory._packed_mirror_rebuilds, 2)
 
+    def test_packed_read_snapshot_freezes_age_and_reuses_mirror(self):
+        torch.manual_seed(93)
+        memory = TreeEpisodicMemory(
+            key_dim=3,
+            num_event_types=2,
+            num_basis=1,
+            capacity_per_node=5,
+            device="cpu",
+        )
+        memory.add_memory(
+            "root", torch.randn(3), torch.randn(memory.param_dim)
+        )
+        query = torch.randn(1, 3)
+        indices = torch.tensor([[0]])
+        mask = torch.ones_like(indices, dtype=torch.bool)
+        snapshot = memory.prepare_packed_read_snapshot(
+            ("root",),
+            query,
+        )
+
+        before, before_info = memory.read_packed(
+            query,
+            indices,
+            mask,
+            ("root",),
+            update_state=False,
+            snapshot=snapshot,
+        )
+        memory.step_age(5)
+        after, after_info = memory.read_packed(
+            query,
+            indices,
+            mask,
+            ("root",),
+            update_state=False,
+            snapshot=snapshot,
+        )
+
+        torch.testing.assert_close(after, before)
+        for key in before_info:
+            torch.testing.assert_close(after_info[key], before_info[key])
+        self.assertEqual(snapshot.age_clock, 0)
+        self.assertEqual(memory._packed_mirror_rebuilds, 1)
+
+    def test_owner_similarity_uses_visited_node_slots_and_checks_invariant(self):
+        torch.manual_seed(94)
+        memory = TreeEpisodicMemory(
+            key_dim=3,
+            num_event_types=2,
+            num_basis=1,
+            capacity_per_node=5,
+            device="cpu",
+        )
+        node_ids = ("root", "root_L", "root_R")
+        for node_id in node_ids[:2]:
+            memory.add_memory(
+                node_id, torch.randn(3), torch.randn(memory.param_dim)
+            )
+        query = torch.randn(3, 3)
+        visited_indices = torch.tensor([
+            [0, 1, -1],
+            [1, 0, -1],
+            [2, 0, -1],
+        ])
+        visited_mask = torch.ones_like(visited_indices, dtype=torch.bool)
+        visited_mask[:, -1] = False
+        _, packed_info = memory.read_packed(
+            query,
+            visited_indices,
+            visited_mask,
+            node_ids,
+            update_state=False,
+        )
+
+        owner_indices = torch.tensor([1, 0, 2])
+        owner_similarity, owner_valid = memory.owner_similarity_from_packed(
+            packed_info,
+            visited_indices,
+            visited_mask,
+            owner_indices,
+        )
+        row = torch.arange(query.size(0))
+        expected_slots = torch.tensor([1, 1, 0])
+        torch.testing.assert_close(
+            owner_similarity,
+            packed_info["similarity"][row, expected_slots],
+        )
+        torch.testing.assert_close(
+            owner_valid,
+            packed_info["valid_mask"][row, expected_slots],
+        )
+
+        novelty_kwargs = dict(
+            temperature=2.0,
+            count_exponent=2.0,
+            eps=1e-6,
+            count_similarity_low=0.35,
+            count_similarity_high=0.65,
+            count_topk=None,
+            count_saturation=3.0,
+        )
+        old_result = memory.novelty_count_packed(
+            query,
+            owner_indices,
+            node_ids,
+            **novelty_kwargs,
+        )
+        reused_result = memory.novelty_from_similarity(
+            owner_similarity,
+            owner_valid,
+            **novelty_kwargs,
+        )
+        for old_value, reused_value in zip(old_result, reused_result):
+            torch.testing.assert_close(old_value, reused_value)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "posterior owner must belong to visited path union",
+        ):
+            memory.owner_similarity_from_packed(
+                packed_info,
+                visited_indices,
+                visited_mask,
+                torch.tensor([3, 0, 2]),
+            )
+
     def test_packed_visited_node_read_matches_reference_calls(self):
         torch.manual_seed(97)
         memory = TreeEpisodicMemory(
@@ -207,13 +333,35 @@ class MaskedEntmaxTests(unittest.TestCase):
         query = torch.randn(129, 3)
         indices = torch.zeros(129, 1, dtype=torch.long)
         mask = torch.ones_like(indices, dtype=torch.bool)
-        packed, _ = memory.read_packed(
-            query,
-            indices,
-            mask,
-            ("root",),
-            update_state=False,
-        )
+        packed_by_chunk = {}
+        info_by_chunk = {}
+        for chunk_size in (64, 128, 256, 512):
+            packed, info = memory.read_packed(
+                query,
+                indices,
+                mask,
+                ("root",),
+                update_state=False,
+                visit_chunk_size=chunk_size,
+            )
+            packed_by_chunk[chunk_size] = packed
+            info_by_chunk[chunk_size] = info
+
+        packed = packed_by_chunk[64]
+        for chunk_size in (128, 256, 512):
+            torch.testing.assert_close(
+                packed,
+                packed_by_chunk[chunk_size],
+                atol=1e-6,
+                rtol=1e-5,
+            )
+            for key in info_by_chunk[64]:
+                torch.testing.assert_close(
+                    info_by_chunk[64][key],
+                    info_by_chunk[chunk_size][key],
+                    atol=1e-6,
+                    rtol=1e-5,
+                )
         reference = torch.stack([
             memory.read_nodes(
                 query[row],
@@ -268,7 +416,14 @@ class MaskedEntmaxTests(unittest.TestCase):
 
         self.assertEqual(
             set(complete_info),
-            {"alpha", "similarity", "effective_k", "null_alpha", "valid_mask"},
+            {
+                "alpha",
+                "similarity",
+                "effective_k",
+                "null_alpha",
+                "valid_mask",
+                "context_valid",
+            },
         )
         self.assertEqual(set(alpha_info), {"alpha"})
         self.assertEqual(empty_info, {})
@@ -306,7 +461,7 @@ class MaskedEntmaxTests(unittest.TestCase):
             mask,
             node_ids,
             update_state=False,
-            retrieval_chunk_size=2,
+            visit_chunk_size=2,
             info_fields=(),
         )
         unbounded_delta, _ = unbounded.read_packed(
@@ -315,7 +470,7 @@ class MaskedEntmaxTests(unittest.TestCase):
             mask,
             node_ids,
             update_state=False,
-            retrieval_chunk_size=None,
+            visit_chunk_size=64,
             info_fields=(),
         )
         torch.testing.assert_close(chunked_delta, unbounded_delta)

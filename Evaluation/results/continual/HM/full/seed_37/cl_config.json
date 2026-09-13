@@ -1,0 +1,123 @@
+{
+  "format_version": 1,
+  "benchmark_id": "CL-core-v2",
+  "benchmark_version": 2,
+  "epochs_per_task": 30,
+  "cold_start_epochs": 5,
+  "training": {
+    "seed": 37,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-05,
+    "grad_clip": 5.0,
+    "optimizer_impl": "auto",
+    "sleep_every": 1,
+    "evaluation_ablation": "full",
+    "controller_target_version": 5,
+    "controller_train_heads": [
+      "adapt",
+      "retrieve",
+      "write"
+    ],
+    "controller_write_ranking": false
+  },
+  "optimizer": {
+    "learning_rate": 0.001,
+    "weight_decay": 1e-05
+  },
+  "model": {
+    "z_dim": 50,
+    "node_dim": 64,
+    "memory_key_dim": 64,
+    "num_basis": 2,
+    "decays": [
+      0.5,
+      1.5
+    ],
+    "semantic_blend": 0.1
+  },
+  "frontier": {
+    "frontier_budget": 4,
+    "frontier_min_experts": 2,
+    "routing_temperature": 1.5,
+    "exploration_epsilon": 0.0,
+    "confidence_weight": 0.25,
+    "expansion_compute_cost": 0.05,
+    "posterior_temperature": 1.0,
+    "credible_mass": 0.9,
+    "owner_confidence_threshold": 0.8,
+    "max_writes_per_sequence": 8
+  },
+  "wake": {
+    "prototype_duplicate_threshold": 0.98,
+    "prototype_duplicate_quantile": 0.85,
+    "prototype_mode_threshold": 0.9,
+    "prototype_mode_capacity": 12,
+    "prototype_context_alias_capacity": 3,
+    "count_similarity_low": 0.35,
+    "count_similarity_high": 0.65,
+    "count_exponent": 2.0,
+    "count_saturation": 3.0,
+    "count_topk": null,
+    "lambda_route_mi": 0.2,
+    "lambda_route_posterior": 0.0,
+    "lambda_route_distill": 1.0,
+    "lambda_route_mix": 0.0,
+    "route_energy_temperature": 1.0,
+    "route_encoder_warmup_epochs": 2,
+    "route_encoder_grad_scale": 0.1,
+    "route_encoder_reliability_decay": 0.9,
+    "route_teacher_temperature": 1.0,
+    "lambda_route_probe": 0.1,
+    "route_probe_leaves": 2,
+    "route_probe_leaf_smoothing": 0.05,
+    "route_probe_residual_temperature": 1.0,
+    "route_probe_gain_temperature": 0.1,
+    "route_probe_complexity_weight": 0.01,
+    "route_probe_residual_rank": 2,
+    "route_probe_residual_grad_clip": 0.0,
+    "lambda_route_balance": 0.05,
+    "route_balance_batch_size": 64,
+    "wake_wavefront_batch_size": 64,
+    "retrieval_microbatch": 1024,
+    "route_balance_max_steps": 8,
+    "route_balance_target_kl": 0.1
+  },
+  "sleep": {
+    "light_replay_budget": 32,
+    "split_min_structural_strength": 0.0,
+    "split_min_effective_sample_size": 0.0,
+    "split_route_loss_weight": 1.0,
+    "split_anchor_weight": 0.01,
+    "deep_availability_tau": 3.0,
+    "deep_probe_interval": 5,
+    "deep_computation_cost": 0.05,
+    "deep_prior_probability": 0.15,
+    "deep_prior_weight": 0.01,
+    "deep_evidence_budget": 32,
+    "topology_inertia_strength": 0.01,
+    "topology_inertia_tau": 3.0
+  },
+  "structure": {
+    "prune_warmup_epochs": 10,
+    "merge_kwargs": {
+      "min_replay": 8,
+      "stale_weight": 0.2,
+      "dynamics_weight": 0.1,
+      "loss_weight": 0.1,
+      "gate_temperature": 1.0,
+      "budget_ratio": 0.95,
+      "dual_lr": 1e-06,
+      "dual_initial": 0.0
+    }
+  },
+  "permissions": {
+    "gradient_update": "train.csv",
+    "checkpoint_selection": "val.csv",
+    "final_evaluation": "test.csv",
+    "selection_forbidden": [
+      "anchors/*",
+      "ground_truth/*",
+      "test.csv"
+    ]
+  }
+}

@@ -144,6 +144,31 @@ sequence batch: one persistent-parameter optimizer step
 sleep:          replay consolidation and structural transaction
 ```
 
+### Wake batch causality
+
+`wake_wavefront_batch_size` groups sequences for the stateless prefix
+preparation (Encoder, projection, query, and frontier routing). The public
+`train_wake_batch` then delegates the stateful part to
+`train_wake_sequence` in sequence/event order. Episodic retrieval, Controller
+decisions, working-memory updates, age/usage credit, and physical writes are
+therefore causal: sequence `i + 1` observes the bank after sequence `i` has
+committed its writes. The old bank-entry-snapshot implementation is retained
+only as the private `_train_wake_batch_snapshot` path for experiments that
+explicitly define minibatch-synchronous memory semantics.
+
+`retrieval_visit_chunk_size` independently bounds the active
+`(event, visited-node)` rows handled by one packed episodic retrieval kernel.
+It is a computational workspace limit only; retrieval visibility, routing,
+and memory semantics do not depend on its value. The default is `64` for
+ordinary runs, while the continual-learning benchmark records `256`.
+The legacy flat snapshot path prepares one `PackedMemoryReadSnapshot` before
+its microbatch loop, fixing bank ordering, mirror contents, and age clock for
+the whole transaction.
+
+Packed Wake novelty/count reuses the first retrieval's similarity and valid
+mask by resolving the posterior owner against `visited_node_indices` slots;
+owners outside the visited path union are rejected as a topology invariant.
+
 ## Python API
 
 ```python

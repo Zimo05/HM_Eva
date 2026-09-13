@@ -1,0 +1,519 @@
+Epoch: 5
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=201.985 E_bank_struct=201.985 N_persistent=285 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.058854 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.034579 G_pred=+0.034579 G_sigma=0.00516762 G_raw=+0.034579 G_conservative=+0.0294114 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 9
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=201.985 E_bank_struct=201.985 N_persistent=285 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00165484 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0195483 G_pred=+0.0195483 G_sigma=0.00373087 G_raw=+0.0195483 G_conservative=+0.0158174 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 10
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=201.985 E_bank_struct=201.985 N_persistent=285 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=2.85602e-05 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0175718 G_pred=+0.0175718 G_sigma=0.00351546 G_raw=+0.0175718 G_conservative=+0.0140563 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 15
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=201.985 E_bank_struct=201.985 N_persistent=285 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=3.57628e-07 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0152467 G_pred=+0.0152467 G_sigma=0.00328066 G_raw=+0.0152467 G_conservative=+0.0119661 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 20
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=201.985 E_bank_struct=201.985 N_persistent=285 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0152524 G_pred=+0.0152524 G_sigma=0.00327636 G_raw=+0.0152524 G_conservative=+0.011976 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 25
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=201.985 E_bank_struct=201.985 N_persistent=285 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0137557 G_pred=+0.0137557 G_sigma=0.00332246 G_raw=+0.0137557 G_conservative=+0.0104332 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 30
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=201.985 E_bank_struct=201.985 N_persistent=285 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0132704 G_pred=+0.0132704 G_sigma=0.00331873 G_raw=+0.0132704 G_conservative=+0.00995169 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 14
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=351.605 E_bank_struct=351.605 N_persistent=544 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=3.57628e-07 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0167248 G_pred=+0.0167248 G_sigma=0.00366082 G_raw=+0.0167248 G_conservative=+0.013064 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 15
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=351.605 E_bank_struct=351.605 N_persistent=544 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0165782 G_pred=+0.0165782 G_sigma=0.00328569 G_raw=+0.0165782 G_conservative=+0.0132925 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 18
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=351.605 E_bank_struct=351.605 N_persistent=544 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0201762 G_pred=+0.0201762 G_sigma=0.00464693 G_raw=+0.0201762 G_conservative=+0.0155292 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 20
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=351.605 E_bank_struct=351.605 N_persistent=544 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0231442 G_pred=+0.0231442 G_sigma=0.00490108 G_raw=+0.0231442 G_conservative=+0.0182431 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 21
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=513.634 E_bank_struct=513.634 N_persistent=772 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=24 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0.0040226 route_KL=0.00677166 route_acc=1 N_eff=3.31177 N_L_eff=0 N_R_eff=3.31177 S_structural=1 G_struct=+0.0291287 G_pred=+0.0291287 G_sigma=0.010539 G_raw=+0.0291287 G_conservative=+0.0185897 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 23
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=351.605 N_persistent=544 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0688962 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0244515 G_pred=+0.0244515 G_sigma=0.00491171 G_raw=+0.0234515 G_conservative=+0.0185398 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=162.029 N_persistent=228 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0683169 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00140097 G_pred=+0.00140097 G_sigma=0.00217376 G_raw=+0.000400967 G_conservative=-0.00177279 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 25
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=211.885 E_bank_struct=725.519 N_persistent=1090 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=20 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.168319 route_acc=1 N_eff=32 N_L_eff=20 N_R_eff=12 S_structural=0 G_struct=+0.00144747 G_pred=+0.00144747 G_sigma=0.00124688 G_raw=-0.0037367 G_conservative=-0.00498358 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 26
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=211.885 E_bank_struct=725.519 N_persistent=1090 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=20 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.0151051 route_acc=1 N_eff=32 N_L_eff=20 N_R_eff=12 S_structural=0 G_struct=+0.00200782 G_pred=+0.00200782 G_sigma=0.00127912 G_raw=-0.00172097 G_conservative=-0.0030001 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 30
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=211.885 E_bank_struct=725.519 N_persistent=1090 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=20 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.000972766 route_acc=1 N_eff=32 N_L_eff=20 N_R_eff=12 S_structural=0 G_struct=+0.00360738 G_pred=+0.00360738 G_sigma=0.00176387 G_raw=+0.00263766 G_conservative=+0.000873786 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 34
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=364.526 E_bank_struct=878.16 N_persistent=1316 K_mode=4 K_law_mode=4 K_effective_mode=4 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=32 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=48 N_shadow=0 N_replay=32 A_probe=+0.00927544 route_KL=2.9332 route_acc=0 N_eff=2.94403 N_L_eff=0 N_R_eff=2.94403 S_structural=1 G_struct=+0.0409458 G_pred=+0.0409458 G_sigma=0.0116529 G_raw=+0.0406901 G_conservative=+0.0290373 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 35
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=351.605 N_persistent=544 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0698004 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00664133 G_pred=+0.00664133 G_sigma=0.00414382 G_raw=+0.00659133 G_conservative=+0.0024475 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=526.555 N_persistent=772 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.555451 route_acc=0.75 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=-0.00999185 G_pred=-0.00999185 G_sigma=0.00336709 G_raw=-0.0100419 G_conservative=-0.0134089 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 36
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=215.463 E_bank_struct=1093.62 N_persistent=1651 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=18 q_bank_mass_R=14 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.281087 route_acc=0.9375 N_eff=32 N_L_eff=18 N_R_eff=14 S_structural=0 G_struct=-0.0046468 G_pred=-0.0046468 G_sigma=0.0026431 G_raw=-0.0118121 G_conservative=-0.0144552 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 40
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=215.463 E_bank_struct=1093.62 N_persistent=1651 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=18 q_bank_mass_R=14 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.238652 route_acc=0.9375 N_eff=32 N_L_eff=18 N_R_eff=14 S_structural=0 G_struct=+0.000490628 G_pred=+0.000490628 G_sigma=0.0025219 G_raw=-0.00139813 G_conservative=-0.00392002 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 42
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=215.463 E_bank_struct=1093.62 N_persistent=1651 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=18 q_bank_mass_R=14 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.215683 route_acc=0.9375 N_eff=32 N_L_eff=18 N_R_eff=14 S_structural=0 G_struct=+0.00275528 G_pred=+0.00275528 G_sigma=0.00249207 G_raw=+0.00178556 G_conservative=-0.000706504 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 30
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=211.885 E_bank_struct=725.519 N_persistent=1090 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.503926 route_acc=0.71875 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.00296542 G_pred=+0.00296542 G_sigma=0.00168949 G_raw=+0.0019957 G_conservative=+0.000306216 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 35
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=211.885 E_bank_struct=725.519 N_persistent=1090 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.467358 route_acc=0.71875 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.00137493 G_pred=+0.00137493 G_sigma=0.00135938 G_raw=+0.00119177 G_conservative=-0.000167606 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 40
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=211.885 E_bank_struct=725.519 N_persistent=1090 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.441113 route_acc=0.71875 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.00391828 G_pred=+0.00391828 G_sigma=0.00151226 G_raw=+0.00388368 G_conservative=+0.00237143 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 43
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=391.317 E_bank_struct=904.951 N_persistent=1351 K_mode=4 K_law_mode=4 K_effective_mode=4 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=32 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=48 N_shadow=0 N_replay=32 A_probe=+0.0101957 route_KL=0.0209883 route_acc=1 N_eff=3.7451 N_L_eff=0 N_R_eff=3.7451 S_structural=1 G_struct=+0.0437861 G_pred=+0.0437861 G_sigma=0.00828028 G_raw=+0.0437734 G_conservative=+0.0354931 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 45
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=725.519 N_persistent=1090 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.474661 route_acc=0.71875 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.0084265 G_pred=+0.0084265 G_sigma=0.00224382 G_raw=+0.0083765 G_conservative=+0.00613268 split=deferred eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=179.432 N_persistent=261 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0771453 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=-0.000818769 G_pred=-0.000818769 G_sigma=0.00207778 G_raw=-0.000868769 G_conservative=-0.00294655 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 46
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=183.063 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.5558 route_acc=0.65625 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.0109623 G_pred=-0.0109623 G_sigma=0.00447644 G_raw=-0.0181277 G_conservative=-0.0226041 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 47
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=183.063 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.438296 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.00938632 G_pred=-0.00938632 G_sigma=0.00434752 G_raw=-0.0145205 G_conservative=-0.018868 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 50
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=183.063 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.288275 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.00641606 G_pred=-0.00641606 G_sigma=0.00385503 G_raw=-0.00830482 G_conservative=-0.0121599 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 55
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=183.063 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.154047 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.00308823 G_pred=-0.00308823 G_sigma=0.00309871 G_raw=-0.00344497 G_conservative=-0.00654368 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 56
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=183.063 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.0672759 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.0018098 G_pred=-0.0018098 G_sigma=0.0029854 G_raw=-0.00206541 G_conservative=-0.00505081 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 59
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=183.063 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.0245534 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=+0.000468526 G_pred=+0.000468526 G_sigma=0.00270052 G_raw=+0.00037449 G_conservative=-0.00232603 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 60
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=183.063 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.00765825 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.00219689 G_pred=-0.00219689 G_sigma=0.00261478 G_raw=-0.00226427 G_conservative=-0.00487904 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 63
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=183.063 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.00206622 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.00962581 G_pred=-0.00962581 G_sigma=0.00292329 G_raw=-0.00965059 G_conservative=-0.0125739 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 65
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=234.255 E_bank_struct=1139.21 N_persistent=1710 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=32 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=64 N_shadow=0 N_replay=32 A_probe=+0.00295973 route_KL=1.97227 route_acc=0.0297652 N_eff=1.24149 N_L_eff=0 N_R_eff=1.24149 S_structural=1 G_struct=+0.0328205 G_pred=+0.0328205 G_sigma=0.00747511 G_raw=+0.0328078 G_conservative=+0.0253327 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 68
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.558364 route_acc=0.65625 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.0113327 G_pred=-0.0113327 G_sigma=0.00344246 G_raw=-0.0113827 G_conservative=-0.0148252 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=51.1916 N_persistent=74 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=4 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=4 N_shadow=0 N_replay=4 A_probe=+0 route_KL=0.0782043 route_acc=1 N_eff=4 N_L_eff=4 N_R_eff=0 S_structural=0 G_struct=+0.00851202 G_pred=+0.00851202 G_sigma=0.00876822 G_raw=+0.00846202 G_conservative=-0.000306196 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 69
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=204.539 E_bank_struct=1343.74 N_persistent=2029 K_mode=7 K_law_mode=7 K_effective_mode=7 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=76 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.547514 route_acc=0.625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=-0.0054542 G_pred=-0.0054542 G_sigma=0.00368063 G_raw=-0.0126195 G_conservative=-0.0163001 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 70
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=204.539 E_bank_struct=1343.74 N_persistent=2029 K_mode=7 K_law_mode=7 K_effective_mode=7 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=76 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.326186 route_acc=0.96875 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=-0.00427548 G_pred=-0.00427548 G_sigma=0.00359784 G_raw=-0.00940965 G_conservative=-0.0130075 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 75
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=204.539 E_bank_struct=1343.74 N_persistent=2029 K_mode=7 K_law_mode=7 K_effective_mode=7 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=76 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.14115 route_acc=1 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.00419699 G_pred=+0.00419699 G_sigma=0.00387822 G_raw=+0.00322727 G_conservative=-0.000650949 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 77
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=309.136 E_bank_struct=1448.34 N_persistent=2186 K_mode=8 K_law_mode=8 K_effective_mode=8 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=32 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=88 N_shadow=0 N_replay=32 A_probe=+0.00244665 route_KL=0.0401651 route_acc=1 N_eff=1.197 N_L_eff=0 N_R_eff=1.197 S_structural=1 G_struct=+0.0378488 G_pred=+0.0378488 G_sigma=0.0142224 G_raw=+0.037351 G_conservative=+0.0231286 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 78
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.559706 route_acc=0.65625 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.00163814 G_pred=-0.00163814 G_sigma=0.00526209 G_raw=-0.00168814 G_conservative=-0.00695022 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=360.327 N_persistent=550 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=16 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=28 N_shadow=0 N_replay=28 A_probe=+0 route_KL=0.674529 route_acc=0.571429 N_eff=28 N_L_eff=16 N_R_eff=12 S_structural=0 G_struct=+0.00256178 G_pred=+0.00256178 G_sigma=0.00179033 G_raw=+0.00251178 G_conservative=+0.000721448 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 80
+split_eval=3 split_proposal=3 split_protected=0
+root_L Q_decision=0 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.443175 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=+0.000132442 G_pred=+0.000132442 G_sigma=0.00535451 G_raw=-0.000967558 G_conservative=-0.00632207 split=rejected eligible=True ready=True reason=objective_competition
+root_R_L Q_decision=0 E_bank_struct=255.73 N_persistent=393 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=4 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=16 N_shadow=0 N_replay=16 A_probe=+0 route_KL=0.563231 route_acc=0.75 N_eff=16 N_L_eff=12 N_R_eff=4 S_structural=0 G_struct=+0.00207828 G_pred=+0.00207828 G_sigma=0.00204193 G_raw=+0.00097828 G_conservative=-0.00106365 split=rejected eligible=True ready=True reason=objective_competition
+root_R_R Q_decision=0 E_bank_struct=104.597 N_persistent=157 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0799223 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000428478 G_pred=+0.000428478 G_sigma=0.000532861 G_raw=-0.000671522 G_conservative=-0.00120438 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 81
+split_eval=3 split_proposal=3 split_protected=0
+root_L Q_decision=0 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.293303 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=+0.000153385 G_pred=+0.000153385 G_sigma=0.00530522 G_raw=-0.000946615 G_conservative=-0.00625184 split=rejected eligible=True ready=True reason=objective_competition
+root_R_L Q_decision=0 E_bank_struct=255.73 N_persistent=393 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=4 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=16 N_shadow=0 N_replay=16 A_probe=+0 route_KL=0.539203 route_acc=0.75 N_eff=16 N_L_eff=12 N_R_eff=4 S_structural=0 G_struct=+0.00199661 G_pred=+0.00199661 G_sigma=0.00202192 G_raw=+0.000896607 G_conservative=-0.00112531 split=rejected eligible=True ready=True reason=objective_competition
+root_R_R Q_decision=0 E_bank_struct=104.597 N_persistent=157 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00279012 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000477254 G_pred=+0.000477254 G_sigma=0.000910803 G_raw=-0.000622746 G_conservative=-0.00153355 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 82
+split_eval=3 split_proposal=3 split_protected=0
+root_L Q_decision=0 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.157585 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.000199266 G_pred=-0.000199266 G_sigma=0.00518519 G_raw=-0.00234927 G_conservative=-0.00753446 split=rejected eligible=True ready=True reason=objective_competition
+root_R_L Q_decision=0 E_bank_struct=255.73 N_persistent=393 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=4 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=16 N_shadow=0 N_replay=16 A_probe=+0 route_KL=0.490788 route_acc=0.75 N_eff=16 N_L_eff=12 N_R_eff=4 S_structural=0 G_struct=+0.00194195 G_pred=+0.00194195 G_sigma=0.00164606 G_raw=-0.000208051 G_conservative=-0.00185411 split=rejected eligible=True ready=True reason=objective_competition
+root_R_R Q_decision=0 E_bank_struct=104.597 N_persistent=157 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=5.68215e-05 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000532011 G_pred=+0.000532011 G_sigma=0.000947638 G_raw=-0.00161799 G_conservative=-0.00256563 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 85
+split_eval=3 split_proposal=3 split_protected=0
+root_L Q_decision=0 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.0690813 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.00139611 G_pred=-0.00139611 G_sigma=0.00488498 G_raw=-0.00459611 G_conservative=-0.00948109 split=rejected eligible=True ready=True reason=objective_competition
+root_R_L Q_decision=0 E_bank_struct=255.73 N_persistent=393 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=4 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=16 N_shadow=0 N_replay=16 A_probe=+0 route_KL=0.434514 route_acc=0.8125 N_eff=16 N_L_eff=12 N_R_eff=4 S_structural=0 G_struct=+0.00245725 G_pred=+0.00245725 G_sigma=0.0013834 G_raw=-0.000742754 G_conservative=-0.00212616 split=rejected eligible=True ready=True reason=objective_competition
+root_R_R Q_decision=0 E_bank_struct=104.597 N_persistent=157 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=8.34465e-07 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000832856 G_pred=+0.000832856 G_sigma=0.0010891 G_raw=-0.00236714 G_conservative=-0.00345625 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 86
+split_eval=3 split_proposal=3 split_protected=0
+root_L Q_decision=0 E_bank_struct=1088.01 N_persistent=1636 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.025375 route_acc=1 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.00134231 G_pred=-0.00134231 G_sigma=0.0048459 G_raw=-0.00454231 G_conservative=-0.00938821 split=rejected eligible=True ready=True reason=objective_competition
+root_R_L Q_decision=0 E_bank_struct=255.73 N_persistent=393 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=4 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=16 N_shadow=0 N_replay=16 A_probe=+0 route_KL=0.38692 route_acc=0.8125 N_eff=16 N_L_eff=12 N_R_eff=4 S_structural=0 G_struct=+0.00272478 G_pred=+0.00272478 G_sigma=0.00150485 G_raw=-0.000475218 G_conservative=-0.00198007 split=rejected eligible=True ready=True reason=objective_competition
+root_R_R Q_decision=0 E_bank_struct=104.597 N_persistent=157 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00109388 G_pred=+0.00109388 G_sigma=0.00125146 G_raw=-0.00210612 G_conservative=-0.00335758 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 77
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=376.26 E_bank_struct=1515.47 N_persistent=2279 K_mode=7 K_law_mode=7 K_effective_mode=7 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=32 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=84 N_shadow=0 N_replay=32 A_probe=+0.00396276 route_KL=0.0405224 route_acc=1 N_eff=1.94406 N_L_eff=0 N_R_eff=1.94406 S_structural=1 G_struct=+0.0427966 G_pred=+0.0427966 G_sigma=0.015157 G_raw=+0.0422987 G_conservative=+0.0271417 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 78
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1292.55 N_persistent=1955 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.518304 route_acc=0.75 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=+0.00303438 G_pred=+0.00303438 G_sigma=0.00301793 G_raw=+0.00298438 G_conservative=-3.35537e-05 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0825709 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00204976 G_pred=+0.00204976 G_sigma=0.0036862 G_raw=+0.00199976 G_conservative=-0.00168643 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 80
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1292.55 N_persistent=1955 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.39355 route_acc=0.75 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=-0.000695229 G_pred=-0.000695229 G_sigma=0.00272652 G_raw=-0.000795229 G_conservative=-0.00352175 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00301601 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0055997 G_pred=+0.0055997 G_sigma=0.00498521 G_raw=+0.0054997 G_conservative=+0.000514492 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 85
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1292.55 N_persistent=1955 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.253007 route_acc=1 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=-0.00615843 G_pred=-0.00615843 G_sigma=0.00251162 G_raw=-0.00625843 G_conservative=-0.00877005 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=6.36657e-05 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0142133 G_pred=+0.0142133 G_sigma=0.00528712 G_raw=+0.0141133 G_conservative=+0.00882621 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 90
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1292.55 N_persistent=1955 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.139402 route_acc=1 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=-0.00243653 G_pred=-0.00243653 G_sigma=0.00279881 G_raw=-0.00253653 G_conservative=-0.00533534 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=9.53674e-07 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0274219 G_pred=+0.0274219 G_sigma=0.00760441 G_raw=+0.0273219 G_conservative=+0.0197175 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 95
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1292.55 N_persistent=1955 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.0645599 route_acc=1 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=-0.00279658 G_pred=-0.00279658 G_sigma=0.00275155 G_raw=-0.00294658 G_conservative=-0.00569812 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0371783 G_pred=+0.0371783 G_sigma=0.00744864 G_raw=+0.0370283 G_conservative=+0.0295796 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 100
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1292.55 N_persistent=1955 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.0259655 route_acc=1 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=-0.0077875 G_pred=-0.0077875 G_sigma=0.00296307 G_raw=-0.0079375 G_conservative=-0.0109006 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0269617 G_pred=+0.0269617 G_sigma=0.00718989 G_raw=+0.0268117 G_conservative=+0.0196218 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 104
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1292.55 N_persistent=1955 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.00929463 route_acc=1 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=-0.00637053 G_pred=-0.00637053 G_sigma=0.002827 G_raw=-0.00652053 G_conservative=-0.00934753 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0247643 G_pred=+0.0247643 G_sigma=0.00507634 G_raw=+0.0246143 G_conservative=+0.019538 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 105
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=285.331 E_bank_struct=2014.43 N_persistent=3047 K_mode=10 K_law_mode=10 K_effective_mode=10 has_bank_prior=True q_bank_mass_L=20 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=120 N_shadow=0 N_replay=32 A_probe=+0.00163651 route_KL=0.290939 route_acc=1 N_eff=32 N_L_eff=20 N_R_eff=12 S_structural=0 G_struct=+0.0198734 G_pred=+0.0198734 G_sigma=0.0027982 G_raw=+0.0127081 G_conservative=+0.00990986 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 106
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=285.331 N_persistent=441 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.42946 route_acc=0.958333 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.000939777 G_pred=+0.000939777 G_sigma=0.000844635 G_raw=+0.000889777 G_conservative=+4.51418e-05 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=1729.1 N_persistent=2606 K_mode=8 K_law_mode=8 K_effective_mode=8 has_bank_prior=True q_bank_mass_L=14 q_bank_mass_R=18 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=96 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.653876 route_acc=0.625 N_eff=32 N_L_eff=14 N_R_eff=18 S_structural=0 G_struct=-0.0304649 G_pred=-0.0304649 G_sigma=0.00662818 G_raw=-0.0305149 G_conservative=-0.0371431 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 105
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=447.043 E_bank_struct=2176.15 N_persistent=3295 K_mode=10 K_law_mode=10 K_effective_mode=10 has_bank_prior=True q_bank_mass_L=32 q_bank_mass_R=0 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=120 N_shadow=0 N_replay=32 A_probe=+0.000953197 route_KL=0.0747636 route_acc=1 N_eff=4.28683 N_L_eff=4.28683 N_R_eff=0 S_structural=1 G_struct=+0.0178398 G_pred=+0.0178398 G_sigma=0.00287944 G_raw=+0.0106745 G_conservative=+0.00779505 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 106
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1953.23 N_persistent=2971 K_mode=9 K_law_mode=9 K_effective_mode=9 has_bank_prior=True q_bank_mass_L=30 q_bank_mass_R=2 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=108 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.220321 route_acc=0.9375 N_eff=32 N_L_eff=30 N_R_eff=2 S_structural=0 G_struct=+0.00673246 G_pred=+0.00673246 G_sigma=0.00395247 G_raw=+0.00668246 G_conservative=+0.00272998 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0715445 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=-0.0410627 G_pred=-0.0410627 G_sigma=0.0393874 G_raw=-0.0411127 G_conservative=-0.0805001 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 108
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=660.681 N_persistent=1016 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.299086 route_acc=1 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.000931598 G_pred=+0.000931598 G_sigma=0.000782307 G_raw=-0.000168402 G_conservative=-0.000950709 split=rejected eligible=True ready=True reason=objective_competition
+root_L_R Q_decision=0 E_bank_struct=1292.55 N_persistent=1955 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=24 q_bank_mass_R=8 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.519381 route_acc=0.75 N_eff=32 N_L_eff=24 N_R_eff=8 S_structural=0 G_struct=+0.000562586 G_pred=+0.000562586 G_sigma=0.00233592 G_raw=-0.000537414 G_conservative=-0.00287334 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00238969 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=-0.0197584 G_pred=-0.0197584 G_sigma=0.0389225 G_raw=-0.0208584 G_conservative=-0.0597809 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 110
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1953.23 N_persistent=2971 K_mode=9 K_law_mode=9 K_effective_mode=9 has_bank_prior=True q_bank_mass_L=30 q_bank_mass_R=2 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=108 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.220681 route_acc=0.9375 N_eff=32 N_L_eff=30 N_R_eff=2 S_structural=0 G_struct=+0.000987396 G_pred=+0.000987396 G_sigma=0.00136605 G_raw=-0.00529678 G_conservative=-0.00666283 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=4.72654e-05 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00136984 G_pred=+0.00136984 G_sigma=0.0384184 G_raw=+0.000219836 G_conservative=-0.0381985 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 114
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1953.23 N_persistent=2971 K_mode=9 K_law_mode=9 K_effective_mode=9 has_bank_prior=True q_bank_mass_L=30 q_bank_mass_R=2 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=108 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.160793 route_acc=0.9375 N_eff=32 N_L_eff=30 N_R_eff=2 S_structural=0 G_struct=+0.00117321 G_pred=+0.00117321 G_sigma=0.00128548 G_raw=-0.00133014 G_conservative=-0.00261562 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=222.913 N_persistent=324 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=7.15256e-07 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0433814 G_pred=+0.0433814 G_sigma=0.037558 G_raw=+0.0422314 G_conservative=+0.00467337 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 115
+split_eval=1 split_proposal=0 split_protected=0
+
+Epoch: 117
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=307.752 E_bank_struct=153.59 N_persistent=247 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0582169 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.020085 G_pred=+0.020085 G_sigma=0.00501001 G_raw=+0.019885 G_conservative=+0.0148749 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 120
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=307.752 E_bank_struct=153.59 N_persistent=247 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00171078 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0185942 G_pred=+0.0185942 G_sigma=0.00479688 G_raw=+0.0185942 G_conservative=+0.0137973 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 122
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=307.752 E_bank_struct=153.59 N_persistent=247 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=3.03681e-05 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0173175 G_pred=+0.0173175 G_sigma=0.00463238 G_raw=+0.0173175 G_conservative=+0.0126851 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 123
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=307.752 E_bank_struct=153.59 N_persistent=247 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=3.67562e-07 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0167558 G_pred=+0.0167558 G_sigma=0.00455571 G_raw=+0.0167558 G_conservative=+0.0122001 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 125
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=307.752 E_bank_struct=153.59 N_persistent=247 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0158308 G_pred=+0.0158308 G_sigma=0.00442596 G_raw=+0.0158308 G_conservative=+0.0114049 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 129
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=446.148 E_bank_struct=291.986 N_persistent=472 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=24 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0.00100183 route_KL=10.5396 route_acc=0 N_eff=2.45592 N_L_eff=0 N_R_eff=2.45592 S_structural=1 G_struct=+0.0257036 G_pred=+0.0257036 G_sigma=0.0105163 G_raw=+0.0256362 G_conservative=+0.0151199 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 130
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=153.59 N_persistent=247 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0626796 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0145981 G_pred=+0.0145981 G_sigma=0.00468665 G_raw=+0.0145481 G_conservative=+0.00986143 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=138.396 N_persistent=225 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0620373 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00634005 G_pred=+0.00634005 G_sigma=0.00535098 G_raw=+0.00629005 G_conservative=+0.000939072 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 132
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=153.59 N_persistent=247 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0019057 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0144739 G_pred=+0.0144739 G_sigma=0.00467373 G_raw=+0.0144239 G_conservative=+0.00975015 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=138.396 N_persistent=225 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00186954 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00631561 G_pred=+0.00631561 G_sigma=0.0052706 G_raw=+0.00626561 G_conservative=+0.000995005 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 115
+split_eval=1 split_proposal=0 split_protected=0
+
+Epoch: 117
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=324.231 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0580367 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0210469 G_pred=+0.0210469 G_sigma=0.00500438 G_raw=+0.0208469 G_conservative=+0.0158425 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 120
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=324.231 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00169733 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0175924 G_pred=+0.0175924 G_sigma=0.00449086 G_raw=+0.0175924 G_conservative=+0.0131015 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 122
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=324.231 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=3.00403e-05 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0153735 G_pred=+0.0153735 G_sigma=0.00406483 G_raw=+0.0153735 G_conservative=+0.0113086 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 123
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=324.231 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=3.57628e-07 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0147768 G_pred=+0.0147768 G_sigma=0.00359985 G_raw=+0.0147768 G_conservative=+0.011177 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 125
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=324.231 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.014603 G_pred=+0.014603 G_sigma=0.00369793 G_raw=+0.014603 G_conservative=+0.010905 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 130
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=324.231 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0149993 G_pred=+0.0149993 G_sigma=0.00383393 G_raw=+0.0149993 G_conservative=+0.0111653 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 132
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=452.225 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=24 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0.00188923 route_KL=11.9696 route_acc=0 N_eff=1.83714 N_L_eff=0 N_R_eff=1.83714 S_structural=1 G_struct=+0.034808 G_pred=+0.034808 G_sigma=0.0115901 G_raw=+0.0347832 G_conservative=+0.0231931 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 135
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0561441 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0149455 G_pred=+0.0149455 G_sigma=0.00370943 G_raw=+0.0148955 G_conservative=+0.0111861 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=127.994 N_persistent=199 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0558682 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00635097 G_pred=+0.00635097 G_sigma=0.00364435 G_raw=+0.00630097 G_conservative=+0.00265663 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 140
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00168547 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0134512 G_pred=+0.0134512 G_sigma=0.00347679 G_raw=+0.0134012 G_conservative=+0.00992441 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=127.994 N_persistent=199 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00167028 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00653017 G_pred=+0.00653017 G_sigma=0.00412415 G_raw=+0.00648017 G_conservative=+0.00235602 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 141
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=179.013 E_bank_struct=477.075 N_persistent=751 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=20 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.656366 route_acc=0.625 N_eff=32 N_L_eff=20 N_R_eff=12 S_structural=0 G_struct=+0.00970792 G_pred=+0.00970792 G_sigma=0.00278037 G_raw=+0.0025426 G_conservative=-0.000237762 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 145
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=179.013 E_bank_struct=477.075 N_persistent=751 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.640938 route_acc=0.65625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.00747812 G_pred=+0.00747812 G_sigma=0.00302852 G_raw=+0.00558936 G_conservative=+0.00256084 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 148
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=345.37 E_bank_struct=643.432 N_persistent=993 K_mode=4 K_law_mode=4 K_effective_mode=4 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=32 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=48 N_shadow=0 N_replay=32 A_probe=+0.00413132 route_KL=0.0221997 route_acc=1 N_eff=4.39588 N_L_eff=0 N_R_eff=4.39588 S_structural=1 G_struct=+0.0344641 G_pred=+0.0344641 G_sigma=0.00674802 G_raw=+0.0337693 G_conservative=+0.0270213 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 150
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=477.075 N_persistent=751 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.64343 route_acc=0.65625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.0122269 G_pred=+0.0122269 G_sigma=0.00266502 G_raw=+0.0121769 G_conservative=+0.00951187 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0620965 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00222238 G_pred=+0.00222238 G_sigma=0.000853793 G_raw=+0.00217238 G_conservative=+0.00131859 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 155
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=477.075 N_persistent=751 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.63092 route_acc=0.65625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.00680857 G_pred=+0.00680857 G_sigma=0.00247663 G_raw=+0.00675857 G_conservative=+0.00428194 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00180958 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.001694 G_pred=+0.001694 G_sigma=0.000819276 G_raw=+0.001644 G_conservative=+0.000824728 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 158
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=477.075 N_persistent=751 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.619431 route_acc=0.65625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.00590344 G_pred=+0.00590344 G_sigma=0.00270956 G_raw=+0.00585344 G_conservative=+0.00314388 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=3.19476e-05 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00183914 G_pred=+0.00183914 G_sigma=0.00194575 G_raw=+0.00178914 G_conservative=-0.000156608 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 160
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.10485 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000573993 G_pred=+0.000573993 G_sigma=0.00169087 G_raw=-0.000526007 G_conservative=-0.00221688 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.682528 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00460214 G_pred=+0.00460214 G_sigma=0.0021634 G_raw=+0.00350214 G_conservative=+0.00133875 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=4.76837e-07 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00203429 G_pred=+0.00203429 G_sigma=0.00194874 G_raw=+0.000934287 G_conservative=-0.00101445 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 165
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00738136 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0013413 G_pred=+0.0013413 G_sigma=0.00244678 G_raw=+0.000241303 G_conservative=-0.00220548 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.65735 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00466235 G_pred=+0.00466235 G_sigma=0.00214997 G_raw=+0.00356235 G_conservative=+0.00141238 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00312434 G_pred=+0.00312434 G_sigma=0.00293731 G_raw=+0.00202434 G_conservative=-0.000912974 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 170
+split_eval=4 split_proposal=4 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.000252394 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00181424 G_pred=+0.00181424 G_sigma=0.0021722 G_raw=-0.00133576 G_conservative=-0.00350796 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_L Q_decision=0 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0515779 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000730952 G_pred=+0.000730952 G_sigma=0.00167218 G_raw=-0.00241905 G_conservative=-0.00409123 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_R Q_decision=0 E_bank_struct=127.994 N_persistent=199 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0513131 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000311871 G_pred=+0.000311871 G_sigma=0.000476903 G_raw=-0.00283813 G_conservative=-0.00331503 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00347682 G_pred=+0.00347682 G_sigma=0.0031001 G_raw=+0.000326819 G_conservative=-0.00277328 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 165
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00738136 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00120012 G_pred=+0.00120012 G_sigma=0.00243229 G_raw=+0.00010012 G_conservative=-0.00233217 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.65735 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00458322 G_pred=+0.00458322 G_sigma=0.00195856 G_raw=+0.00348322 G_conservative=+0.00152466 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00344263 G_pred=+0.00344263 G_sigma=0.00293852 G_raw=+0.00234263 G_conservative=-0.000595891 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 170
+split_eval=4 split_proposal=4 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.000252394 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00161363 G_pred=+0.00161363 G_sigma=0.00205291 G_raw=-0.00153637 G_conservative=-0.00358928 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_L Q_decision=0 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0515779 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000742833 G_pred=+0.000742833 G_sigma=0.00221979 G_raw=-0.00240717 G_conservative=-0.00462696 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_R Q_decision=0 E_bank_struct=127.994 N_persistent=199 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0513131 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000308951 G_pred=+0.000308951 G_sigma=0.000401823 G_raw=-0.00284105 G_conservative=-0.00324287 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00379171 G_pred=+0.00379171 G_sigma=0.00309391 G_raw=+0.00064171 G_conservative=-0.0024522 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 175
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=5.69217e-06 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00208434 G_pred=+0.00208434 G_sigma=0.00219351 G_raw=-0.00211566 G_conservative=-0.00430916 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.683419 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00677737 G_pred=+0.00677737 G_sigma=0.0029401 G_raw=+0.00068861 G_conservative=-0.00225149 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00313737 G_pred=+0.00313737 G_sigma=0.00291517 G_raw=-0.00106263 G_conservative=-0.0039778 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 180
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=5.96046e-08 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00227897 G_pred=+0.00227897 G_sigma=0.00226698 G_raw=-0.00192103 G_conservative=-0.00418801 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.657316 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00794174 G_pred=+0.00794174 G_sigma=0.00318809 G_raw=+0.003385 G_conservative=+0.000196919 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00335006 G_pred=+0.00335006 G_sigma=0.00287445 G_raw=-0.000849941 G_conservative=-0.00372439 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 183
+split_eval=4 split_proposal=4 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00232866 G_pred=+0.00232866 G_sigma=0.00232194 G_raw=-0.00392134 G_conservative=-0.00624327 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_L Q_decision=0 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0670909 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00029999 G_pred=+0.00029999 G_sigma=8.47113e-05 G_raw=-0.00595001 G_conservative=-0.00603472 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_R Q_decision=0 E_bank_struct=127.994 N_persistent=199 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0674505 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000382324 G_pred=+0.000382324 G_sigma=0.000480498 G_raw=-0.00586768 G_conservative=-0.00634817 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00352709 G_pred=+0.00352709 G_sigma=0.00243087 G_raw=-0.00272291 G_conservative=-0.00515378 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 185
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00233436 G_pred=+0.00233436 G_sigma=0.00238314 G_raw=-0.00496564 G_conservative=-0.00734879 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.683204 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00866446 G_pred=+0.00866446 G_sigma=0.00283909 G_raw=-0.00376971 G_conservative=-0.00660881 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00354813 G_pred=+0.00354813 G_sigma=0.00239901 G_raw=-0.00375187 G_conservative=-0.00615088 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 190
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00240917 G_pred=+0.00240917 G_sigma=0.00267761 G_raw=-0.00489083 G_conservative=-0.00756844 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.659128 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00890022 G_pred=+0.00890022 G_sigma=0.00288483 G_raw=+0.000630496 G_conservative=-0.00225434 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0035485 G_pred=+0.0035485 G_sigma=0.00237455 G_raw=-0.0037515 G_conservative=-0.00612605 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 165
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00738136 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00108197 G_pred=+0.00108197 G_sigma=0.00187601 G_raw=-1.80268e-05 G_conservative=-0.00189404 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.65735 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00468873 G_pred=+0.00468873 G_sigma=0.00216745 G_raw=+0.00358873 G_conservative=+0.00142128 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00232011 G_pred=+0.00232011 G_sigma=0.0027821 G_raw=+0.00122011 G_conservative=-0.00156199 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 166
+split_eval=4 split_proposal=4 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.000252394 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00166848 G_pred=+0.00166848 G_sigma=0.00182384 G_raw=-0.00148152 G_conservative=-0.00330536 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_L Q_decision=0 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0515779 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00043575 G_pred=+0.00043575 G_sigma=0.00134421 G_raw=-0.00271425 G_conservative=-0.00405846 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_R Q_decision=0 E_bank_struct=127.994 N_persistent=199 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0513131 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000318646 G_pred=+0.000318646 G_sigma=0.000600117 G_raw=-0.00283135 G_conservative=-0.00343147 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00166533 G_pred=+0.00166533 G_sigma=0.00203292 G_raw=-0.00148467 G_conservative=-0.00351759 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 169
+split_eval=4 split_proposal=4 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=5.69217e-06 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00424007 G_pred=+0.00424007 G_sigma=0.00181378 G_raw=-0.000959934 G_conservative=-0.00277372 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_L Q_decision=0 E_bank_struct=170.069 N_persistent=268 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00142107 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00198944 G_pred=+0.00198944 G_sigma=0.00157015 G_raw=-0.00321056 G_conservative=-0.00478071 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R_R Q_decision=0 E_bank_struct=127.994 N_persistent=199 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.00140912 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00141201 G_pred=+0.00141201 G_sigma=0.00117518 G_raw=-0.00378799 G_conservative=-0.00496317 split=rejected eligible=False ready=False reason=h1_undefined
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00103853 G_pred=+0.00103853 G_sigma=0.000902592 G_raw=-0.00416147 G_conservative=-0.00506406 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 170
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=5.96046e-08 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0052835 G_pred=+0.0052835 G_sigma=0.0018858 G_raw=-0.000966505 G_conservative=-0.0028523 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.68103 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00562297 G_pred=+0.00562297 G_sigma=0.00253522 G_raw=-0.00779234 G_conservative=-0.0103276 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000935614 G_pred=+0.000935614 G_sigma=0.000889093 G_raw=-0.00531439 G_conservative=-0.00620348 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 171
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00631365 G_pred=+0.00631365 G_sigma=0.00195164 G_raw=+6.36517e-05 G_conservative=-0.00188799 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.654291 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.0056257 G_pred=+0.0056257 G_sigma=0.00258886 G_raw=-0.00575847 G_conservative=-0.00834733 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000847081 G_pred=+0.000847081 G_sigma=0.000871844 G_raw=-0.00540292 G_conservative=-0.00627476 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 173
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00800779 G_pred=+0.00800779 G_sigma=0.0021991 G_raw=+0.000707794 G_conservative=-0.0014913 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.617794 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00590402 G_pred=+0.00590402 G_sigma=0.00260242 G_raw=-0.00403195 G_conservative=-0.00663438 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000775417 G_pred=+0.000775417 G_sigma=0.000593877 G_raw=-0.00652458 G_conservative=-0.00711846 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 175
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00827558 G_pred=+0.00827558 G_sigma=0.00218316 G_raw=-7.44211e-05 G_conservative=-0.00225758 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.575666 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00667258 G_pred=+0.00667258 G_sigma=0.00258145 G_raw=-0.00303077 G_conservative=-0.00561223 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000878314 G_pred=+0.000878314 G_sigma=0.000645425 G_raw=-0.00747169 G_conservative=-0.00811711 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 180
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=179.013 N_persistent=284 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00525896 G_pred=+0.00525896 G_sigma=0.00231217 G_raw=-0.00309104 G_conservative=-0.00540321 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=298.063 N_persistent=467 K_mode=2 K_law_mode=2 K_effective_mode=2 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=12 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=24 N_shadow=0 N_replay=24 A_probe=+0 route_KL=0.532659 route_acc=1 N_eff=24 N_L_eff=12 N_R_eff=12 S_structural=0 G_struct=+0.00849229 G_pred=+0.00849229 G_sigma=0.00254826 G_raw=-0.000113324 G_conservative=-0.00266158 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.0015824 G_pred=+0.0015824 G_sigma=0.000941787 G_raw=-0.0067676 G_conservative=-0.00770938 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 183
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=477.075 N_persistent=751 K_mode=3 K_law_mode=3 K_effective_mode=3 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=36 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.645934 route_acc=0.65625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=-0.00297248 G_pred=-0.00297248 G_sigma=0.00301569 G_raw=-0.0150513 G_conservative=-0.018067 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=166.357 N_persistent=242 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00211898 G_pred=+0.00211898 G_sigma=0.0010458 G_raw=-0.00628101 G_conservative=-0.00732682 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 185
+split_eval=1 split_proposal=1 split_protected=0
+root Q_decision=0 E_bank_struct=1184.39 N_persistent=1811 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.610678 route_acc=0.625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.0161281 G_pred=+0.0161281 G_sigma=0.0144474 G_raw=+0.00354388 G_conservative=-0.0109035 split=rejected eligible=True ready=True reason=objective_competition
+
+Epoch: 186
+split_eval=1 split_proposal=1 split_protected=1
+root Q_decision=102.739 E_bank_struct=1287.13 N_persistent=1968 K_mode=7 K_law_mode=7 K_effective_mode=7 has_bank_prior=True q_bank_mass_L=0 q_bank_mass_R=32 h1_defined=True two_sided_support=False invalid_proposal=False N_bank=84 N_shadow=0 N_replay=32 A_probe=+0.00327253 route_KL=0.0347738 route_acc=1 N_eff=2.13334 N_L_eff=0 N_R_eff=2.13334 S_structural=1 G_struct=+0.0421326 G_pred=+0.0421326 G_sigma=0.0157145 G_raw=+0.0319538 G_conservative=+0.0162393 split=accepted eligible=True ready=True reason=objective_competition
+
+Epoch: 187
+split_eval=2 split_proposal=2 split_protected=1
+root_L Q_decision=0 E_bank_struct=1184.39 N_persistent=1811 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0.00878096 route_KL=0.62118 route_acc=0.625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=+0.0280916 G_pred=+0.0280916 G_sigma=0.0151182 G_raw=+0.0215416 G_conservative=+0.0064234 split=accepted eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=102.739 N_persistent=157 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0534583 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00362786 G_pred=+0.00362786 G_sigma=0.00292165 G_raw=-0.00292214 G_conservative=-0.0058438 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 190
+split_eval=3 split_proposal=3 split_protected=0
+root_L_L Q_decision=0 E_bank_struct=149.001 N_persistent=226 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.056361 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.000551681 G_pred=+0.000551681 G_sigma=0.000294178 G_raw=-0.00704832 G_conservative=-0.0073425 split=rejected eligible=False ready=False reason=h1_undefined
+root_L_R Q_decision=0 E_bank_struct=1035.39 N_persistent=1585 K_mode=5 K_law_mode=5 K_effective_mode=5 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=60 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.651576 route_acc=0.625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=-0.0930001 G_pred=-0.0930001 G_sigma=0.02329 G_raw=-0.1006 G_conservative=-0.12389 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=102.739 N_persistent=157 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=0.0014565 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00307641 G_pred=+0.00307641 G_sigma=0.0027361 G_raw=-0.00452359 G_conservative=-0.00725969 split=rejected eligible=False ready=False reason=h1_undefined
+
+Epoch: 191
+split_eval=2 split_proposal=2 split_protected=0
+root_L Q_decision=0 E_bank_struct=1184.39 N_persistent=1811 K_mode=6 K_law_mode=6 K_effective_mode=6 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=20 h1_defined=True two_sided_support=True invalid_proposal=False N_bank=72 N_shadow=0 N_replay=32 A_probe=+0 route_KL=0.628186 route_acc=0.625 N_eff=32 N_L_eff=12 N_R_eff=20 S_structural=0 G_struct=-0.0144389 G_pred=-0.0144389 G_sigma=0.0063411 G_raw=-0.0292542 G_conservative=-0.0355953 split=rejected eligible=True ready=True reason=objective_competition
+root_R Q_decision=0 E_bank_struct=102.739 N_persistent=157 K_mode=1 K_law_mode=1 K_effective_mode=1 has_bank_prior=True q_bank_mass_L=12 q_bank_mass_R=0 h1_defined=False two_sided_support=False invalid_proposal=True N_bank=12 N_shadow=0 N_replay=12 A_probe=+0 route_KL=2.45965e-05 route_acc=1 N_eff=12 N_L_eff=12 N_R_eff=0 S_structural=0 G_struct=+0.00313354 G_pred=+0.00313354 G_sigma=0.00274224 G_raw=-0.00451646 G_conservative=-0.00725871 split=rejected eligible=False ready=False reason=h1_undefined
+

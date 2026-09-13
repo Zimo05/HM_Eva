@@ -100,6 +100,12 @@ def _parse(parser: argparse.ArgumentParser) -> argparse.Namespace:
 
 def stationary_args(*, dws: bool = False) -> argparse.Namespace:
     parser = common_parser("Run one stationary model/dataset evaluation cell")
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=64,
+        help="number of variable-length HM sequences per validation/evaluation batch",
+    )
     if dws:
         parser.add_argument("--variant", choices=("8", "13", "20"), default="13")
     return _parse(parser)

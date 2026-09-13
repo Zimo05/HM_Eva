@@ -162,6 +162,9 @@ class TrainingWakeMixin:
                     materialize_diagnostics=(
                         precomputed_frontier_rows is None
                     ),
+                    visit_chunk_size=(
+                        self.wake_config.retrieval_visit_chunk_size
+                    ),
                 )
                 if precomputed_frontier_rows is not None:
                     (
@@ -204,16 +207,34 @@ class TrainingWakeMixin:
                         + utility.detach().sum()
                     )
                     expansion_utility_count += int(utility.numel())
-                pre_action_effective = self._controller_effective_parameters(
+                event_slice = slice(event_index, event_index + 1)
+                event_times = sequence["times"][event_slice]
+                previous_time = (
+                    sequence["times"].new_zeros(1)
+                    if event_index == 0
+                    else sequence["times"][event_index - 1:event_index]
+                )
+                step_flat = {
+                    "types": sequence["types"][event_slice],
+                    "duration": (
+                        event_times - previous_time
+                    ).clamp_min(0.0),
+                    HAWKES_HISTORY_STATS_KEY: sequence[
+                        HAWKES_HISTORY_STATS_KEY
+                    ][event_slice],
+                    HAWKES_INTERVAL_STATS_KEY: sequence[
+                        HAWKES_INTERVAL_STATS_KEY
+                    ][event_slice],
+                }
+                pre_action_theta = self._controller_effective_theta(
                     memory_output,
                     working_delta,
                     working_delta.new_zeros(()),
-                ).select(0)
-                pre_action_nll = self.hawkes.event_NLL(
-                    sequence=sequence,
-                    params=pre_action_effective,
-                    k=event_index,
                 )
+                pre_action_nll = self._batched_raw_theta_event_nll(
+                    step_flat,
+                    pre_action_theta,
+                ).squeeze(0)
 
                 frontier_energy = self._frontier_event_nll(
                     sequence,
@@ -243,16 +264,16 @@ class TrainingWakeMixin:
                         raw_action_probabilities
                     ).detach()
                 )
-                effective = self._controller_effective_parameters(
+                gated_theta = self._controller_effective_theta(
                     memory_output,
                     working_delta,
                     action_probabilities[1],
-                ).select(0)
-                prediction_nll = self.hawkes.event_NLL(
-                    sequence=sequence,
-                    params=effective,
-                    k=event_index,
                 )
+                prediction_nll = self._batched_raw_theta_event_nll(
+                    step_flat,
+                    gated_theta,
+                ).squeeze(0)
+                gated_theta_1d = gated_theta.squeeze(0)
                 assignment_counts[owner_id] += 1
                 owner_depth_total += self.tree.nodes[owner_id].depth
                 owner_lca_count += int(owner_is_lca)
@@ -284,7 +305,7 @@ class TrainingWakeMixin:
                     query=query, posterior=posterior,
                     working_delta=working_delta,
                     retrieve_gate=action_probabilities[1],
-                    no_write_theta=effective.theta,
+                    no_write_theta=gated_theta_1d,
                 ))
                 adapt_request = self._make_write_request(
                     event_index, owner_id, query, novelty, memory_output,
@@ -303,7 +324,7 @@ class TrainingWakeMixin:
                             len(pending_writes) / max(self.tree.frontier_routing.config.max_writes_per_sequence, 1)
                         ).clamp_max(1.0),
                     },
-                    assimilation_theta=effective.theta,
+                    assimilation_theta=gated_theta_1d,
                     assimilation_grad=torch.autograd.grad(
                         prediction_nll, working_delta, retain_graph=True
                     )[0],
@@ -414,7 +435,7 @@ class TrainingWakeMixin:
 
                 if write_request is not None:
                     write_request["assimilation_theta"] = (
-                        effective.theta.detach().clone()
+                        gated_theta_1d.detach().clone()
                     )
                     write_request["assimilation_grad"] = (
                         working_grad.detach().clone()
@@ -785,13 +806,13 @@ class TrainingWakeMixin:
         *,
         microbatch: Optional[int] = None,
     ) -> tuple[Tensor, Tensor, Dict[str, Tensor]]:
-        """Read the immutable episodic snapshot for all flat Wake rows.
+        """Read an immutable episodic snapshot for the legacy batch path.
 
-        The Wake time loop is causal only through working memory. Episodic
-        writes and retrieval-usage credit are deferred until the transaction
-        ends, so all flat rows can share one read snapshot. Chunking keeps the
-        ``[rows, visited_nodes, capacity]`` retrieval tensors bounded without
-        changing any row's result.
+        The public online-sequential Wake path does not use this helper.
+        The legacy snapshot implementation defers episodic writes and
+        retrieval-usage credit until its transaction ends, so all flat rows
+        can share one read snapshot. Chunking keeps the
+        ``[rows, visited_nodes, capacity]`` retrieval tensors bounded.
         """
         if query_flat.ndim != 2:
             raise ValueError("flat Wake query must have shape [N, key_dim]")
@@ -812,6 +833,10 @@ class TrainingWakeMixin:
 
         memory = self.tree.episodic_memory
         node_ids = tuple(self.tree.all_node_ids)
+        snapshot = memory.prepare_packed_read_snapshot(
+            node_ids,
+            query_flat,
+        )
         node_delta_chunks: list[Tensor] = []
         episodic_delta_chunks: list[Tensor] = []
         info_chunks: Dict[str, list[Tensor]] = {}
@@ -823,6 +848,10 @@ class TrainingWakeMixin:
                 node_mask=frontier_flat.visited_mask[start:end],
                 node_ids=node_ids,
                 update_state=False,
+                snapshot=snapshot,
+                visit_chunk_size=(
+                    self.wake_config.retrieval_visit_chunk_size
+                ),
             )
             node_delta_chunks.append(node_delta)
             episodic_delta_chunks.append(torch.einsum(
@@ -844,6 +873,84 @@ class TrainingWakeMixin:
             },
         )
 
+    def _wake_recurrent_step_tensor(
+        self,
+        step_flat: Mapping[str, Tensor],
+        semantic_base: Tensor,
+        episodic_base: Tensor,
+        working_delta: Tensor,
+        novelty: Tensor,
+        similarity_count: Tensor,
+        owner_confidence: Tensor,
+        max_similarity: Tensor,
+        retrieval_residual_norm: Tensor,
+        pending_write_ratio: Tensor,
+        *,
+        update_statistics: bool = True,
+    ) -> tuple[
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ]:
+        """Run one causal Wake recurrent step using tensor-only NLL algebra.
+
+        The order is intentionally explicit: the no-retrieval theta produces
+        the pre-action NLL, that NLL drives the Controller, and only then is
+        the retrieval-gated theta evaluated.  The final NLL and working-memory
+        gradient are computed from raw theta, so no per-step
+        ``EffectiveHawkesParameters`` object is allocated.
+
+        Returns ``(pre_action_theta, pre_action_nll, probabilities,
+        raw_probabilities, gated_theta, prediction_nll, working_grad)``.
+        ``gated_theta`` remains available for the delayed assimilation snapshot;
+        the analytic gradient is evaluated on its detached value, matching the
+        existing Wake update contract.
+        """
+        pre_action_theta = semantic_base + working_delta
+        pre_action_nll = self._batched_raw_theta_event_nll(
+            step_flat,
+            pre_action_theta.detach(),
+        )
+        controller_output = self.controller.action_distribution_batch(
+            pre_action_nll,
+            novelty,
+            similarity_count,
+            update_statistics=update_statistics,
+            owner_confidence=owner_confidence,
+            retrieval_similarity=max_similarity,
+            retrieval_residual_norm=retrieval_residual_norm,
+            working_memory_norm=working_delta.norm(dim=-1),
+            pending_write_ratio=pending_write_ratio,
+        )
+        action_probabilities = controller_output["probabilities"]
+        raw_action_probabilities = controller_output.get(
+            "raw_probabilities",
+            action_probabilities,
+        )
+        gated_theta = (
+            pre_action_theta
+            + action_probabilities[:, 1, None] * episodic_base
+        )
+        prediction_nll, working_grad = (
+            self._batched_raw_theta_event_nll_and_grad(
+                step_flat,
+                gated_theta.detach(),
+            )
+        )
+        return (
+            pre_action_theta,
+            pre_action_nll,
+            action_probabilities,
+            raw_action_probabilities,
+            gated_theta,
+            prediction_nll,
+            working_grad,
+        )
+
     def train_wake_batch(
         self,
         *,
@@ -857,13 +964,81 @@ class TrainingWakeMixin:
         frontier_rows: Sequence[tuple[tuple[str, ...], int, int]],
         flat: Mapping[str, Tensor],
     ) -> list[Dict[str, Any]]:
-        """Run a masked time-position Wake wavefront over several sequences.
+        """Run one prepared Wake chunk with online memory semantics.
 
-        Working memory remains strictly recurrent within each row. Shared
-        episodic banks form a minibatch transaction: retrieval sees the bank
-        snapshot present at batch entry, usage credit is accumulated during
-        the wavefront, and physical top-B writes commit in sequence order only
-        after every row has finished.
+        The encoder, projection, query, and frontier are stateless for a
+        prepared chunk and are therefore computed once by
+        ``_iter_masked_wavefront_batches``.  Episodic retrieval, controller
+        decisions, working-memory updates, age, usage credit, and physical
+        writes remain in :meth:`train_wake_sequence` and are executed in
+        sequence/event order.  In particular, a sequence commits its writes
+        before the next sequence starts, so later sequences observe the
+        causal bank state rather than a batch-entry snapshot.
+        """
+        batch_size = len(sequences)
+        if batch_size == 0 or len(sequence_indices) != batch_size:
+            raise ValueError("Wake wavefront batch metadata does not align")
+
+        lengths_cpu = flat.get("sequence_lengths_cpu")
+        if lengths_cpu is None:
+            lengths_cpu = flat["sequence_lengths"].detach().cpu().tolist()
+        lengths = [int(value) for value in lengths_cpu]
+        if len(lengths) != batch_size or any(length <= 0 for length in lengths):
+            raise ValueError("Wake wavefront requires non-empty sequences")
+
+        offsets: list[int] = []
+        cursor = 0
+        for length in lengths:
+            offsets.append(cursor)
+            cursor += length
+        if (
+            z_flat.size(0) != cursor
+            or projected_flat.size(0) != cursor
+            or query_flat.size(0) != cursor
+            or frontier_flat.node_indices.size(0) != cursor
+            or len(frontier_rows) != cursor
+        ):
+            raise ValueError("flattened Wake tensors do not align")
+
+        # Keep the chunk-level stateless preparation above, but delegate the
+        # stateful part to the already-tested scalar protocol. This is the
+        # intentional serialization boundary for shared Episodic Memory.
+        results = []
+        for row, sequence in enumerate(sequences):
+            start = offsets[row]
+            end = start + lengths[row]
+            results.append(self.train_wake_sequence(
+                sequence,
+                sequence_index=sequence_indices[row],
+                precomputed_z=z_flat[start:end],
+                precomputed_projected_z=projected_flat[start:end],
+                precomputed_memory_query=query_flat[start:end],
+                frontier_static_cache=frontier_static_cache,
+                precomputed_frontier=frontier_flat.slice(start, end),
+                precomputed_frontier_rows=frontier_rows[start:end],
+            ))
+        return results
+
+    def _train_wake_batch_snapshot(
+        self,
+        *,
+        sequences: Sequence[Mapping[str, Tensor]],
+        sequence_indices: Sequence[int],
+        z_flat: Tensor,
+        projected_flat: Tensor,
+        query_flat: Tensor,
+        frontier_static_cache: Any,
+        frontier_flat: Any,
+        frontier_rows: Sequence[tuple[tuple[str, ...], int, int]],
+        flat: Mapping[str, Tensor],
+    ) -> list[Dict[str, Any]]:
+        """Run the legacy minibatch-synchronous snapshot implementation.
+
+        This path is retained only for experiments that explicitly define a
+        minibatch-synchronous memory algorithm. It intentionally reads one
+        bank snapshot at chunk entry and defers usage/age/write mutation, so
+        it is not used by :meth:`train_wake_batch` and must not be presented
+        as online sequential Wake training.
         """
         batch_size = len(sequences)
         if batch_size == 0 or len(sequence_indices) != batch_size:
@@ -1082,11 +1257,18 @@ class TrainingWakeMixin:
                     memory_output_flat["frontier_node_indices"],
                     posterior_flat,
                 )
+                owner_similarity_flat, owner_valid_flat = (
+                    self.tree.episodic_memory.owner_similarity_from_packed(
+                        packed_memory_info=packed_memory_info_flat,
+                        visited_node_indices=frontier_flat.visited_indices,
+                        visited_node_mask=frontier_flat.visited_mask,
+                        owner_indices=owner_indices_flat,
+                    )
+                )
                 novelty_flat, similarity_count_flat, max_similarity_flat = (
-                    self.tree.episodic_memory.novelty_count_packed(
-                        query_flat,
-                        owner_indices_flat,
-                        node_ids,
+                    self.tree.episodic_memory.novelty_from_similarity(
+                        owner_similarity_flat,
+                        owner_valid_flat,
                         temperature=self.controller.novelty_temperature,
                         count_exponent=self.controller.count_exponent,
                         eps=self.controller.controller_eps,
@@ -1321,16 +1503,7 @@ class TrainingWakeMixin:
                 # the final Wake objective below uses only the gated result.
                 semantic_base = semantic_base_flat.index_select(0, flat_rows)
                 episodic_base = episodic_base_flat.index_select(0, flat_rows)
-                pre_action_theta = semantic_base + working_delta
-                pre_action_effective = self._effective_parameters_from_theta(
-                    pre_action_theta,
-                    detach=True,
-                )
-                pre_action_nll = self._batched_sequence_event_nll(
-                    step_flat,
-                    {"effective_params": pre_action_effective},
-                )
-                pending_write_ratio = pre_action_nll.new_full(
+                pending_write_ratio = semantic_base.new_full(
                     (active.numel(),),
                     float(event_index)
                     / max(
@@ -1339,39 +1512,28 @@ class TrainingWakeMixin:
                         1,
                     ),
                 ).clamp_max(1.0)
-                controller_output = self.controller.action_distribution_batch(
+                (
+                    pre_action_theta,
                     pre_action_nll,
+                    action_probabilities,
+                    raw_action_probabilities,
+                    gated_theta,
+                    prediction_nll,
+                    working_grad,
+                ) = self._wake_recurrent_step_tensor(
+                    step_flat,
+                    semantic_base,
+                    episodic_base,
+                    working_delta,
                     novelty,
                     similarity_count,
-                    owner_confidence=owner_confidence,
-                    retrieval_similarity=max_similarity,
-                    retrieval_residual_norm=(
-                        retrieval_residual_norm_flat.index_select(
-                            0,
-                            flat_rows,
-                        )
+                    owner_confidence,
+                    max_similarity,
+                    retrieval_residual_norm_flat.index_select(
+                        0,
+                        flat_rows,
                     ),
-                    working_memory_norm=working_delta.norm(dim=-1),
-                    pending_write_ratio=pending_write_ratio,
-                )
-                action_probabilities = controller_output["probabilities"]
-                raw_action_probabilities = controller_output.get(
-                    "raw_probabilities",
-                    action_probabilities,
-                )
-                gated_theta = (
-                    pre_action_theta
-                    + action_probabilities[:, 1, None] * episodic_base
-                )
-                gated_effective = self._effective_parameters_from_theta(
-                    gated_theta,
-                    detach=True,
-                )
-                # This is the only prediction NLL used for Wake loss and the
-                # recurrent working-memory gradient at this time position.
-                prediction_nll, working_grad = self._batched_sequence_event_nll_and_grad(
-                    step_flat,
-                    gated_effective,
+                    pending_write_ratio,
                 )
                 action_index = action_probabilities.detach().argmax(dim=-1)
                 wm_penalty = (
@@ -1431,7 +1593,7 @@ class TrainingWakeMixin:
                 assimilation_theta_flat.index_copy_(
                     0,
                     flat_rows,
-                    gated_effective.theta.detach(),
+                    gated_theta.detach(),
                 )
                 working_delta_snapshot_flat.index_copy_(
                     0,

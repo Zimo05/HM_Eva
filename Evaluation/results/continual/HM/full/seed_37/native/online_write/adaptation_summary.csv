@@ -1,0 +1,10 @@
+﻿protocol,task_id,K_min,K_max,K_count,adaptation_auc,status
+online_write,1,0,32,7,-0.0012064731010084165,available
+online_write,2,0,32,7,-0.0036350095422462356,available
+online_write,3,0,32,7,-0.00990687760784284,available
+online_write,4,0,32,7,-0.002613339574047281,available
+online_write,5,0,32,7,-0.00465621932445056,available
+online_write,6,0,32,7,-0.006727220239416659,available
+online_write,7,0,32,7,-0.008953763615936097,available
+online_write,8,0,32,7,-0.003503337695934264,available
+online_write,9,0,32,7,-0.001558742703981368,available

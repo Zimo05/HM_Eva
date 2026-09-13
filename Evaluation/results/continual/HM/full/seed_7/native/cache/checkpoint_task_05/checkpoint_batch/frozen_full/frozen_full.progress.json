@@ -1,0 +1,10 @@
+{
+  "variant": "frozen/full",
+  "protocol": "frozen",
+  "memory_view": "full",
+  "completed_sequences": 608,
+  "total_sequences": 608,
+  "elapsed_seconds": 2.5389573340071365,
+  "last_source_index": 52,
+  "last_eval_set_id": "anchor_E_1"
+}

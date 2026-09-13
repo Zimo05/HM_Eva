@@ -1,0 +1,10 @@
+{
+  "variant": "fast_adapt/full",
+  "protocol": "fast_adapt",
+  "memory_view": "full",
+  "completed_sequences": 576,
+  "total_sequences": 576,
+  "elapsed_seconds": 6.772932697989745,
+  "last_source_index": 52,
+  "last_eval_set_id": "anchor_E_1"
+}

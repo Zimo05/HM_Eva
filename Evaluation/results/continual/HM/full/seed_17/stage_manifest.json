@@ -1,0 +1,372 @@
+{
+  "format_version": 1,
+  "benchmark_id": "CL-core-v2",
+  "benchmark_manifest": {
+    "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/benchmark_manifest.json",
+    "sha256": "ca7817bd30e063a0a59bb0ca6e9bdee303f4a2f1e927f8538113fe29921b6d43",
+    "role": "protocol"
+  },
+  "cl_config": {
+    "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/cl_config.json",
+    "sha256": "8f61bc16631f5b033e4ffa2bbeb6a17d26b373e2985d7eddc89901e3fa6075c9",
+    "role": "learner_configuration"
+  },
+  "permissions": {
+    "gradient_update": "train.csv",
+    "checkpoint_selection": "val.csv",
+    "final_evaluation": "test.csv",
+    "selection_forbidden": [
+      "anchors/*",
+      "ground_truth/*",
+      "test.csv"
+    ]
+  },
+  "stages": {
+    "0": {
+      "task_id": 0,
+      "stage_label": "A_1_initial",
+      "shift_type": "initial",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_00/train.csv",
+        "sha256": "445678cc2f51c334ad18188a4414db7ced3ee28756512af0b70acc31f29a6baf",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_00/val.csv",
+        "sha256": "394de13f78e6b9e9c958aa50e38656c404d02ba27b193fbbf531cd1fa90ba359",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_00/test.csv",
+        "sha256": "e65f10c76d707442901097fb815c2665ae9087fd817bd760a1670867c6aa0a42",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": null,
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_00_last.pt",
+        "sha256": "3040fcaa152c906e23123e33be936c40389595113eb24f17ecc0067b5e9b1197",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_00_best.pt",
+        "sha256": "dd2a84576b9a41c94dc8c43e7b4f1fd72250f1d0eea71d94cec9e72c948ac873",
+        "role": "selection_state"
+      }
+    },
+    "1": {
+      "task_id": 1,
+      "stage_label": "B_1_novel",
+      "shift_type": "novel",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_01/train.csv",
+        "sha256": "b9605af5adee3b82121a32ebfd3c37b0827b27f5ca71fce81655313867de599f",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_01/val.csv",
+        "sha256": "0511084913226211304947c30fccf364c76450f5293c0b0ef7384e44be269e5c",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_01/test.csv",
+        "sha256": "bef3136e0d865477ac408821e81e667ece19672bfe32bb0e39781b8094c37fee",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_00_best.pt",
+        "sha256": "dd2a84576b9a41c94dc8c43e7b4f1fd72250f1d0eea71d94cec9e72c948ac873",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_01_last.pt",
+        "sha256": "804f579000ff18c9b635765e28eeb749ffdb9d819faac35f48137d998c599510",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_01_best.pt",
+        "sha256": "0ce499c349c3b2781a68b67060bd14c9cfe5903f0af20b696a2a165db366ecb3",
+        "role": "selection_state"
+      }
+    },
+    "2": {
+      "task_id": 2,
+      "stage_label": "C_1_novel",
+      "shift_type": "novel",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_02/train.csv",
+        "sha256": "379bc1bb79445939bc361e085a7c99457923cce4b54035798ca34589a0c303e0",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_02/val.csv",
+        "sha256": "520ba19613b6b66e487030eb6e56757e151516819f3d45a28de16222d9f113fb",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_02/test.csv",
+        "sha256": "18c72caa852a3a3c5a286afebceafe63e14d796b721a3f4880338b356e604933",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_01_best.pt",
+        "sha256": "0ce499c349c3b2781a68b67060bd14c9cfe5903f0af20b696a2a165db366ecb3",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_02_last.pt",
+        "sha256": "55e13213113f1c28519ea7b6d960f9bf363f288af40ec6454f00cfedb1fc83ef",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_02_best.pt",
+        "sha256": "21bdba97cc971fefd1793f1795910836c7cd7794b164280a12e3873e7c7dde91",
+        "role": "selection_state"
+      }
+    },
+    "3": {
+      "task_id": 3,
+      "stage_label": "A_1_exact_recurrence",
+      "shift_type": "exact_recurrence",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_03/train.csv",
+        "sha256": "2aa05f4e752a95f59b6bbf47e1b2d24ed221cd241bf34207ca392c63f2b5ee40",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_03/val.csv",
+        "sha256": "157d4263f07788dba9f92f0e9d7c25dc2c28e0c7d17e599bec5c86fa5ceacfbb",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_03/test.csv",
+        "sha256": "47cfccfc61a859e17d60b9b51b4307ed7d773bafed049963ff3753f59f33eafb",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_02_best.pt",
+        "sha256": "21bdba97cc971fefd1793f1795910836c7cd7794b164280a12e3873e7c7dde91",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_03_last.pt",
+        "sha256": "596fdcb0c752876fbce0bf05a22738b1db477bfdad4e42dc413d14612b2094d6",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_03_best.pt",
+        "sha256": "e8b92582c366c245471bbeff254477ed410fd84ac9fa27c9bcf2103099ad2b6c",
+        "role": "selection_state"
+      }
+    },
+    "4": {
+      "task_id": 4,
+      "stage_label": "B_prime_1_near_recurrence",
+      "shift_type": "near_recurrence",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_04/train.csv",
+        "sha256": "4857b12a85deb3fb07f38138e0fd78e558b4723d0400d3877da205559d9d8065",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_04/val.csv",
+        "sha256": "ff817dd5fe898467fc765f89b562e097f6e6d21131aab66832dcffa4e3bbc261",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_04/test.csv",
+        "sha256": "1092b2318d4291a1c8a1604d3201d18a677d5d162df6bba4bd83c9875c82aaca",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_03_best.pt",
+        "sha256": "e8b92582c366c245471bbeff254477ed410fd84ac9fa27c9bcf2103099ad2b6c",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_04_last.pt",
+        "sha256": "f627bf9f49be9fb242677d9ba09f9d8df3f2db2ac186db504f408f85dd0375d5",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_04_best.pt",
+        "sha256": "56200422d7cf99db93842cc80fecef822d32a9c1dd15adc430175d98698db71f",
+        "role": "selection_state"
+      }
+    },
+    "5": {
+      "task_id": 5,
+      "stage_label": "A_2_specialization",
+      "shift_type": "specialization",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_05/train.csv",
+        "sha256": "211685b5b177f075cb8348d3a5fe2ce98a136477649bab090fcc2191c6d0f701",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_05/val.csv",
+        "sha256": "cef10ec6d6c88d4aff0b7cebd7dbd94c94862ad4eb6f51acb6c8b06086b94926",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_05/test.csv",
+        "sha256": "5acb6716d8bf2200885e198d6306ca090530d15e156dba776330e7dd702ad123",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_04_best.pt",
+        "sha256": "56200422d7cf99db93842cc80fecef822d32a9c1dd15adc430175d98698db71f",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_05_last.pt",
+        "sha256": "a10e911e51159afa1c74ed79ef9947a5c9f891ad9f8e50f7dbed3b4c48e0dbbf",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_05_best.pt",
+        "sha256": "45817f60d47cfe7be08f01d714ec7ad414849e7c3cff92b58b333591b5571ea5",
+        "role": "selection_state"
+      }
+    },
+    "6": {
+      "task_id": 6,
+      "stage_label": "C_1_with_transient_X",
+      "shift_type": "transient_anomaly",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_06/train.csv",
+        "sha256": "d358704e38fe4818dbba9467ffd4778a9acd1ccb0baf36b9b440b1f7bb6e8930",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_06/val.csv",
+        "sha256": "02d88cd8016fcfa9607f03e37829c86f1f7d228dd0a025282b451addb35e99e8",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_06/test.csv",
+        "sha256": "89d7692b86a69de870616e8c0365c32b73919feb1001a015b626e1ac50777d05",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_05_best.pt",
+        "sha256": "45817f60d47cfe7be08f01d714ec7ad414849e7c3cff92b58b333591b5571ea5",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_06_last.pt",
+        "sha256": "0f08c0b156c8a6c89ea8bb63ee991fdf9883f0eed8431629757b5cdcee5408d5",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_06_best.pt",
+        "sha256": "e62cff86244f64c26df91613ed1f058143bb3b99459948edb3ac320c85d2e32d",
+        "role": "selection_state"
+      }
+    },
+    "7": {
+      "task_id": 7,
+      "stage_label": "A_merge",
+      "shift_type": "merge",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_07/train.csv",
+        "sha256": "d91b6e5419cef5e473d01658b311a06360f4cf465178288816c8593b0cacb2b9",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_07/val.csv",
+        "sha256": "5624975a4d0d9750e3bfdb41319ce2d7ed43ce41b6fdf52e5a4f627cd52f5443",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_07/test.csv",
+        "sha256": "7738c3c8f10b692c778688f5ae27e32135d8f00bd486ee0a6720dda4aeb372d2",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_06_best.pt",
+        "sha256": "e62cff86244f64c26df91613ed1f058143bb3b99459948edb3ac320c85d2e32d",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_07_last.pt",
+        "sha256": "7df60022ffee694cc7b6d0da8bf8562a6e054f9aba819058fdd7fcafdd7e462a",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_07_best.pt",
+        "sha256": "59cda9eb4ac8a5e1b6eb4cd69284091f4d2809aa10c85a1695a9aa6e6e9e5334",
+        "role": "selection_state"
+      }
+    },
+    "8": {
+      "task_id": 8,
+      "stage_label": "A_1_long_gap_recurrence",
+      "shift_type": "long_gap_recurrence",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_08/train.csv",
+        "sha256": "b59b606a36d06bede608298ac92b93532888c7b1ecbc19cd5723c8ebc9315fcc",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_08/val.csv",
+        "sha256": "0d4a2560732937e36e6972aaaa3126f53e1a756bee17d3918b1b19924111cbae",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_08/test.csv",
+        "sha256": "a059269e14a6c4351d9d6b825638565576d5a88a58ad14e79d00d6654a90127b",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_07_best.pt",
+        "sha256": "59cda9eb4ac8a5e1b6eb4cd69284091f4d2809aa10c85a1695a9aa6e6e9e5334",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_08_last.pt",
+        "sha256": "264faffc90e0d8025f096260f2073258dfbca24b9496a818625eccf29ded122a",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_08_best.pt",
+        "sha256": "e3554ec1dab015ea09c7754aadd1d780edb7f740365a04ae671f3b5e40b1e9d2",
+        "role": "selection_state"
+      }
+    },
+    "9": {
+      "task_id": 9,
+      "stage_label": "E_1_B_1_mixture",
+      "shift_type": "mixture",
+      "train": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_09/train.csv",
+        "sha256": "06cf3ab6c94bf8ca279c5b4651ed36a025e4758dcbc1f4bec4e3402089060cc9",
+        "role": "gradient_update"
+      },
+      "validation": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_09/val.csv",
+        "sha256": "b90c7ef0a6e71a45654a394de9978d5e3ad6a4cc82f3cf7ee64a2bc801d0f9ca",
+        "role": "checkpoint_selection"
+      },
+      "test": {
+        "path": "/home/xinye/Benchmark/Datasets/CL/hm_continual_v2/task_09/test.csv",
+        "sha256": "dc077e3ce08b860e98f6769f77670c4993c41443f71e304b2fa6fdbb644e7368",
+        "role": "final_evaluation_only"
+      },
+      "previous_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_08_best.pt",
+        "sha256": "e3554ec1dab015ea09c7754aadd1d780edb7f740365a04ae671f3b5e40b1e9d2",
+        "role": "resume_input"
+      },
+      "last_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_09_last.pt",
+        "sha256": "50f7ba8474b04e3c7a7de995f0924bbd9081f97a5fc913c3a22deae506268f74",
+        "role": "last_state"
+      },
+      "best_checkpoint": {
+        "path": "/home/xinye/Benchmark/Evaluation/results/continual/HM/full/seed_17/checkpoint/task_09_best.pt",
+        "sha256": "8b50c39e08f4c8edd7268e0eb9c95e97dee3ab456de1239a97ede8fd595675d7",
+        "role": "selection_state"
+      }
+    }
+  }
+}

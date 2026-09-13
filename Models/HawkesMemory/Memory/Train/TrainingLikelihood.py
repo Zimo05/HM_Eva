@@ -99,6 +99,115 @@ class TrainingLikelihoodMixin:
         )
         return nll, gradient
 
+    def _batched_raw_theta_event_nll(
+        self,
+        flat: Mapping[str, Tensor],
+        raw_theta: Tensor,
+    ) -> Tensor:
+        """Evaluate flattened event NLL directly from raw Hawkes theta.
+
+        The recurrent Wake path composes semantic, episodic, and working
+        deltas in unconstrained parameter space.  Keeping the softplus and
+        event algebra here avoids materialising an ``EffectiveHawkesParameters``
+        wrapper for every timestep while preserving the exact batched NLL
+        used by the legacy path.
+        """
+        if raw_theta.ndim != 2:
+            raise ValueError("raw_theta must have shape [N, P]")
+        if raw_theta.size(-1) != self.tree.param_dim:
+            raise ValueError("raw theta has the wrong parameter width")
+
+        types = flat["types"].long()
+        history = flat[HAWKES_HISTORY_STATS_KEY]
+        interval = flat[HAWKES_INTERVAL_STATS_KEY]
+        duration = flat["duration"]
+        if raw_theta.size(0) != types.numel():
+            raise ValueError("raw theta must align with flat events")
+
+        D = self.hawkes.num_types
+        M = self.hawkes.num_basis
+        raw_mu = raw_theta[:, :D]
+        raw_W = raw_theta[:, D:].reshape(-1, D, D, M)
+        mu = F.softplus(raw_mu)
+        W = F.softplus(raw_W)
+        intensity = (
+            mu + torch.einsum("ndem,nem->nd", W, history)
+        ).clamp_min(1e-8)
+        selected = intensity.gather(
+            1,
+            types.reshape(-1, 1),
+        ).squeeze(1)
+        integral = (
+            mu.sum(dim=-1) * duration
+            + torch.einsum("ndem,nem->n", W, interval)
+        )
+        return -selected.log() + integral
+
+    def _batched_raw_theta_event_nll_and_grad(
+        self,
+        flat: Mapping[str, Tensor],
+        raw_theta: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Evaluate raw-theta event NLL and its analytic raw-theta gradient.
+
+        This is the tensor-only counterpart of
+        ``_batched_sequence_event_nll_and_grad``.  It intentionally keeps the
+        ``F.softplus(raw_mu/raw_W)`` conversion inside the helper so a fused
+        recurrent step never needs to construct a parameter dataclass.
+        """
+        if raw_theta.ndim != 2:
+            raise ValueError("raw_theta must have shape [N, P]")
+        if raw_theta.size(-1) != self.tree.param_dim:
+            raise ValueError("raw theta has the wrong parameter width")
+
+        types = flat["types"].long()
+        history = flat[HAWKES_HISTORY_STATS_KEY]
+        interval = flat[HAWKES_INTERVAL_STATS_KEY]
+        duration = flat["duration"]
+        if raw_theta.size(0) != types.numel():
+            raise ValueError("raw theta must align with flat events")
+
+        D = self.hawkes.num_types
+        M = self.hawkes.num_basis
+        raw_mu = raw_theta[:, :D]
+        raw_W = raw_theta[:, D:].reshape(-1, D, D, M)
+        mu = F.softplus(raw_mu)
+        W = F.softplus(raw_W)
+        intensity_unclamped = (
+            mu + torch.einsum("ndem,nem->nd", W, history)
+        )
+        intensity = intensity_unclamped.clamp_min(1e-8)
+        target = types.reshape(-1, 1)
+        target_intensity = intensity.gather(1, target).squeeze(1)
+        integral = (
+            mu.sum(dim=-1) * duration
+            + torch.einsum("ndem,nem->n", W, interval)
+        )
+        nll = -target_intensity.log() + integral
+
+        # Match the clamp derivative convention of the existing analytic
+        # path: a target intensity on the clamped branch contributes no
+        # derivative to the log term.
+        unclamped_target = intensity_unclamped.gather(1, target).squeeze(1)
+        target_scale = (
+            unclamped_target > 1e-8
+        ).to(dtype=intensity.dtype) / target_intensity
+        target_indicator = F.one_hot(types, num_classes=D)
+        grad_mu = duration[:, None] - target_scale[:, None] * target_indicator
+        grad_W = interval[:, None, :, :].expand_as(W).clone()
+        grad_W = grad_W - (
+            target_scale[:, None, None, None]
+            * target_indicator[:, :, None, None].to(grad_W)
+            * history[:, None, :, :]
+        )
+        grad_mu = grad_mu * torch.sigmoid(raw_mu)
+        grad_W = grad_W * torch.sigmoid(raw_W)
+        gradient = torch.cat(
+            [grad_mu, grad_W.reshape(grad_W.size(0), -1)],
+            dim=-1,
+        )
+        return nll, gradient
+
     def _sequence_event_nll(
         self,
         sequence: Mapping[str, Tensor],
@@ -336,12 +445,11 @@ class TrainingLikelihoodMixin:
     ) -> Tensor:
         """Evaluate several raw-theta NLL variants in one tensor pass.
 
-        ``raw_theta_variants`` has shape ``[N, V, P]``.  This is used by
-        Global for the full-retrieval and no-retrieval controller targets; the
-        gated variant is evaluated after the controller gate is known.  The
-        event statistics are shared across V, so the expensive intensity and
-        integral contractions are launched once over a larger, contiguous
-        tensor instead of once per variant.
+        ``raw_theta_variants`` has shape ``[N, V, P]``.  It remains a
+        compatibility utility for callers that truly have independent
+        variants.  The causal Wake/Global hot paths deliberately do not use it
+        to combine pre-action and gated theta, because the latter is produced
+        only after Controller.
         """
         if raw_theta_variants.ndim != 3:
             raise ValueError("raw_theta_variants must have shape [N, V, P]")

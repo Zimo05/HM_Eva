@@ -1230,6 +1230,7 @@ class FrontierRoutingRetrieval(nn.Module):
         precomputed_node_delta: Optional[Tensor] = None,
         precomputed_episodic_delta: Optional[Tensor] = None,
         precomputed_memory_info: Optional[Mapping[str, Tensor]] = None,
+        visit_chunk_size: int = 64,
     ) -> FrontierBatchOutput:
         if static_cache is None:
             static_cache = self.build_static_cache()
@@ -1295,6 +1296,7 @@ class FrontierRoutingRetrieval(nn.Module):
                 node_mask=frontier.visited_mask,
                 node_ids=self.tree.all_node_ids,
                 update_state=update_memory_state,
+                visit_chunk_size=visit_chunk_size,
             )
         else:
             expected_delta_shape = (

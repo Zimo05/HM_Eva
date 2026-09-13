@@ -7,6 +7,7 @@ import importlib.util
 import sys
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,7 +16,9 @@ for import_root in (ROOT, EVALUATION_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
+from core.adapters import evaluate_hm, stationary_command
 from core.runner import _baseline_command, _continual_cl_config
+from core.specs import JobSpec
 
 
 def _load_thp_runner():
@@ -98,6 +101,30 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
     )
     assert rmtpp_command[rmtpp_command.index("--lr-patience") + 1] == "6"
     assert rmtpp_command[rmtpp_command.index("--lr-factor") + 1] == "0.3"
+
+
+def test_stationary_hm_batch_size_reaches_train_and_evaluate():
+    args = Namespace(
+        epochs=None,
+        smoke=False,
+        seed=27,
+        batch_size=None,
+        eval_batch_size=128,
+        device="cpu",
+        python_executable=sys.executable,
+        variant="13",
+    )
+    spec = JobSpec(dataset="dws", model="HM")
+    command, _cwd, _env = stationary_command(
+        spec, args, ROOT / "prepared", prepared=ROOT / "prepared"
+    )
+
+    assert command[command.index("--validation-batch-size") + 1] == "128"
+
+    with patch("core.adapters.run_command") as run:
+        evaluate_hm(spec, args, ROOT / "output", {})
+    evaluate_command = run.call_args.args[0]
+    assert evaluate_command[evaluate_command.index("--eval-batch-size") + 1] == "128"
 
 
 def test_thp_defaults_match_the_pre_batch_training_protocol():

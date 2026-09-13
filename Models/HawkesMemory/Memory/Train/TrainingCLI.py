@@ -58,6 +58,7 @@ _PERSISTENT_CONFIG_DESTS = frozenset({
     "route_balance_batch_size",
     "wake_wavefront_batch_size",
     "retrieval_microbatch",
+    "retrieval_visit_chunk_size",
     "route_balance_max_steps",
     "route_balance_target_kl",
     "router_lr_scale",
@@ -236,6 +237,8 @@ def _checkpoint_config_value(payload: Mapping, dest: str):
         "decays", "semantic_blend",
     }:
         return model.get(dest)
+    if dest == "retrieval_visit_chunk_size":
+        return wake.get(dest)
     if dest in _FRONTIER_ARG_TO_CHECKPOINT:
         return frontier.get(_FRONTIER_ARG_TO_CHECKPOINT[dest])
     if dest in _WAKE_ARG_TO_CHECKPOINT:
@@ -828,8 +831,8 @@ def _parse_args(argv=None):
         type=int,
         default=64,
         help=(
-            "Number of sequence-local working-memory rows advanced together "
-            "at each Wake time position."
+            "Number of sequences grouped for stateless Wake prefix "
+            "preparation; stateful memory updates remain ordered."
         ),
     )
     parser.add_argument(
@@ -837,8 +840,17 @@ def _parse_args(argv=None):
         type=int,
         default=1024,
         help=(
-            "Number of flat event rows per episodic read_packed call at "
-            "Wake batch entry."
+            "Compatibility setting for the private minibatch-synchronous "
+            "Wake snapshot path."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-visit-chunk-size",
+        type=int,
+        default=64,
+        help=(
+            "Maximum active (event, visited-node) pairs processed by one "
+            "packed episodic retrieval kernel."
         ),
     )
     parser.add_argument(
@@ -1877,6 +1889,9 @@ def main() -> None:
         trainer.wake_config.retrieval_microbatch = (
             args.retrieval_microbatch
         )
+        trainer.wake_config.retrieval_visit_chunk_size = (
+            args.retrieval_visit_chunk_size
+        )
         trainer.wake_config.route_balance_max_steps = (
             args.route_balance_max_steps
         )
@@ -2271,6 +2286,7 @@ def main() -> None:
             route_balance_batch_size=args.route_balance_batch_size,
             wake_wavefront_batch_size=args.wake_wavefront_batch_size,
             retrieval_microbatch=args.retrieval_microbatch,
+            retrieval_visit_chunk_size=args.retrieval_visit_chunk_size,
             route_balance_max_steps=args.route_balance_max_steps,
             route_balance_target_kl=args.route_balance_target_kl,
             count_similarity_low=args.count_similarity_low,

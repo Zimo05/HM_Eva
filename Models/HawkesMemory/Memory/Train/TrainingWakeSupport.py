@@ -148,7 +148,7 @@ class TrainingWakeSupportMixin:
                 )
         return prototype_count, evidence_mass
 
-    def _controller_effective_parameters(
+    def _controller_effective_theta(
         self,
         memory_output: Mapping[str, Any],
         working_delta: Tensor,
@@ -156,7 +156,7 @@ class TrainingWakeSupportMixin:
         *,
         row_indices: Optional[Tensor] = None,
     ):
-        """Recompose Hawkes parameters while leaving routing weights untouched."""
+        """Recompose raw Hawkes theta without allocating a parameter wrapper."""
         # Global stores these two affine reductions once per batch.  Applying
         # a controller gate is then only an elementwise operation in raw
         # (unconstrained) Hawkes space; the legacy leaf-wise composition below
@@ -179,7 +179,7 @@ class TrainingWakeSupportMixin:
                 + gate * reduced_episodic
                 + working_delta
             )
-            return self._effective_parameters_from_theta(theta)
+            return theta
 
         semantic = memory_output["frontier_semantic_theta"]
         episodic = memory_output["frontier_episodic_delta"]
@@ -192,16 +192,29 @@ class TrainingWakeSupportMixin:
         while gate.ndim < episodic.ndim - 1:
             gate = gate.unsqueeze(-1)
         gated_episodic = episodic * gate.unsqueeze(-1)
-        D = self.hawkes.num_types
-        return self.tree.episodic_memory.parameter_update.compose_effective_parameters(
-            semantic_mu=semantic[..., :D],
-            semantic_W=semantic[..., D:].reshape(
-                *semantic.shape[:-1], D, D, self.hawkes.num_basis
-            ),
+        return self.tree.episodic_memory.parameter_update.compose_effective_theta(
+            semantic_theta=semantic,
             episodic_delta=gated_episodic,
             routing_weights=routing,
             working_delta=working_delta,
-            decays=self.hawkes.decays,
+        )
+
+    def _controller_effective_parameters(
+        self,
+        memory_output: Mapping[str, Any],
+        working_delta: Tensor,
+        retrieval_gate: Tensor,
+        *,
+        row_indices: Optional[Tensor] = None,
+    ):
+        """Compatibility wrapper around :meth:`_controller_effective_theta`."""
+        return self._effective_parameters_from_theta(
+            self._controller_effective_theta(
+                memory_output,
+                working_delta,
+                retrieval_gate,
+                row_indices=row_indices,
+            )
         )
 
     def _move_sequence(self, sequence: Mapping[str, Tensor]) -> Dict[str, Any]:

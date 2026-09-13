@@ -215,13 +215,17 @@ class WakeObjectiveConfig:
     route_probe_residual_rank: int = 4
     route_probe_residual_grad_clip: float = 0.0
     route_balance_batch_size: int = 64
-    # Number of independent sequence rows advanced at each Wake time
-    # position. This is separate from the persistent-parameter batch so the
-    # recurrent activation footprint can be tuned independently.
+    # Number of sequences grouped for stateless Wake prefix preparation. The
+    # stateful Episodic Memory protocol still advances sequence/event rows in
+    # order, so this does not change online memory causality.
     wake_wavefront_batch_size: int = 64
-    # Number of flat event rows read by one episodic retrieval call at Wake
-    # batch entry. This bounds retrieval workspace without changing causality.
+    # Number of flat event rows read by one episodic retrieval call in the
+    # private minibatch-synchronous snapshot compatibility path.
     retrieval_microbatch: int = 1024
+    # Maximum active (event, visited-node) pairs processed by one packed
+    # retrieval kernel. Computational only; it does not change routing,
+    # memory visibility, or retrieval semantics.
+    retrieval_visit_chunk_size: int = 64
     # Deprecated compatibility fields.  A global batch now performs exactly
     # one optimizer step; repeating calibration would violate the intended
     # update timescale.

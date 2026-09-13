@@ -116,6 +116,9 @@ def stationary_command(
         return command, MODELS_ROOT / "TPP-LLM", env
     if spec.model == "HM":
         prepared = prepared or (result_dir / "prepared")
+        eval_batch = int(getattr(args, "eval_batch_size", 64))
+        if eval_batch <= 0:
+            raise ValueError("eval_batch_size must be positive")
         # Dataset preparation belongs to the runner, after the result manifest
         # has been accepted.  Keeping command construction side-effect free is
         # important for --dry-run and for clean failure reporting.
@@ -137,7 +140,11 @@ def stationary_command(
         if getattr(args, "rank", None) is not None:
             rank = "8" if args.rank == "D" else args.rank
             command += ["--residual-init-rank", str(rank)]
-        command += ["--epochs", str(epochs or 20), "--cold-start-epochs", str(1 if args.smoke else 5)]
+        command += [
+            "--epochs", str(epochs or 20),
+            "--cold-start-epochs", str(1 if args.smoke else 5),
+            "--validation-batch-size", str(eval_batch),
+        ]
         if args.smoke:
             command += ["--max-sequences", "4", "--max-events-per-sequence", "16", "--no-training-plots"]
         env["PYTHONPATH"] = os.pathsep.join((str(MODELS_ROOT / "HawkesMemory"), str(memory), env.get("PYTHONPATH", "")))
@@ -223,7 +230,21 @@ def evaluate_hm(spec, args, result_dir: Path, env: dict[str, str]) -> None:
         "no_working": "frozen/full",
         "no_episodic": "frozen/no_episodic",
     }
-    command = [python_for(args), "-m", "Evaluate", "--checkpoint", str(checkpoint), "--data-path", str(data_path), "--split-manifest", str(split_manifest), "--output-dir", str(result_dir / "native"), "--protocol", "both", "--seed", str(args.seed), "--device", resolved_device(args.device), "--resume", "--save-event-predictions"]
+    eval_batch = int(getattr(args, "eval_batch_size", 64))
+    if eval_batch <= 0:
+        raise ValueError("eval_batch_size must be positive")
+    command = [
+        python_for(args), "-m", "Evaluate",
+        "--checkpoint", str(checkpoint),
+        "--data-path", str(data_path),
+        "--split-manifest", str(split_manifest),
+        "--output-dir", str(result_dir / "native"),
+        "--protocol", "both",
+        "--seed", str(args.seed),
+        "--device", resolved_device(args.device),
+        "--eval-batch-size", str(eval_batch),
+        "--resume", "--save-event-predictions",
+    ]
     if spec.condition in variants:
         command += ["--variants", variants[spec.condition]]
     if args.smoke:

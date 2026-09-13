@@ -1,0 +1,14 @@
+﻿expected,formula,left_value,metric,right_value,value,variant
+near_zero_or_negative,"L_2,A_1 - L_0,A_1",3.414830626206465,A_1_retention_before_task3,3.0240386276408566,0.39079199856560853,frozen/full
+positive,"L_2,A_1 - L_3,A_1",3.414830626206465,A_1_exact_recurrence_recovery_task3,2.974096974257315,0.44073365194915004,frozen/full
+near_zero_or_negative,"L_5,B_1 - L_4,B_1",3.370212959370619,B_1_near_recurrence_impact_task5,3.0896753250356266,0.28053763433499235,frozen/full
+positive,"L_4,B_prime_1 - L_5,B_prime_1",3.039475191501216,B_prime_1_near_recurrence_gain_task5,3.314263750026443,-0.274788558525227,frozen/full
+near_zero_or_negative,"L_6,A_1 - L_5,A_1",3.2034322788135916,A_1_specialization_impact_task6,2.94186980699931,0.2615624718142815,frozen/full
+positive,"L_5,A_2 - L_6,A_2",3.065458025115656,A_2_specialization_gain_task6,3.3158233267082196,-0.25036530159256376,frozen/full
+positive,"L_{5,6}^control - L_{6,6}^control",3.3006431153546694,controls_task_06_no_transient_transient_control_adaptation_task6,2.852881339837105,0.44776177551756424,frozen/full
+near_zero_or_negative,"(L_{5,6} - L_{6,6}) - (L_{5,6}^control - L_{6,6}^control)",0.42057176938008745,controls_task_06_no_transient_transient_excess_adaptation_task6,0.44776177551756424,-0.027190006137476797,frozen/full
+near_zero_or_negative,"L_7,A_1 - L_0,A_1",3.00609244655581,A_1_long_gap_reference_task8,3.0240386276408566,-0.017946181085046753,frozen/full
+positive,"L_7,A_1 - L_8,A_1",3.00609244655581,A_1_long_gap_recurrence_recovery_task8,2.9968928532553867,0.009199593300423192,frozen/full
+positive,P_9^pre - P_9^post,3.389052792034252,E_1_B_1_mixture_adaptation_task9,3.2110809087169794,0.17797188331727254,frozen/full
+not_available_missing_first_gain,(L_first_pre - L_return_pre) / (L_first_pre - L_first_post),,A_1_rrr_task3,3.4432893713239925,,frozen/full
+not_available_missing_first_gain,(L_first_pre - L_return_pre) / (L_first_pre - L_first_post),,A_1_rrr_task8,3.062922810483946,,frozen/full

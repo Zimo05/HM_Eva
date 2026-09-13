@@ -1,0 +1,314 @@
+{
+  "format_version": 1,
+  "job_key": "continual:continual:S2P2:sequential",
+  "script": "evaluate_continual_S2P2_sequential.py",
+  "kind": "continual",
+  "dataset": "continual",
+  "model": "S2P2",
+  "condition": "sequential",
+  "seed": 7,
+  "variant": null,
+  "rank": null,
+  "task_start": 0,
+  "task_end": 9,
+  "arguments": {
+    "seed": 7,
+    "device": "cuda:0",
+    "output_root": null,
+    "epochs": null,
+    "batch_size": null,
+    "max_trials": 8,
+    "max_gpu_hours": 24.0,
+    "resume": false,
+    "smoke": false,
+    "run_id": null,
+    "python_executable": null,
+    "checkpoint": null,
+    "dry_run": false,
+    "task_start": 0,
+    "task_end": 9,
+    "data_root": null
+  },
+  "command": null,
+  "inputs": [
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/benchmark_manifest.json",
+      "sha256": "ca7817bd30e063a0a59bb0ca6e9bdee303f4a2f1e927f8538113fe29921b6d43"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/anchors/A_1.csv",
+      "sha256": "add13930384accd942653b7304382a76eb186fcabc411ff79c0a296672074648"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/anchors/A_2.csv",
+      "sha256": "1429c48397deb717077cb692362e0dcd5360728f3c4dcfdbaf0bfafa041c28aa"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/anchors/A_merge.csv",
+      "sha256": "ba3087cb1bd6f465b78ebdfe2c36a48961ae1030509db8859df27528b7b6f6c9"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/anchors/B_1.csv",
+      "sha256": "7378872ba2121b49adc441aa7431ef82d7762e4124bfad264c3d8e470a50f597"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/anchors/B_prime_1.csv",
+      "sha256": "c8ff47e2e4719a21b0f0bdadfbad7b41fe892f8041c0360d2a7efbeb757a46fe"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/anchors/C_1.csv",
+      "sha256": "68f22455b251b2f260fdaf172ae22979c8caa6e8b86264988ec5efb7da351258"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/anchors/E_1.csv",
+      "sha256": "32d16ed0b42c2cfd376f0747d98824b3862c26d30c8b06f146cfa1960a15e6c1"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/anchors/X_transient.csv",
+      "sha256": "deb7ed9e1a7ab3eed6c1cde4dbb0932bf90b7a7bc7ed9172cd5d998166a5d13a"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/controls/task_06_no_transient/test.csv",
+      "sha256": "398bf2eab35597450c0fdf60dfaf7026fe4ad3afb58c72ed40dbfea561e16845"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/controls/task_06_no_transient/train.csv",
+      "sha256": "b1b0f2e6a2397c1d34476eb15077b51031a249df1e7692d4a11220fb156535e9"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/controls/task_06_no_transient/val.csv",
+      "sha256": "0ae6bb8fc54b3b440ad87953a820cbbd8383fbda479a1f18b237a86dbf289639"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/ground_truth_manifest.csv",
+      "sha256": "4cab68ba9e76b4255d25bfd51c3cd107644abe081724d5509b124a3ca664d658"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/stream_manifest.csv",
+      "sha256": "4cab68ba9e76b4255d25bfd51c3cd107644abe081724d5509b124a3ca664d658"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_00/adapt_query.csv",
+      "sha256": "bb36363f923b232e48fc0297a4b6e8b3ba3f0ed91be7e4b7fb6218baadceb1ab"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_00/adapt_support.csv",
+      "sha256": "d3040ba592871e77d3c2460c0b1820b922bd29b307058bbdca7b06d960326c02"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_00/test.csv",
+      "sha256": "e65f10c76d707442901097fb815c2665ae9087fd817bd760a1670867c6aa0a42"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_00/train.csv",
+      "sha256": "445678cc2f51c334ad18188a4414db7ced3ee28756512af0b70acc31f29a6baf"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_00/val.csv",
+      "sha256": "394de13f78e6b9e9c958aa50e38656c404d02ba27b193fbbf531cd1fa90ba359"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_01/adapt_query.csv",
+      "sha256": "f37915f47c1774b74bc61bf8c213809a64af603f602ec7d63aee6b8532375ba9"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_01/adapt_support.csv",
+      "sha256": "f27720f7b6424bc63b16a633018f87dd0aa4ea645743c895af70e9b1dea88591"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_01/test.csv",
+      "sha256": "bef3136e0d865477ac408821e81e667ece19672bfe32bb0e39781b8094c37fee"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_01/train.csv",
+      "sha256": "b9605af5adee3b82121a32ebfd3c37b0827b27f5ca71fce81655313867de599f"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_01/val.csv",
+      "sha256": "0511084913226211304947c30fccf364c76450f5293c0b0ef7384e44be269e5c"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_02/adapt_query.csv",
+      "sha256": "04693364f6259beca326da1e28b90cc66523efd9d0f389afb5fa034e1655d98c"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_02/adapt_support.csv",
+      "sha256": "196bdd3882e24f445260d03962fe235dcf18d88e12fbcbd8aa1a96559d1a840c"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_02/test.csv",
+      "sha256": "18c72caa852a3a3c5a286afebceafe63e14d796b721a3f4880338b356e604933"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_02/train.csv",
+      "sha256": "379bc1bb79445939bc361e085a7c99457923cce4b54035798ca34589a0c303e0"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_02/val.csv",
+      "sha256": "520ba19613b6b66e487030eb6e56757e151516819f3d45a28de16222d9f113fb"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_03/adapt_query.csv",
+      "sha256": "ea937c8b3767b6013470353440c5baea7bd25df81beac4ca5f577d8178069167"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_03/adapt_support.csv",
+      "sha256": "9a6e57c8a85bbf9228576bbc2d6ccadb326fb8c1744e0e4490a5c66f3d6beb7a"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_03/test.csv",
+      "sha256": "47cfccfc61a859e17d60b9b51b4307ed7d773bafed049963ff3753f59f33eafb"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_03/train.csv",
+      "sha256": "2aa05f4e752a95f59b6bbf47e1b2d24ed221cd241bf34207ca392c63f2b5ee40"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_03/val.csv",
+      "sha256": "157d4263f07788dba9f92f0e9d7c25dc2c28e0c7d17e599bec5c86fa5ceacfbb"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_04/adapt_query.csv",
+      "sha256": "3f580f6b9608a6d4ab3d4ad16ff5456bb8274caf7a392c3e33fd2e4e89406c60"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_04/adapt_support.csv",
+      "sha256": "f948bd250e60923f56849e0067191be899a1ce0ceb0ba25bf159a8c3d05dd007"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_04/test.csv",
+      "sha256": "1092b2318d4291a1c8a1604d3201d18a677d5d162df6bba4bd83c9875c82aaca"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_04/train.csv",
+      "sha256": "4857b12a85deb3fb07f38138e0fd78e558b4723d0400d3877da205559d9d8065"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_04/val.csv",
+      "sha256": "ff817dd5fe898467fc765f89b562e097f6e6d21131aab66832dcffa4e3bbc261"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_05/adapt_query.csv",
+      "sha256": "126c8a266bd26330c305474f17f6cac180c082f11556fd81f4be9553b7d11f78"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_05/adapt_support.csv",
+      "sha256": "23539b28e997988c7fc823553c454eae14b37cf95bee01e09a6c6c857716e88f"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_05/test.csv",
+      "sha256": "5acb6716d8bf2200885e198d6306ca090530d15e156dba776330e7dd702ad123"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_05/train.csv",
+      "sha256": "211685b5b177f075cb8348d3a5fe2ce98a136477649bab090fcc2191c6d0f701"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_05/val.csv",
+      "sha256": "cef10ec6d6c88d4aff0b7cebd7dbd94c94862ad4eb6f51acb6c8b06086b94926"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_06/adapt_query.csv",
+      "sha256": "9f14dd83e7b1526d91885c8d23e63adaa41cee4e2270e4d4d116e9b064b9c279"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_06/adapt_support.csv",
+      "sha256": "7e5e1e6ca37bc9957cb262744807b42c6c95c5de52d9160b400af8ad78492694"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_06/test.csv",
+      "sha256": "89d7692b86a69de870616e8c0365c32b73919feb1001a015b626e1ac50777d05"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_06/train.csv",
+      "sha256": "d358704e38fe4818dbba9467ffd4778a9acd1ccb0baf36b9b440b1f7bb6e8930"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_06/val.csv",
+      "sha256": "02d88cd8016fcfa9607f03e37829c86f1f7d228dd0a025282b451addb35e99e8"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_07/adapt_query.csv",
+      "sha256": "a1ef85137117631c4b389feead3317476a42419fbe28db0cba8342a9cfd6aa63"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_07/adapt_support.csv",
+      "sha256": "860e27393e719aea56e0f89b728c6af2af19261f3dfa1735e6fad78a31595c1f"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_07/test.csv",
+      "sha256": "7738c3c8f10b692c778688f5ae27e32135d8f00bd486ee0a6720dda4aeb372d2"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_07/train.csv",
+      "sha256": "d91b6e5419cef5e473d01658b311a06360f4cf465178288816c8593b0cacb2b9"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_07/val.csv",
+      "sha256": "5624975a4d0d9750e3bfdb41319ce2d7ed43ce41b6fdf52e5a4f627cd52f5443"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_08/adapt_query.csv",
+      "sha256": "bc74da64e4272ea7e491eb62c67bc6415c443d898dee4b6e5e00f46e278d8945"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_08/adapt_support.csv",
+      "sha256": "51caa2cb9db423dba8eecf9139efdba73247597725c572d854bca7816b6d28d4"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_08/test.csv",
+      "sha256": "a059269e14a6c4351d9d6b825638565576d5a88a58ad14e79d00d6654a90127b"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_08/train.csv",
+      "sha256": "b59b606a36d06bede608298ac92b93532888c7b1ecbc19cd5723c8ebc9315fcc"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_08/val.csv",
+      "sha256": "0d4a2560732937e36e6972aaaa3126f53e1a756bee17d3918b1b19924111cbae"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_09/adapt_query.csv",
+      "sha256": "6f28167598f5189a78273efbc8457c81e2213f92619da1db93a9628d4b9048dd"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_09/adapt_support.csv",
+      "sha256": "47b37d98a2b63428aa0ee71b869ac9b12c5f1ccec2d8259481f79b0c2e22157e"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_09/test.csv",
+      "sha256": "dc077e3ce08b860e98f6769f77670c4993c41443f71e304b2fa6fdbb644e7368"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_09/train.csv",
+      "sha256": "06cf3ab6c94bf8ca279c5b4651ed36a025e4758dcbc1f4bec4e3402089060cc9"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/task_09/val.csv",
+      "sha256": "b90c7ef0a6e71a45654a394de9978d5e3ad6a4cc82f3cf7ee64a2bc801d0f9ca"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/ground_truth/regimes.json",
+      "sha256": "61cef40e29b062ea14fe9f16f2df969758cd0ea5d8e25f42f6901182cd0cd76e"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/ground_truth/regimes.npz",
+      "sha256": "88f85335d581d4326d047f81e76249ae0b47438d1f4d7b5b1c1ec48ba386ac37"
+    },
+    {
+      "path": "/home/zt/zimo/Benchmark/Datasets/CL/hm_continual_v2/ground_truth_manifest.csv",
+      "sha256": "4cab68ba9e76b4255d25bfd51c3cd107644abe081724d5509b124a3ca664d658"
+    }
+  ],
+  "git_commit": "6386afe85fea38431fc33b563ed158ded01eac29",
+  "git_dirty": true,
+  "runtime": {
+    "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:19:41) [GCC 14.3.0]",
+    "platform": "Linux-5.15.0-91-generic-x86_64-with-glibc2.31",
+    "torch": "2.10.0+cu128",
+    "cuda_runtime": "12.8",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 3090"
+  },
+  "created_at": "2026-09-12T14:22:15.107873+00:00"
+}

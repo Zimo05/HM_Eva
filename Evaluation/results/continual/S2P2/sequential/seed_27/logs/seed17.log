@@ -1,0 +1,15 @@
+nohup: ignoring input
+Traceback (most recent call last):
+  File "/home/zt/zimo/Benchmark/Evaluation/evaluate_continual_S2P2_sequential.py", line 5, in <module>
+    run_continual_job(model="S2P2", strategy="sequential", args=continual_args(replay=False), script="evaluate_continual_S2P2_sequential.py")
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/zt/zimo/Benchmark/Evaluation/core/runner.py", line 1338, in run_continual_job
+    metrics = _run_baseline_continual(
+        model, strategy, args, target, data_root, protocol
+    )
+  File "/home/zt/zimo/Benchmark/Evaluation/core/runner.py", line 999, in _run_baseline_continual
+    run_command(command, cwd, env, target / "logs" / f"task_{task:02d}_train.log")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/zt/zimo/Benchmark/Evaluation/core/adapters.py", line 128, in run_command
+    raise RuntimeError(f"command failed with exit code {process.returncode}; see {log_path}")
+RuntimeError: command failed with exit code 1; see /home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_27/logs/task_00_train.log

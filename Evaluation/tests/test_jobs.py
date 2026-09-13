@@ -27,6 +27,18 @@ def test_easytpp_continual_entry_points_exist():
             assert f'strategy="{strategy}"' in text
 
 
+def test_easytpp_prediction_protocol_wiring():
+    source = (ROOT.parent / "Models" / "EasyTPP" / "run_experiment.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def _predict_attnhp_one_step(" in source
+    assert "sample_times = relative_dtimes + prefix_times.unsqueeze(-1)" in source
+    assert "collect_predictions=False" in source
+    assert "def _plot_metrics(" in source
+    assert 'plot_dir / "likelihood.png"' in source
+    assert 'plot_dir / "test_metrics.png"' in source
+
+
 def test_registry_identities_are_unique():
     with (ROOT / "experiment_registry.csv").open("r", newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))

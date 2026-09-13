@@ -437,6 +437,10 @@ class TrainingConfig:
     cl_task_id: Optional[int] = None
     cl_previous_checkpoint: Optional[str] = None
     cl_config_override: bool = False
+    # Read-only training-time validation is evaluated in compact sequence
+    # batches.  Online-write/controller rollouts remain sequential.  Appended
+    # to preserve positional construction of older configs.
+    validation_batch_size: int = 64
 
 
 def _differentiable_merge_settings(

@@ -1,0 +1,23 @@
+{
+  "model": "S2P2",
+  "dataset": "taobao",
+  "best_epoch": 0,
+  "epochs_completed": 0,
+  "max_epochs": 300,
+  "early_stop_patience": 25,
+  "early_stopped": false,
+  "selection_metric": "validation_loglike",
+  "validation_loglike": null,
+  "test": {
+    "loglike": -9.07193340755143,
+    "num_events": 1993,
+    "accuracy": 0.10737581535373808,
+    "rmse": 2.4558394879931593
+  },
+  "artifacts": {
+    "checkpoint": null,
+    "epoch_metrics": "/home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_7/native/task_05/scratch_pre/csv/epoch_metrics.csv",
+    "test_metrics": "/home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_7/native/task_05/scratch_pre/csv/test_metrics.csv",
+    "predictions": "/home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_7/native/task_05/scratch_pre/predictions.jsonl.gz"
+  }
+}

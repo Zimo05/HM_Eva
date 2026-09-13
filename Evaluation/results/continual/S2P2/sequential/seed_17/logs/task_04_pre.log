@@ -1,0 +1,12 @@
+/home/zt/zimo/Benchmark/Models/EasyTPP/easy_tpp/ssm/models.py:729: UserWarning: Specified kernel cache directory could not be created! This disables kernel caching. Specified directory is /tmp/easytpp_baseline_cache/xdg/torch/kernels. This warning will appear only once per process. (Triggered internally at /pytorch/aten/src/ATen/native/cuda/jit_utils.cpp:1487.)
+  left_x_P = lambda_dt_NP[..., i, :].exp() * right_x_P + (
+{
+  "output_dir": "/home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_17/native/task_04/pre_update",
+  "archive": "/home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_17/native/task_04/pre_update.tar.gz",
+  "test": {
+    "loglike": -3.5608677173947303,
+    "num_events": 1983,
+    "accuracy": 0.08572869389813415,
+    "rmse": 16.212482875345113
+  }
+}

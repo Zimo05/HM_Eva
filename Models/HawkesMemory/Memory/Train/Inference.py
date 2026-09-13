@@ -219,20 +219,29 @@ class MemoryTreeInference:
     @classmethod
     def from_checkpoint(
         cls,
-        checkpoint_path: str | Path,
+        checkpoint_path: str | Path | Mapping[str, Any],
         *,
         device: Optional[torch.device | str] = None,
         inference_config: Optional[InferenceConfig] = None,
         encoder: Optional[nn.Module] = None,
     ) -> "MemoryTreeInference":
+        """Restore an isolated inference clone from a path or payload.
+
+        A mapping is accepted for training-time validation, where the trainer
+        already has the current state in memory and should not serialize and
+        reload a disk checkpoint merely to evaluate one epoch.
+        """
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         device = torch.device(device)
-        checkpoint = torch.load(
-            checkpoint_path,
-            map_location=device,
-            weights_only=False,
-        )
+        if isinstance(checkpoint_path, Mapping):
+            checkpoint = checkpoint_path
+        else:
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location=device,
+                weights_only=False,
+            )
         config = checkpoint["model_config"]
         if config.get("router_kind") not in {
             "node_semantic_compat_v1",

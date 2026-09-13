@@ -58,7 +58,7 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
         python_executable=sys.executable,
     )
     protocol = Namespace(benchmark_id="synthetic", version=1)
-    assert _continual_cl_config(args, protocol, "full")["epochs_per_task"] == 20
+    assert _continual_cl_config(args, protocol, "full")["epochs_per_task"] == 50
 
     command, _cwd, _env = _baseline_command(
         "THP",

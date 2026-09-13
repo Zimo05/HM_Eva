@@ -6,9 +6,20 @@ from Train.TrainingComponents import *  # noqa: F403
 
 
 class TrainingCheckpointMixin:
-    def save_checkpoint(self, path: str | Path, *, epoch: int) -> Path:
+    def build_checkpoint_payload(
+        self,
+        path: str | Path,
+        *,
+        epoch: int,
+    ) -> dict[str, Any]:
+        """Build a complete checkpoint without serializing it to disk.
+
+        Training-time validation can now load an isolated inference clone from
+        this payload.  Keeping payload construction separate from persistence
+        avoids the old save/reload cycle on every validation epoch while
+        preserving the exact on-disk checkpoint schema.
+        """
         output_path = Path(path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
         split_state = {
             leaf_id: module.state_dict()
             for leaf_id, module in self.split_modules.items()
@@ -320,6 +331,13 @@ class TrainingCheckpointMixin:
                 ),
             },
         }
+        return checkpoint
+
+    def save_checkpoint(self, path: str | Path, *, epoch: int) -> Path:
+        """Atomically serialize one complete checkpoint payload."""
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint = self.build_checkpoint_payload(output_path, epoch=epoch)
         temporary = output_path.with_suffix(output_path.suffix + ".tmp")
         torch.save(checkpoint, temporary)
         temporary.replace(output_path)

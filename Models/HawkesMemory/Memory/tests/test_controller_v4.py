@@ -7,6 +7,7 @@ import torch
 from HawkesBackbone import HawkesFamily
 from Evaluate import controller_metrics
 from LatentHawkesTree import HawkesTree
+from Train.Inference import InferenceConfig, MemoryTreeInference
 from Train.Train import (
     CausalPrefixEncoder, MemoryTreeTrainer, TrainingConfig, WakeObjectiveConfig,
 )
@@ -218,6 +219,38 @@ class ControllerEvaluationTests(unittest.TestCase):
             self.assertEqual(last_payload["controller_state"]["controller_version"], 4)
             self.assertEqual(last_payload["checkpoint_identity"]["role"], "last")
             self.assertEqual(best_payload["checkpoint_identity"]["role"], "best")
+            in_memory_payload = trainer.build_checkpoint_payload(last, epoch=1)
+            validation = trainer._validate_controller_checkpoint(
+                in_memory_payload, [sequence]
+            )
+            self.assertIn("semantic_only", validation)
+            self.assertIn("full_frozen", validation)
+            self.assertNotIn("full_frozen_event_sha256", validation)
+            in_memory = MemoryTreeInference.from_checkpoint(
+                in_memory_payload,
+                device="cpu",
+                inference_config=InferenceConfig(
+                    adapt_working_memory=True,
+                    allow_memory_writes=False,
+                    update_memory_usage=False,
+                ),
+            )
+            on_disk = MemoryTreeInference.from_checkpoint(
+                last,
+                device="cpu",
+                inference_config=InferenceConfig(
+                    adapt_working_memory=True,
+                    allow_memory_writes=False,
+                    update_memory_usage=False,
+                ),
+            )
+            self.assertLess(
+                abs(
+                    in_memory.run_sequence(sequence)["total_nll"]
+                    - on_disk.run_sequence(sequence)["total_nll"]
+                ),
+                1e-5,
+            )
             before = {
                 name: value.detach().clone()
                 for name, value in [

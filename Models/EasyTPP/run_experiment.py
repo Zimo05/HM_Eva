@@ -477,6 +477,77 @@ def _train_epoch(model: torch.nn.Module, loader, device: torch.device) -> dict[s
     }
 
 
+def _predict_attnhp_one_step(
+    model: AttNHP,
+    batch,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Predict every next event with AttNHP's absolute-time convention.
+
+    EasyTPP's thinning sampler returns relative waiting times, while AttNHP's
+    ``compute_intensities_at_sample_times`` expects absolute sample times when
+    it receives one sample for every prefix event.  Keep the upstream model
+    unchanged and adapt the sampler callback at this wrapper boundary.
+    """
+
+    time_seq, time_delta_seq, event_seq, _, _ = batch
+    time_seq = time_seq[:, :-1]
+    time_delta_seq = time_delta_seq[:, :-1]
+    event_seq = event_seq[:, :-1]
+    dtime_boundary = torch.max(
+        time_delta_seq * model.event_sampler.dtime_max,
+        time_delta_seq + model.event_sampler.dtime_max,
+    )
+
+    def intensity_at_relative_dtimes(
+        prefix_times,
+        prefix_dtimes,
+        prefix_types,
+        relative_dtimes,
+        **kwargs,
+    ):
+        sample_times = relative_dtimes + prefix_times.unsqueeze(-1)
+        return model.compute_intensities_at_sample_times(
+            prefix_times,
+            prefix_dtimes,
+            prefix_types,
+            sample_times,
+            **kwargs,
+        )
+
+    accepted_dtimes, weights = model.event_sampler.draw_next_time_one_step(
+        time_seq,
+        time_delta_seq,
+        event_seq,
+        dtime_boundary,
+        intensity_at_relative_dtimes,
+        compute_last_step_only=False,
+    )
+    intensities_at_times = intensity_at_relative_dtimes(
+        time_seq,
+        time_delta_seq,
+        event_seq,
+        accepted_dtimes,
+    )
+    intensities_normalized = intensities_at_times / intensities_at_times.sum(
+        dim=-1, keepdim=True
+    )
+    intensities_weighted = torch.einsum(
+        "...s,...sm->...m", weights, intensities_normalized
+    )
+    types_pred = torch.argmax(intensities_weighted, dim=-1)
+    dtimes_pred = torch.sum(accepted_dtimes * weights, dim=-1)
+    return dtimes_pred, types_pred
+
+
+def _predict_one_step_at_every_event(
+    model: torch.nn.Module,
+    batch,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if isinstance(model, AttNHP):
+        return _predict_attnhp_one_step(model, batch)
+    return model.predict_one_step_at_every_event(batch)
+
+
 def _evaluate(
     model: torch.nn.Module,
     loader,
@@ -502,7 +573,7 @@ def _evaluate(
             total_events += count
             if not collect_predictions:
                 continue
-            predicted_dtimes, predicted_types = model.predict_one_step_at_every_event(values)
+            predicted_dtimes, predicted_types = _predict_one_step_at_every_event(model, values)
             target_dtimes = values[1][:, 1:]
             target_types = values[2][:, 1:]
             mask = values[3][:, 1:].bool()
@@ -620,6 +691,245 @@ def _write_predictions(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
             handle.write(json.dumps(_json_safe(row), ensure_ascii=False) + "\n")
 
 
+def _plot_metrics(
+    output: Path,
+    model: str,
+    dataset: str,
+    epoch_rows: list[Mapping[str, Any]],
+    test_row: Mapping[str, Any],
+    predictions: list[Mapping[str, Any]],
+) -> list[Path]:
+    """Write diagnostic plots without changing the benchmark metrics contract.
+
+    Validation intentionally collects no thinning predictions, so only the
+    likelihood curve is drawn across epochs. Accuracy/RMSE and the prediction
+    diagnostics are computed from the single final test evaluation. This
+    keeps plots useful without inventing validation values or running an extra
+    prediction pass.
+    """
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import PercentFormatter
+    except ImportError as exc:
+        warning = output / "log" / "plot_warning.txt"
+        warning.write_text(
+            "Plotting skipped because matplotlib is unavailable: {}\n".format(exc),
+            encoding="utf-8",
+        )
+        print("Warning: matplotlib is unavailable; skipping EasyTPP plots", file=sys.stderr)
+        return []
+
+    plot_dir = output / "plot"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    plot_paths: list[Path] = []
+
+    def finite(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    def series(split: str, metric: str) -> tuple[list[int], list[float]]:
+        epochs: list[int] = []
+        values: list[float] = []
+        for row in epoch_rows:
+            if row.get("Split") != split:
+                continue
+            epoch = finite(row.get("Epoch"))
+            value = finite(row.get(metric))
+            if epoch is None or value is None:
+                continue
+            epochs.append(int(epoch))
+            values.append(value)
+        return epochs, values
+
+    colors = {"train": "#2563EB", "valid": "#EA580C"}
+    figure, axis = plt.subplots(figsize=(7.4, 4.8), constrained_layout=True)
+    has_curve = False
+    for split in ("train", "valid"):
+        epochs, values = series(split, "Log-likelihood")
+        if not values:
+            continue
+        has_curve = True
+        axis.plot(
+            epochs,
+            values,
+            color=colors[split],
+            linewidth=2.1,
+            marker="o" if len(values) <= 20 else None,
+            markersize=3.5,
+            label="Train" if split == "train" else "Validation",
+        )
+    if has_curve:
+        best_epoch = finite(test_row.get("Epoch"))
+        if best_epoch is not None and best_epoch > 0:
+            axis.axvline(
+                int(best_epoch),
+                color="#6B7280",
+                linestyle="--",
+                linewidth=1.1,
+                label="Selected epoch",
+            )
+        axis.legend(frameon=False)
+    else:
+        axis.text(
+            0.5,
+            0.5,
+            "No training epochs recorded\n(evaluate-only run)",
+            ha="center",
+            va="center",
+            transform=axis.transAxes,
+        )
+    axis.set_title(f"{model} on {dataset} - log-likelihood")
+    axis.set_xlabel("Epoch")
+    axis.set_ylabel("Log-likelihood per event")
+    axis.grid(True, alpha=0.3)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    likelihood_path = plot_dir / "likelihood.png"
+    figure.savefig(likelihood_path, dpi=220, bbox_inches="tight")
+    plt.close(figure)
+    plot_paths.append(likelihood_path)
+
+    test_loglike = finite(test_row.get("Log-likelihood"))
+    test_accuracy = finite(test_row.get("Accuracy"))
+    test_rmse = finite(test_row.get("RMSE"))
+    test_metrics = (
+        ("NLL/event", None if test_loglike is None else -test_loglike, "#7C3AED"),
+        ("Accuracy", test_accuracy, "#059669"),
+        ("Time RMSE", test_rmse, "#EA580C"),
+    )
+    figure, axes = plt.subplots(1, 3, figsize=(11.2, 4.2), constrained_layout=True)
+    for axis, (label, value, color) in zip(axes, test_metrics):
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.set_title(label)
+        axis.set_xticks([])
+        if value is None:
+            axis.text(0.5, 0.5, "N/A", ha="center", va="center", transform=axis.transAxes)
+            axis.set_ylim(0, 1)
+            continue
+        axis.bar([0], [value], color=color, width=0.55)
+        axis.text(0, value, f"{value:.4f}", ha="center", va="bottom", fontsize=10)
+        if label == "Accuracy":
+            axis.set_ylim(0, 1)
+            axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+        else:
+            axis.set_ylim(bottom=0)
+        axis.grid(True, axis="y", alpha=0.25)
+    epoch_value = int(finite(test_row.get("Epoch")) or 0)
+    figure.suptitle(
+        f"{model} on {dataset} - final test metrics (epoch {epoch_value})",
+        fontsize=13,
+    )
+    test_metrics_path = plot_dir / "test_metrics.png"
+    figure.savefig(test_metrics_path, dpi=220, bbox_inches="tight")
+    plt.close(figure)
+    plot_paths.append(test_metrics_path)
+
+    time_points: list[tuple[float, float]] = []
+    type_pairs: list[tuple[int, int]] = []
+    for row in predictions:
+        true_time = finite(row.get("true_delta_time"))
+        predicted_time = finite(row.get("predicted_delta_time"))
+        if true_time is not None and predicted_time is not None:
+            time_points.append((true_time, predicted_time))
+        try:
+            true_type = int(row["true_type"])
+            predicted_type = int(row["predicted_type"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        type_pairs.append((true_type, predicted_type))
+
+    if time_points:
+        # Keep large test sets readable and memory-bounded while preserving a
+        # deterministic sample for reproducible benchmark artifacts.
+        step = max(1, math.ceil(len(time_points) / 10_000))
+        sampled_points = time_points[::step]
+        true_times = np.asarray([point[0] for point in sampled_points], dtype=float)
+        predicted_times = np.asarray([point[1] for point in sampled_points], dtype=float)
+        lower = float(min(true_times.min(), predicted_times.min()))
+        upper = float(max(true_times.max(), predicted_times.max()))
+        padding = max((upper - lower) * 0.05, 1e-6)
+        lower -= padding
+        upper += padding
+        figure, axis = plt.subplots(figsize=(6.4, 5.8), constrained_layout=True)
+        axis.scatter(
+            true_times,
+            predicted_times,
+            s=10,
+            alpha=0.35,
+            color="#2563EB",
+            edgecolors="none",
+        )
+        axis.plot([lower, upper], [lower, upper], linestyle="--", linewidth=1.2, color="#6B7280")
+        axis.set_xlim(lower, upper)
+        axis.set_ylim(lower, upper)
+        axis.set_xlabel("True inter-event time")
+        axis.set_ylabel("Predicted inter-event time")
+        axis.set_title(f"{model} on {dataset} - test time prediction")
+        axis.text(
+            0.03,
+            0.97,
+            f"{len(time_points):,} events ({len(sampled_points):,} plotted)",
+            transform=axis.transAxes,
+            va="top",
+            fontsize=9,
+        )
+        axis.grid(True, alpha=0.25)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        time_path = plot_dir / "time_predictions.png"
+        figure.savefig(time_path, dpi=220, bbox_inches="tight")
+        plt.close(figure)
+        plot_paths.append(time_path)
+
+    if type_pairs:
+        labels = sorted({label for pair in type_pairs for label in pair})
+        label_to_index = {label: index for index, label in enumerate(labels)}
+        confusion = np.zeros((len(labels), len(labels)), dtype=np.int64)
+        for true_type, predicted_type in type_pairs:
+            confusion[label_to_index[true_type], label_to_index[predicted_type]] += 1
+        figure_size = max(5.5, min(10.0, 3.8 + 0.28 * len(labels)))
+        figure, axis = plt.subplots(
+            figsize=(figure_size, figure_size),
+            constrained_layout=True,
+        )
+        image = axis.imshow(confusion, interpolation="nearest", cmap="Blues")
+        figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+        axis.set_title(f"{model} on {dataset} - test type confusion")
+        axis.set_xlabel("Predicted type")
+        axis.set_ylabel("True type")
+        axis.set_xticks(range(len(labels)), labels=labels)
+        axis.set_yticks(range(len(labels)), labels=labels)
+        if len(labels) <= 30:
+            for row_index in range(len(labels)):
+                for column_index in range(len(labels)):
+                    count = confusion[row_index, column_index]
+                    if count:
+                        threshold = confusion.max() / 2 if confusion.size else 0
+                        axis.text(
+                            column_index,
+                            row_index,
+                            str(int(count)),
+                            ha="center",
+                            va="center",
+                            color="white" if count > threshold else "black",
+                            fontsize=8,
+                        )
+        confusion_path = plot_dir / "type_confusion.png"
+        figure.savefig(confusion_path, dpi=220, bbox_inches="tight")
+        plt.close(figure)
+        plot_paths.append(confusion_path)
+
+    return plot_paths
+
+
 def _archive(output: Path, archive: Path) -> None:
     archive.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "w:gz") as handle:
@@ -716,6 +1026,11 @@ def main(argv: list[str] | None = None) -> int:
     dtime_max = compute_training_dtime_max(records["train"])
     config = _make_model_config(args.model, dim_process, dtime_max, gpu)
     model = MODEL_CLASSES[args.model](config)
+    # TorchBaseModel calls ``to(device)`` before the concrete model creates
+    # its own layers.  Move the fully constructed model once more so CUDA
+    # runs do not leave subclass parameters (for example S2P2's mark
+    # embedding) on CPU while the batch is on the requested GPU.
+    model.to(device)
     model.optimizer = torch.optim.Adam(model.parameters(), lr=1e-2 if args.model == "S2P2" else 1e-3)
 
     train_loader = _make_loader(records["train"], dim_process, resolved_batch_size, shuffle=True)
@@ -796,7 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
                 device,
                 dim_process,
                 seed=args.seed + epoch,
-                collect_predictions=True,
+                collect_predictions=False,
             )
             epoch_rows.extend(
                 [
@@ -872,6 +1187,14 @@ def main(argv: list[str] | None = None) -> int:
         ["Epoch", "Split", "Log-likelihood", "Accuracy", "RMSE", "num_events", "SelectionMetric"],
     )
     _write_predictions(output / "predictions.jsonl.gz", predictions)
+    plot_paths = _plot_metrics(
+        output,
+        args.model,
+        args.dataset,
+        epoch_rows,
+        test_row,
+        predictions,
+    )
     _write_json(
         output / "log" / "summary.json",
         {
@@ -894,6 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
                 "epoch_metrics": str(output / "csv" / "epoch_metrics.csv"),
                 "test_metrics": str(output / "csv" / "test_metrics.csv"),
                 "predictions": str(output / "predictions.jsonl.gz"),
+                "plots": [str(path) for path in plot_paths],
             },
         },
     )

@@ -138,7 +138,9 @@ DWS 入口额外支持 `--variant 8|13|20`；continual 入口支持非负的 `--
 
 主指标是 test NLL/event、Accuracy、Macro-F1、time MAE/RMSE，以及 checkpoint bytes、参数规模、训练时间和可获得的 GPU 信息。
 
-S2P2 和 AttNHP 共用 `Models/EasyTPP/run_experiment.py`。它们读取现有 EasyTPP-compatible pickle，不改模型内部实现；训练只使用 train/validation，按 validation log-likelihood 保存 `checkpoint/best.pt`，然后对 test 只评估一次。默认训练上限与 EasyTPP 配置对齐：S2P2 为 300 epochs、AttNHP 为 200 epochs，batch size 均为 256，并使用 validation patience=25 的 early stopping；直接调用 wrapper 时可用 `--epochs`、`--batch-size` 和 `--early-stop-patience` 覆盖。thinning 的 `dtime_max` 只从 train split 的最大间隔乘以 1.2 得到。
+S2P2 和 AttNHP 共用 `Models/EasyTPP/run_experiment.py`。它们读取现有 EasyTPP-compatible pickle，不改模型内部实现；训练只使用 train/validation，按 validation log-likelihood 保存 `checkpoint/best.pt`，然后对 test 只评估一次。默认训练上限与 EasyTPP 配置对齐：S2P2 为 300 epochs、AttNHP 为 200 epochs，batch size 均为 256，并使用 validation patience=25 的 early stopping；直接调用 wrapper 时可用 `--epochs`、`--batch-size` 和 `--early-stop-patience` 覆盖。validation 只计算 log-likelihood，不额外运行 thinning prediction；test 的 AttNHP one-step prediction 在 wrapper 中把 sampler 返回的相对等待时间转换为绝对 sample time，再调用原模型 API。thinning 的 `dtime_max` 只从 train split 的最大间隔乘以 1.2 得到。
+
+wrapper 还会在 `plot/` 写出训练/验证 log-likelihood 曲线、最终 test 指标、时间预测散点图和 event-type confusion matrix；这些 PNG 与 `log/`、`csv/` 一起进入 native archive。由于 validation 不运行额外 prediction，validation 的 Accuracy/RMSE 不会被伪造，二者只在 final test 图中展示。
 
 ### 5.2 DWS-13：主 synthetic 实验
 
@@ -259,7 +261,11 @@ python Datasets/CL/generate_continual_hawkes.py --benchmark unified --output Dat
 
 每个 continual 脚本会在当前 task 学习前做 pre-update，训练并保存独立的 `task_XX_last.pt` 与 `task_XX_best.pt`，随后由 `best` checkpoint 做 post-update，并在所有 frozen anchors 上评估。`train.csv` 只用于更新，`val.csv` 只用于 checkpoint selection，`test.csv` 只用于最终报告；由此构建 checkpoint × law 矩阵。
 
-主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。
+主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。HM continual 默认每个 task 训练 50 epochs；仍可通过 `--epochs` 显式覆盖，smoke 模式仍固定为 1 epoch。
+
+HM 的训练期 validation 默认用 `--validation-batch-size 64` 对只读的
+`semantic_only` / `full_frozen` 路径做 compact GPU batch，并共享前缀与路由准备；
+online-write 和有顺序依赖的 Memory Bank 更新仍保持逐 sequence rollout。
 
 ### 6.3 HawkesMemory continual
 

@@ -111,6 +111,7 @@ _PERSISTENT_CONFIG_DESTS = frozenset({
     "max_writes_per_sequence",
     "num_basis",
     "decays",
+    "validation_batch_size",
 })
 
 
@@ -223,6 +224,7 @@ def _checkpoint_config_value(payload: Mapping, dest: str):
         "sleep_every",
         "router_lr_scale",
         "evaluation_ablation",
+        "validation_batch_size",
     }:
         return training.get(
             "controller_target_version"
@@ -600,6 +602,13 @@ def _parse_args(argv=None):
         help="Disable the automatic post-training metrics log and PNG.",
     )
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--validation-batch-size", type=int, default=64,
+        help=(
+            "Read-only training validation sequences per compact GPU batch; "
+            "online-write rollouts remain sequential."
+        ),
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=5.0)
@@ -2322,6 +2331,7 @@ def main() -> None:
             plot_after_training=not args.no_training_plots,
             training_metrics_path=args.training_metrics_path,
             training_plot_path=args.training_plot_path,
+            validation_batch_size=args.validation_batch_size,
         ),
         device=constructor.device,
     )

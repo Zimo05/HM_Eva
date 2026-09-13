@@ -1,0 +1,36 @@
+/home/zt/zimo/Benchmark/Models/EasyTPP/easy_tpp/ssm/models.py:729: UserWarning: Specified kernel cache directory could not be created! This disables kernel caching. Specified directory is /tmp/easytpp_baseline_cache/xdg/torch/kernels. This warning will appear only once per process. (Triggered internally at /pytorch/aten/src/ATen/native/cuda/jit_utils.cpp:1487.)
+  left_x_P = lambda_dt_NP[..., i, :].exp() * right_x_P + (
+Traceback (most recent call last):
+  File "/home/zt/zimo/Benchmark/Models/EasyTPP/run_experiment.py", line 982, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/home/zt/zimo/Benchmark/Models/EasyTPP/run_experiment.py", line 868, in main
+    train_metrics = _train_epoch(model, train_loader, device)
+  File "/home/zt/zimo/Benchmark/Models/EasyTPP/run_experiment.py", line 465, in _train_epoch
+    mean_loss.backward()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "/home/zt/miniconda3/lib/python3.13/site-packages/torch/_tensor.py", line 630, in backward
+    torch.autograd.backward(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        self, gradient, retain_graph, create_graph, inputs=inputs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/zt/miniconda3/lib/python3.13/site-packages/torch/autograd/__init__.py", line 364, in backward
+    _engine_run_backward(
+    ~~~~~~~~~~~~~~~~~~~~^
+        tensors,
+        ^^^^^^^^
+    ...<5 lines>...
+        accumulate_grad=True,
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/zt/miniconda3/lib/python3.13/site-packages/torch/autograd/graph.py", line 865, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        t_outputs, *args, **kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )  # Calls into the C++ engine to run the backward pass
+    ^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.54 GiB. GPU 3 has a total capacity of 23.57 GiB of which 437.31 MiB is free. Process 201636 has 394.00 MiB memory in use. Process 284040 has 7.22 GiB memory in use. Process 390054 has 7.22 GiB memory in use. Including non-PyTorch memory, this process has 8.27 GiB memory in use. Of the allocated memory 7.80 GiB is allocated by PyTorch, and 170.83 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

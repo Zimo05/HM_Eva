@@ -35,6 +35,9 @@ from .resources import resource_record
 from .specs import JobSpec
 
 
+DEFAULT_HM_CONTINUAL_EPOCHS = 50
+
+
 def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full", script: str = "") -> Path:
     spec = JobSpec(dataset=dataset, model=model, condition=condition, script=script)
     target = result_dir(spec, args)
@@ -133,7 +136,7 @@ def _continual_hm_command(
         "--device",
         resolved_device(args.device),
         "--epochs",
-        str(args.epochs or (1 if args.smoke else 30)),
+        str(args.epochs or (1 if args.smoke else DEFAULT_HM_CONTINUAL_EPOCHS)),
         "--cold-start-epochs",
         str(cold_start_epochs),
         "--unified-topology-log-path",
@@ -196,7 +199,9 @@ def _continual_cl_config(args, protocol: CLProtocol, strategy: str) -> dict[str,
         "format_version": 1,
         "benchmark_id": protocol.benchmark_id,
         "benchmark_version": protocol.version,
-        "epochs_per_task": int(args.epochs or (1 if args.smoke else 30)),
+        "epochs_per_task": int(
+            args.epochs or (1 if args.smoke else DEFAULT_HM_CONTINUAL_EPOCHS)
+        ),
         "cold_start_epochs": int(1 if args.smoke else 5),
         "training": {
             "seed": int(args.seed),

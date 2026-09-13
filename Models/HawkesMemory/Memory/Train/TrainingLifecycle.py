@@ -203,6 +203,8 @@ class TrainingLifecycleMixin:
             raise ValueError("surprise_ema_decay must lie in [0, 1)")
         if self.training_config.router_lr_scale <= 0.0:
             raise ValueError("router_lr_scale must be positive")
+        if self.training_config.validation_batch_size <= 0:
+            raise ValueError("validation_batch_size must be positive")
         if self.structure_config.prune_warmup_epochs < 0:
             raise ValueError("prune_warmup_epochs must be non-negative")
         if self.sleep_config.light_replay_budget <= 0:

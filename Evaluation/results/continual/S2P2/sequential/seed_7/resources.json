@@ -1,0 +1,11 @@
+{
+  "wall_seconds": 2563.77638001999,
+  "gpu_hours": 0.7121601055611083,
+  "result_bytes": 119039440,
+  "checkpoint_bytes": 2422370,
+  "host": "ubun",
+  "pid": 552963,
+  "serialized_parameter_values": 34576,
+  "peak_gpu_memory_bytes": 0,
+  "gpu_name": "NVIDIA GeForce RTX 3090"
+}

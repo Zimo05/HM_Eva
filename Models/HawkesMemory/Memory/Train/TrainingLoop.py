@@ -202,7 +202,7 @@ class TrainingLoopMixin:
 
     def _calibrate_controller_checkpoint(
         self,
-        checkpoint_path: str | Path,
+        checkpoint_path: str | Path | Mapping[str, Any],
         dataset: Sequence[Mapping[str, Tensor]],
     ) -> Dict[str, Any]:
         """Calibrate v5 action thresholds on isolated validation probes."""
@@ -217,9 +217,8 @@ class TrainingLoopMixin:
                 paired_rollout_metrics,
                 run_policy,
             )
-            checkpoint = Path(checkpoint_path)
             frozen_rows = run_policy(
-                checkpoint, dataset, write_threshold=1.01,
+                checkpoint_path, dataset, write_threshold=1.01,
                 online=False, device=str(self.device),
             )
             ranking_mode = bool(self.training_config.controller_write_ranking)
@@ -251,7 +250,7 @@ class TrainingLoopMixin:
             rollout_table = []
             for threshold in WRITE_THRESHOLDS:
                 online_rows = run_policy(
-                    checkpoint, dataset, write_threshold=threshold,
+                    checkpoint_path, dataset, write_threshold=threshold,
                     online=True, device=str(self.device),
                 )
                 row = {
@@ -333,6 +332,38 @@ class TrainingLoopMixin:
                 inference.tree.episodic_memory._packed_mirror = None
                 inference.tree.episodic_memory._packed_mirror_signature = None
             rows = {}
+            if not write_probe:
+                batch_size = int(getattr(
+                    self.training_config, "validation_batch_size", 64
+                ))
+                if batch_size <= 0:
+                    raise ValueError("validation_batch_size must be positive")
+                static_cache = inference.tree.frontier_routing.build_static_cache(
+                    detach=True
+                )
+                for start in range(0, len(dataset), batch_size):
+                    batch = dataset[start : start + batch_size]
+                    prepared, static_cache = inference.prepare_sequence_batch(
+                        batch,
+                        frontier_static_cache=static_cache,
+                    )
+                    if any(item.get("z") is None for item in prepared):
+                        raise RuntimeError(
+                            "controller calibration could not prepare a compact "
+                            "read-only validation batch"
+                        )
+                    results = inference.run_sequence_batch_compact(
+                        prepared,
+                        frontier_static_cache=static_cache,
+                        capture_event_predictions=True,
+                    )
+                    for sequence, result in zip(batch, results):
+                        source = int(
+                            torch.as_tensor(sequence["source_index"]).item()
+                        )
+                        for event in result["events"]:
+                            rows[(source, int(event["event_index"]))] = event
+                return rows
             for sequence in dataset:
                 source = int(torch.as_tensor(sequence["source_index"]).item())
                 result = inference.run_sequence(sequence)
@@ -554,67 +585,216 @@ class TrainingLoopMixin:
 
     def _validate_controller_checkpoint(
         self,
-        checkpoint_path: str | Path,
+        checkpoint_path: str | Path | Mapping[str, Any],
         dataset: Sequence[Mapping[str, Tensor]],
     ) -> Dict[str, float]:
-        """State-isolated validation; Write-only runs include real online rollout."""
+        """Run isolated validation with batched read-only HM inference.
+
+        ``semantic_only`` and ``full_frozen`` are independent inference
+        clones, but they share each batch's prefix encoding, router projection,
+        memory query, and Hawkes cache.  This preserves the two ablations while
+        removing the old ``N_sequence * run_sequence`` Python hot loop.
+
+        The online-write controller path is deliberately kept sequential: its
+        Memory Bank, probation buffer, and Working Memory are causal state
+        machines.  Event rows are materialized only for controller-only/write
+        validation, where paired event-level rollout metrics or the immutable
+        frozen-output hash still require them.
+        """
         from Train.Inference import InferenceConfig, MemoryTreeInference
         from Evaluate import bootstrap_ci, classification_metrics
 
-        totals = {}
-        rows_by_name = {}
-        modes = [("semantic_only", False, False), ("full_frozen", True, False)]
         write_only = set(self.training_config.controller_train_heads) == {"write"}
-        if write_only:
-            modes.append(("full_online", True, True))
-        for name, episodic, online in modes:
-            inference = MemoryTreeInference.from_checkpoint(
+        expected_frozen_sha = getattr(self, "_base_frozen_event_sha256", None)
+        capture_frozen_rows = bool(write_only)
+        batch_size = int(getattr(
+            self.training_config, "validation_batch_size", 64
+        ))
+        if batch_size <= 0:
+            raise ValueError("validation_batch_size must be positive")
+        if not dataset:
+            raise ValueError("controller validation requires at least one sequence")
+
+        def clear_episodic_memory(inference):
+            for bank in inference.tree.episodic_memory.banks.values():
+                bank.clear()
+            inference.tree.episodic_memory._packed_mirror = None
+            inference.tree.episodic_memory._packed_mirror_signature = None
+
+        def scalar_value(result: Mapping[str, Any]) -> tuple[float, int]:
+            scalar = result.get("scalar_metrics")
+            if not isinstance(scalar, Mapping):
+                raise RuntimeError(
+                    "compact controller validation did not return scalar metrics"
+                )
+            return float(scalar["nll_sum"]), int(scalar["events"])
+
+        def event_row(sequence: Mapping[str, Any], event: Mapping[str, Any]):
+            source_index = sequence.get("source_index", -1)
+            return {
+                "source_index": int(torch.as_tensor(source_index).item()),
+                "event_index": int(event["event_index"]),
+                "nll": float(event["nll"]),
+                "true_type": int(event["true_type"]),
+                "predicted_type_at_event_time": int(event["predicted_type"]),
+                "type_probabilities": [
+                    float(value)
+                    for value in event["type_probabilities_at_event_time"]
+                ],
+            }
+
+        def make_inference(config: InferenceConfig):
+            return MemoryTreeInference.from_checkpoint(
                 checkpoint_path,
                 device=self.device,
-                inference_config=InferenceConfig(
-                    adapt_working_memory=episodic,
-                    allow_memory_writes=online,
-                    update_memory_usage=online,
-                ),
+                inference_config=config,
             )
-            if not episodic:
-                for bank in inference.tree.episodic_memory.banks.values():
-                    bank.clear()
-                inference.tree.episodic_memory._packed_mirror = None
-                inference.tree.episodic_memory._packed_mirror_signature = None
-            nll, events = 0.0, 0
-            rows = []
-            accepted = 0
+
+        semantic_inference = make_inference(InferenceConfig(
+            adapt_working_memory=False,
+            allow_memory_writes=False,
+            update_memory_usage=False,
+        ))
+        full_inference = make_inference(InferenceConfig(
+            adapt_working_memory=True,
+            allow_memory_writes=False,
+            update_memory_usage=False,
+        ))
+        clear_episodic_memory(semantic_inference)
+        static_cache = full_inference.tree.frontier_routing.build_static_cache(
+            detach=True
+        )
+        totals = {
+            "semantic_only": 0.0,
+            "full_frozen": 0.0,
+        }
+        event_counts = {
+            "semantic_only": 0,
+            "full_frozen": 0,
+        }
+        frozen_rows = []
+        for start in range(0, len(dataset), batch_size):
+            batch = dataset[start : start + batch_size]
+            prepared, static_cache = full_inference.prepare_sequence_batch(
+                batch,
+                frontier_static_cache=static_cache,
+            )
+            if any(item.get("z") is None for item in prepared):
+                raise RuntimeError(
+                    "controller validation could not prepare a compact prefix batch"
+                )
+            full_results = full_inference.run_sequence_batch_compact(
+                prepared,
+                frontier_static_cache=static_cache,
+                capture_event_predictions=capture_frozen_rows,
+            )
+            semantic_results = semantic_inference.run_sequence_batch_compact(
+                prepared,
+                frontier_static_cache=static_cache,
+                capture_event_predictions=False,
+            )
+            if len(full_results) != len(batch) or len(semantic_results) != len(batch):
+                raise RuntimeError(
+                    "compact controller validation returned an invalid batch size"
+                )
+            for sequence, full_result, semantic_result in zip(
+                batch, full_results, semantic_results
+            ):
+                full_nll, full_events = scalar_value(full_result)
+                semantic_nll, semantic_events = scalar_value(semantic_result)
+                totals["full_frozen"] += full_nll
+                event_counts["full_frozen"] += full_events
+                totals["semantic_only"] += semantic_nll
+                event_counts["semantic_only"] += semantic_events
+                if capture_frozen_rows:
+                    frozen_rows.extend(
+                        event_row(sequence, event)
+                        for event in full_result.get("events", ())
+                    )
+
+        totals["semantic_only"] /= max(event_counts["semantic_only"], 1)
+        totals["full_frozen"] /= max(event_counts["full_frozen"], 1)
+        rows_by_name = {"full_frozen": frozen_rows}
+        if capture_frozen_rows:
+            payload = json.dumps(
+                frozen_rows, sort_keys=True, separators=(",", ":")
+            )
+            totals["full_frozen_event_sha256"] = hashlib.sha256(
+                payload.encode("utf-8")
+            ).hexdigest()
+        if expected_frozen_sha:
+            # The immutable controller-only contract historically hashes the
+            # scalar fields produced by the sequential evaluator.  Compact
+            # kernels are parity-tested to 1e-5, but their floating-point
+            # reduction order need not reproduce that byte-for-byte hash.  Keep
+            # the audit exact with one isolated sequential hash-only pass; it
+            # does not affect the scalar checkpoint-selection metrics.
+            hash_inference = make_inference(InferenceConfig(
+                adapt_working_memory=True,
+                allow_memory_writes=False,
+                update_memory_usage=False,
+            ))
+            hash_rows = []
             for sequence in dataset:
-                result = inference.run_sequence(sequence)
-                nll += float(result["total_nll"])
-                events += len(result["events"])
-                accepted += int(result.get("accepted_write_count", 0))
-                for event in result["events"]:
-                    rows.append({
-                        "source_index": int(torch.as_tensor(sequence["source_index"]).item()),
-                        "event_index": int(event["event_index"]),
-                        "nll": float(event["nll"]),
-                        "true_type": int(event["true_type"]),
-                        "predicted_type_at_event_time": int(event["predicted_type"]),
-                        "type_probabilities": [
-                            float(value) for value in event["type_probabilities_at_event_time"]
-                        ],
-                    })
-            totals[name] = nll / max(events, 1)
-            rows_by_name[name] = rows
-            if name == "full_frozen":
-                payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
-                totals["full_frozen_event_sha256"] = hashlib.sha256(
-                    payload.encode("utf-8")
-                ).hexdigest()
-            if online:
-                totals["physical_accepted_count"] = accepted
-                totals["writes_per_sequence"] = accepted / max(len(dataset), 1)
+                result = hash_inference.run_sequence(
+                    sequence,
+                )
+                hash_rows.extend(
+                    event_row(sequence, event)
+                    for event in result["events"]
+                )
+            payload = json.dumps(
+                hash_rows, sort_keys=True, separators=(",", ":")
+            )
+            totals["full_frozen_event_sha256"] = hashlib.sha256(
+                payload.encode("utf-8")
+            ).hexdigest()
+
         totals["memory_gain"] = totals["semantic_only"] - totals["full_frozen"]
         if write_only:
+            online_inference = make_inference(InferenceConfig(
+                adapt_working_memory=True,
+                allow_memory_writes=True,
+                update_memory_usage=True,
+            ))
+            online_static_cache = online_inference.tree.frontier_routing.build_static_cache(
+                detach=True
+            )
+            online_rows = []
+            online_nll, online_events, accepted = 0.0, 0, 0
+            for sequence in dataset:
+                prepared_batch, online_static_cache = (
+                    online_inference.prepare_sequence_batch(
+                        [sequence],
+                        frontier_static_cache=online_static_cache,
+                    )
+                )
+                prepared = prepared_batch[0] if prepared_batch else None
+                if prepared is not None and prepared.get("z") is not None:
+                    result = online_inference.run_sequence(
+                        prepared["sequence"],
+                        precomputed_z=prepared["z"],
+                        frontier_static_cache=online_static_cache,
+                        precomputed_projected_z=prepared["projected_z"],
+                        precomputed_memory_query=prepared["memory_query"],
+                    )
+                else:
+                    result = online_inference.run_sequence(
+                        sequence,
+                        frontier_static_cache=online_static_cache,
+                    )
+                online_nll += float(result["total_nll"])
+                online_events += len(result["events"])
+                accepted += int(result.get("accepted_write_count", 0))
+                online_rows.extend(
+                    event_row(sequence, event)
+                    for event in result["events"]
+                )
+            totals["full_online"] = online_nll / max(online_events, 1)
+            totals["physical_accepted_count"] = accepted
+            totals["writes_per_sequence"] = accepted / max(len(dataset), 1)
+            rows_by_name["full_online"] = online_rows
             frozen = rows_by_name["full_frozen"]
-            online_rows = rows_by_name["full_online"]
             gains = [
                 float(base["nll"]) - float(target["nll"])
                 for base, target in zip(frozen, online_rows)
@@ -1338,20 +1518,36 @@ class TrainingLoopMixin:
             }
             self.history.append(epoch_result)
             self.completed_epochs = epoch
-            self.save_checkpoint(self.training_config.checkpoint_path, epoch=epoch)
-            if validation_dataset:
+            if not validation_dataset:
+                self.save_checkpoint(
+                    self.training_config.checkpoint_path, epoch=epoch
+                )
+            else:
                 calibration = None
+                validation_checkpoint = None
                 if self.training_config.controller_only_finetune:
-                    calibration = self._calibrate_controller_checkpoint(
+                    # Calibration is also evaluated against the current
+                    # in-memory model.  The payload is an isolated snapshot;
+                    # no last.pt round-trip is needed before validation.
+                    validation_checkpoint = self.build_checkpoint_payload(
                         self.training_config.checkpoint_path,
+                        epoch=epoch,
+                    )
+                    calibration = self._calibrate_controller_checkpoint(
+                        validation_checkpoint,
                         validation_dataset,
                     )
-                    # Persist calibrated thresholds before measuring frozen NLL.
-                    self.save_checkpoint(
-                        self.training_config.checkpoint_path, epoch=epoch
+                    validation_checkpoint = self.build_checkpoint_payload(
+                        self.training_config.checkpoint_path,
+                        epoch=epoch,
+                    )
+                if validation_checkpoint is None:
+                    validation_checkpoint = self.build_checkpoint_payload(
+                        self.training_config.checkpoint_path,
+                        epoch=epoch,
                     )
                 validation = self._validate_controller_checkpoint(
-                    self.training_config.checkpoint_path,
+                    validation_checkpoint,
                     validation_dataset,
                 )
                 selected_utility = (
@@ -1432,19 +1628,17 @@ class TrainingLoopMixin:
                         fallback["adapt_threshold"],
                         fallback["write_threshold"],
                     )
-                    self.save_checkpoint(
-                        self.training_config.checkpoint_path, epoch=epoch
+                    fallback_checkpoint = self.build_checkpoint_payload(
+                        self.training_config.checkpoint_path,
+                        epoch=epoch,
                     )
                     closed = self._validate_controller_checkpoint(
-                        self.training_config.checkpoint_path,
+                        fallback_checkpoint,
                         validation_dataset,
                     )
                     validation["fallback_actions_closed"] = closed
                     self.controller.calibration_thresholds.copy_(
                         calibrated_thresholds
-                    )
-                    self.save_checkpoint(
-                        self.training_config.checkpoint_path, epoch=epoch
                     )
                 self.validation_history.append(validation)
                 current = self.best_validation
@@ -1546,8 +1740,8 @@ class TrainingLoopMixin:
                             "write_ranking": row.get("write_ranking", {}),
                         } for row in self.history],
                     }, indent=2), encoding="utf-8")
-                # The first snapshot is what validation evaluates. Re-save the
-                # last identity after selection so it also carries best metadata.
+                # Validation consumed an isolated in-memory snapshot.  Persist
+                # the last identity exactly once, after the best decision.
                 self.save_checkpoint(
                     self.training_config.checkpoint_path, epoch=epoch
                 )

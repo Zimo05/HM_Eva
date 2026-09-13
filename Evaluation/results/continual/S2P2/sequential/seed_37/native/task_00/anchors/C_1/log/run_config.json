@@ -1,0 +1,57 @@
+{
+  "format_version": 1,
+  "model": "S2P2",
+  "dataset": "taobao",
+  "dataset_label": "CL-core-v2",
+  "variant": null,
+  "seed": 37,
+  "device": "cuda:1",
+  "training": {
+    "max_epochs": 300,
+    "batch_size": 256,
+    "early_stop_patience": 25
+  },
+  "initial_checkpoint": "/home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_37/checkpoint/task_00.pt",
+  "dim_process": 8,
+  "prepared_data_dir": "/home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_37/prepared/task_00_anchor_C_1",
+  "dtime_max": 29.420684196,
+  "dtime_max_source": "training split only",
+  "architecture": {
+    "hidden_size": 128,
+    "time_emb_size": 16,
+    "num_layers": 4,
+    "num_heads": 2,
+    "loss_integral_num_sample_per_step": 10,
+    "use_mc_samples": true,
+    "dropout_rate": 0.1,
+    "model_specs": {
+      "P": 16,
+      "dropout_rate": 0.1,
+      "act_func": "gelu",
+      "for_loop": true,
+      "pre_norm": false,
+      "post_norm": true,
+      "int_forward_variant": false,
+      "int_backward_variant": true,
+      "relative_time": true
+    }
+  },
+  "optimizer": {
+    "name": "adam",
+    "learning_rate": 0.01
+  },
+  "thinning": {
+    "num_sample": 1,
+    "num_exp": 50,
+    "over_sample_rate": 5,
+    "patience_counter": 5,
+    "num_samples_boundary": 5,
+    "num_step_gen": 1,
+    "dtime_max": 29.420684196
+  },
+  "evaluation_protocol": {
+    "selection_metric": "validation log-likelihood",
+    "test_evaluations_during_training": 0,
+    "test_evaluated_once_after_best_checkpoint": true
+  }
+}

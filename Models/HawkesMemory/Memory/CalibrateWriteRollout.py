@@ -84,7 +84,7 @@ def _row(source: int, event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def run_policy(
-    checkpoint: Path,
+    checkpoint: str | Path | Mapping[str, Any],
     sequences: Sequence[Mapping[str, Any]],
     *,
     write_threshold: float,

@@ -1,0 +1,2 @@
+Epoch,Split,Log-likelihood,Accuracy,RMSE,num_events,SelectionMetric
+0,test,-8.972351399660688,0.14735821619001455,2.4624920492919324,2063,validation_loglike

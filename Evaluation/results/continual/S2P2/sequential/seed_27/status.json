@@ -1,0 +1,5 @@
+{
+  "state": "failed",
+  "error": "command failed with exit code 1; see /home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_27/logs/task_00_train.log\nTraceback (most recent call last):\n  File \"/home/zt/zimo/Benchmark/Evaluation/core/runner.py\", line 1338, in run_continual_job\n    metrics = _run_baseline_continual(\n        model, strategy, args, target, data_root, protocol\n    )\n  File \"/home/zt/zimo/Benchmark/Evaluation/core/runner.py\", line 999, in _run_baseline_continual\n    run_command(command, cwd, env, target / \"logs\" / f\"task_{task:02d}_train.log\")\n    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/zt/zimo/Benchmark/Evaluation/core/adapters.py\", line 128, in run_command\n    raise RuntimeError(f\"command failed with exit code {process.returncode}; see {log_path}\")\nRuntimeError: command failed with exit code 1; see /home/zt/zimo/Benchmark/Evaluation/results/continual/S2P2/sequential/seed_27/logs/task_00_train.log\n",
+  "updated_at": "2026-09-12T14:24:24.726135+00:00"
+}

@@ -1133,7 +1133,16 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
         inputs.append(args.hm_resource_root / "resource_manifest.json")
     if args.checkpoint is not None:
         inputs.append(args.checkpoint)
+    learner_config = (
+        _continual_cl_config(args, protocol, strategy)
+        if model == "HM"
+        else None
+    )
     manifest = build_manifest(spec, args, inputs, None)
+    if learner_config is not None:
+        # Keep the requested learner protocol in the job manifest so changing
+        # a config field cannot make an old result directory look reusable.
+        manifest["learner_config"] = learner_config
     if not begin(target, manifest, args.resume):
         print(f"Complete result already exists: {target}")
         return target
@@ -1183,8 +1192,14 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
                         "existing cl_config.json belongs to a different "
                         "benchmark protocol"
                     )
+                if cl_config != learner_config:
+                    raise RuntimeError(
+                        "existing cl_config.json differs from the current HM "
+                        "continual learner protocol; use a new run id instead "
+                        "of resuming it"
+                    )
             else:
-                cl_config = _continual_cl_config(args, protocol, strategy)
+                cl_config = learner_config
                 write_json(config_path, cl_config)
             stage_manifest_path = target / "stage_manifest.json"
             if stage_manifest_path.exists():

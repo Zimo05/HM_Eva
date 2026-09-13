@@ -66,6 +66,13 @@ def compatible(existing: dict[str, Any], current: dict[str, Any]) -> bool:
     keys = ("job_key", "dataset", "model", "condition", "seed", "variant", "rank", "task_start", "task_end", "inputs")
     if not all(existing.get(key) == current.get(key) for key in keys):
         return False
+    # HM continual jobs bind the learner protocol into the top-level manifest
+    # as well as the stage manifest. A missing/different binding means that an
+    # old result (for example one created before a new Wake setting was added)
+    # must not be silently reused as if it had been produced by the current
+    # protocol.
+    if existing.get("learner_config") != current.get("learner_config"):
+        return False
     ignored = {"resume", "dry_run", "output_root", "run_id", "eval_batch_size"}
 
     def comparable_arguments(payload: dict[str, Any]) -> dict[str, Any]:

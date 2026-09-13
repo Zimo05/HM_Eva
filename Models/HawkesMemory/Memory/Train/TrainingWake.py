@@ -274,6 +274,16 @@ class TrainingWakeMixin:
                     gated_theta,
                 ).squeeze(0)
                 gated_theta_1d = gated_theta.squeeze(0)
+                # The assimilation probe and the working-memory update use
+                # the same dL_pred/d(delta) vector.  Compute it once before
+                # either request is built; the request stores a detached
+                # snapshot, so no second traversal of the prediction graph
+                # is needed.
+                working_grad = torch.autograd.grad(
+                    prediction_nll,
+                    working_delta,
+                    retain_graph=False,
+                )[0]
                 assignment_counts[owner_id] += 1
                 owner_depth_total += self.tree.nodes[owner_id].depth
                 owner_lca_count += int(owner_is_lca)
@@ -325,9 +335,7 @@ class TrainingWakeMixin:
                         ).clamp_max(1.0),
                     },
                     assimilation_theta=gated_theta_1d,
-                    assimilation_grad=torch.autograd.grad(
-                        prediction_nll, working_delta, retain_graph=True
-                    )[0],
+                    assimilation_grad=working_grad,
                     future_contexts=write_probe_contexts,
                     raw_action_probabilities=raw_action_probabilities,
                 )
@@ -384,12 +392,8 @@ class TrainingWakeMixin:
                     "wake objective became non-finite",
                 )
 
-                # This is the only event-level gradient/update path.
-                working_grad = torch.autograd.grad(
-                    prediction_nll,
-                    working_delta,
-                    retain_graph=False,
-                )[0]
+                # This is the only event-level gradient/update path; the
+                # value was computed once above and reused by assimilation.
                 gradient_norm = working_grad.detach().double().norm()
                 max_gradient_norm = torch.maximum(
                     max_gradient_norm,

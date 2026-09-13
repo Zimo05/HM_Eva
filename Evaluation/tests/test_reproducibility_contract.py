@@ -17,6 +17,7 @@ for import_root in (ROOT, EVALUATION_ROOT):
         sys.path.insert(0, str(import_root))
 
 from core.adapters import evaluate_hm, stationary_command
+from core.manifest import compatible
 from core.runner import _baseline_command, _continual_cl_config
 from core.specs import JobSpec
 
@@ -61,7 +62,9 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
         python_executable=sys.executable,
     )
     protocol = Namespace(benchmark_id="synthetic", version=1)
-    assert _continual_cl_config(args, protocol, "full")["epochs_per_task"] == 50
+    cl_config = _continual_cl_config(args, protocol, "full")
+    assert cl_config["epochs_per_task"] == 50
+    assert cl_config["wake"]["retrieval_visit_chunk_size"] == 256
 
     command, _cwd, _env = _baseline_command(
         "THP",
@@ -101,6 +104,31 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
     )
     assert rmtpp_command[rmtpp_command.index("--lr-patience") + 1] == "6"
     assert rmtpp_command[rmtpp_command.index("--lr-factor") + 1] == "0.3"
+
+
+def test_continual_manifest_rejects_results_without_learner_protocol_binding():
+    keys = (
+        "job_key",
+        "dataset",
+        "model",
+        "condition",
+        "seed",
+        "variant",
+        "rank",
+        "task_start",
+        "task_end",
+        "inputs",
+    )
+    existing = {key: None for key in keys}
+    existing["arguments"] = {}
+    existing["inputs"] = []
+    current = {
+        **existing,
+        "learner_config": {
+            "wake": {"retrieval_visit_chunk_size": 256},
+        },
+    }
+    assert not compatible(existing, current)
 
 
 def test_stationary_hm_batch_size_reaches_train_and_evaluate():

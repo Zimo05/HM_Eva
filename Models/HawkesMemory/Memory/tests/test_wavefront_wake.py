@@ -326,6 +326,24 @@ class MaskedWavefrontWakeTests(unittest.TestCase):
                 rtol=1e-6,
             ))
 
+    def test_scalar_wake_reuses_packed_owner_similarity(self):
+        trainer = self._trainer(seed=410)
+        sequence = self._cached(
+            trainer,
+            [0.1, 0.4, 0.9],
+            [0, 1, 0],
+        )
+
+        def unexpected_second_cosine(*_args, **_kwargs):
+            raise AssertionError(
+                "scalar Wake must reuse similarity from the packed read"
+            )
+
+        trainer.controller.leaf_novelty_count = unexpected_second_cosine
+        result = trainer.train_wake_sequence(sequence)
+
+        self.assertEqual(result["event_count"], 3)
+
     def test_raw_theta_likelihood_and_gradient_match_effective_path(self):
         trainer = self._trainer(seed=411)
         sequence = trainer._move_sequence(

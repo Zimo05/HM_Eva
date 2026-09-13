@@ -379,9 +379,38 @@ class TrainingWakeSupportMixin:
             posterior,
         )
         query = memory_output["memory_query"][0]
-        novelty, count, max_similarity = (
-            self.controller.leaf_novelty_count(query, owner_id)
+        # The packed read already computed cosine similarities for every
+        # visited node.  Resolve the posterior owner in that visited-node
+        # slot and reduce the existing row; calling leaf_novelty_count here
+        # would normalize/gather the same owner bank a second time on the
+        # scalar production Wake path.
+        all_node_ids = tuple(self.tree.all_node_ids)
+        owner_index = all_node_ids.index(owner_id)
+        visited_node_indices = memory_output["visited_node_indices"]
+        owner_similarity, owner_valid = (
+            self.tree.episodic_memory.owner_similarity_from_packed(
+                packed_memory_info=memory_output["packed_memory_info"],
+                visited_node_indices=visited_node_indices,
+                visited_node_mask=memory_output["visited_node_mask"],
+                owner_indices=visited_node_indices.new_tensor([owner_index]),
+            )
         )
+        novelty, count, max_similarity = (
+            self.tree.episodic_memory.novelty_from_similarity(
+                owner_similarity,
+                owner_valid,
+                temperature=self.controller.novelty_temperature,
+                count_exponent=self.controller.count_exponent,
+                eps=self.controller.controller_eps,
+                count_similarity_low=self.controller.count_similarity_low,
+                count_similarity_high=self.controller.count_similarity_high,
+                count_topk=self.controller.count_topk,
+                count_saturation=self.controller.count_saturation,
+            )
+        )
+        novelty = novelty[0]
+        count = count[0]
+        max_similarity = max_similarity[0]
         controller_output = self.controller.action_distribution(
             surprise=prediction_nll,
             novelty=novelty,

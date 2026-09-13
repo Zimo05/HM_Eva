@@ -299,7 +299,7 @@ def stationary_command(
         if eval_batch <= 0:
             raise ValueError("eval_batch_size must be positive")
         upstream_h_tree: Path | None = None
-        upstream_sequence_summary: Path | None = None
+        train_sequence_summary: Path | None = None
         upstream_node_dim: int | None = None
         if spec.dataset == "dws":
             upstream_h_tree, upstream_metadata = resolve_hm_upstream_h_tree(
@@ -311,7 +311,10 @@ def stationary_command(
                 raise ValueError(
                     "DWS HM upstream manifest must provide sequence_summary"
                 )
-            upstream_sequence_summary = Path(summary_path)
+            train_sequence_summary = (
+                (prepared or result_dir / "prepared")
+                / "sequence_summary_train.csv"
+            )
         # Dataset preparation belongs to the runner, after the result manifest
         # has been accepted.  Keeping command construction side-effect free is
         # important for --dry-run and for clean failure reporting.
@@ -374,8 +377,51 @@ def stationary_command(
                 "0",
                 "--leaf-symmetry-scale",
                 "0",
+                # Restore the upstream route-gradient and controller-teacher
+                # contract instead of inheriting TrainingCLI defaults.
+                "--route-mix-weight",
+                "0",
+                "--route-posterior-weight",
+                "0",
+                "--route-distill-weight",
+                "0.25",
+                "--route-mi-weight",
+                "0.15",
+                "--route-balance-weight",
+                "0.10",
+                "--route-energy-temperature",
+                "1.0",
+                "--route-encoder-warmup-epochs",
+                "0",
+                "--route-encoder-grad-scale",
+                "0.08",
+                "--route-encoder-reliability-decay",
+                "0.80",
+                "--route-teacher-temperature",
+                "0.85",
+                "--route-balance-batch-size",
+                "32",
+                # Preserve the upstream structural transaction thresholds.
+                "--prune-warmup-epochs",
+                "12",
+                "--merge-min-replay",
+                "12",
                 "--light-replay-budget",
                 "128",
+                "--deep-min-interval",
+                "3",
+                "--deep-computation-cost",
+                "0.05",
+                "--deep-prior-probability",
+                "0.10",
+                "--deep-prior-weight",
+                "0.01",
+                "--deep-evidence-budget",
+                "32",
+                "--topology-inertia-strength",
+                "0.03",
+                "--topology-inertia-tau",
+                "3.0",
             ]
             if not getattr(args, "smoke", False):
                 # Alignment and residual signatures require the complete
@@ -385,7 +431,7 @@ def stationary_command(
                 # run either full-data initializer.
                 command += [
                     "--sequence-summary",
-                    str(upstream_sequence_summary),
+                    str(train_sequence_summary),
                     "--residual-init-scale",
                     "0.08",
                     "--residual-init-rank",

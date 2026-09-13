@@ -17,6 +17,7 @@ from .adapters import (
     evaluate_hm,
     hm_upstream_input_paths,
     normalize_native_metrics,
+    resolve_hm_upstream_h_tree,
     resolved_device,
     run_command,
     stationary_command,
@@ -53,8 +54,14 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
     prepared = target / "prepared" if dataset == "dws" or model == "HM" else None
     command, cwd, env = stationary_command(spec, args, target, prepared=prepared)
     inputs = dataset_inputs(dataset, getattr(args, "variant", None))
+    sequence_summary_source: Path | None = None
     if model == "HM" and dataset == "dws":
         inputs.extend(hm_upstream_input_paths(str(args.variant)))
+        _, upstream_metadata = resolve_hm_upstream_h_tree(str(args.variant))
+        summary_path = upstream_metadata.get("sequence_summary_path")
+        if summary_path is None:
+            raise ValueError("DWS HM upstream manifest must provide sequence_summary")
+        sequence_summary_source = Path(summary_path)
     if args.checkpoint is not None:
         inputs.append(args.checkpoint)
     manifest = build_manifest(spec, args, inputs, command)
@@ -73,6 +80,7 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
                 args.seed,
                 prepared,
                 getattr(args, "variant", None),
+                sequence_summary_source=sequence_summary_source,
             )
         run_command(command, cwd, env, target / "logs" / "train.log")
         copy_checkpoint_contract(target)

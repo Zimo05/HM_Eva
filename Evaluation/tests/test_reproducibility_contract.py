@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import ast
+import csv
 import hashlib
 import importlib.util
+import json
 import os
 import sys
+import tempfile
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
@@ -23,6 +26,7 @@ from core.adapters import (
     resolve_hm_upstream_h_tree,
     stationary_command,
 )
+from core.data import prepare_hm_train_sequence_summary
 from core.manifest import compatible
 from core.runner import (
     _baseline_command,
@@ -227,6 +231,26 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
         "--semantic-blend": "0",
         "--leaf-symmetry-scale": "0",
         "--light-replay-budget": "128",
+        "--route-mix-weight": "0",
+        "--route-posterior-weight": "0",
+        "--route-distill-weight": "0.25",
+        "--route-mi-weight": "0.15",
+        "--route-balance-weight": "0.10",
+        "--route-energy-temperature": "1.0",
+        "--route-encoder-warmup-epochs": "0",
+        "--route-encoder-grad-scale": "0.08",
+        "--route-encoder-reliability-decay": "0.80",
+        "--route-teacher-temperature": "0.85",
+        "--route-balance-batch-size": "32",
+        "--prune-warmup-epochs": "12",
+        "--merge-min-replay": "12",
+        "--deep-min-interval": "3",
+        "--deep-computation-cost": "0.05",
+        "--deep-prior-probability": "0.10",
+        "--deep-prior-weight": "0.01",
+        "--deep-evidence-budget": "32",
+        "--topology-inertia-strength": "0.03",
+        "--topology-inertia-tau": "3.0",
         "--alignment-epochs": "5",
         "--alignment-batch-size": "16",
         "--alignment-lr": "0.001",
@@ -243,7 +267,7 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
         command[command.index("--sequence-summary") + 1]
     )
     assert sequence_summary == (
-        original_root / "Data" / "tree_13" / "sequence_summary.csv"
+        ROOT / "prepared" / "sequence_summary_train.csv"
     ).resolve()
     assert command[command.index("--residual-init-scale") + 1] == "0.08"
     assert command[command.index("--residual-init-rank") + 1] == "4"
@@ -260,6 +284,54 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
     resolved, metadata = resolve_hm_upstream_h_tree("20")
     assert resolved == (original_root / "Data" / "tree_20" / "h_tree_one_circle.pt").resolve()
     assert metadata["node_dim"] == 128
+
+
+def test_hm_train_sequence_summary_filters_only_train_source_indices():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        canonical = root / "canonical.csv"
+        canonical.write_text(
+            "event_times,event_types,source_index\n"
+            "[1.0],[0],10\n"
+            "[2.0],[0],11\n"
+            "[3.0],[0],12\n"
+            "[4.0],[0],13\n",
+            encoding="utf-8",
+        )
+        split_manifest = root / "split_manifest.json"
+        split_manifest.write_text(
+            json.dumps(
+                {
+                    "data_path": str(canonical),
+                    "splits": {
+                        "train": [0, 2],
+                        "validation": [1],
+                        "test": [3],
+                    },
+                    "source_index_field": "source_index",
+                }
+            ),
+            encoding="utf-8",
+        )
+        source_summary = root / "sequence_summary.csv"
+        source_summary.write_text(
+            "leaf_position,cluster_id,mu,A,decay,sequences\n"
+            "left,0,mu-left,A-left,decay-left,\"[10, 11]\"\n"
+            "right,1,mu-right,A-right,decay-right,\"[12, 13]\"\n",
+            encoding="utf-8",
+        )
+
+        output = prepare_hm_train_sequence_summary(
+            source_summary,
+            canonical,
+            split_manifest,
+            root / "sequence_summary_train.csv",
+        )
+
+        with output.open("r", newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        assert [row["sequences"] for row in rows] == ["[10]", "[12]"]
+        assert [row["mu"] for row in rows] == ["mu-left", "mu-right"]
 
 
 def test_hawkes_backbone_matches_original_checkout_when_available():

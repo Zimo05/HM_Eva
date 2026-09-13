@@ -160,13 +160,20 @@ python evaluate_dws_TPP_LLM.py --variant 13 --seed 42 --device cuda:0
 
 DWS 的 `cluster` 和 ground-truth Hawkes 参数只允许用于 test 后诊断，不能进入训练 adapter。stationary HM 按
 `Datasets/DWS/hm_upstream_manifest.json` 选择对应的上游 H-tree，并以 `--tree-init-depth 0`
-重建完整拓扑，同时使用 manifest 中的 `sequence_summary.csv` 做 residual signature
-初始化（scale `0.08`、rank `4`、grad clip `0`）。评测命令同时显式固定 upstream HM
+重建完整拓扑。runner 在完成本次 benchmark split 后，用 canonical CSV 的 train
+`source_index` 从上游完整 `sequence_summary.csv` 只过滤 `sequences` 列，生成
+`prepared/sequence_summary_train.csv`；所有 leaf 行、`cluster_id`、`mu`、`A`、`decay` 均原样保留，
+不重新聚类、不重编号、不改变 Hawkes 参数。生成过程会 fail-fast 检查 train membership
+完整覆盖且不包含 validation/test source ID，residual signature 初始化（scale `0.08`、rank `4`、
+grad clip `0`）和 H-alignment 只读取这个 train-only 文件。评测命令同时显式固定 upstream HM
 协议：`z_dim/node_dim/memory_key_dim=50/128/64`、alignment `5` epochs、frontier
 `2..7`、routing temperature `1.10`、posterior/credible/owner confidence
-`0.85/0.30/0.50`、semantic blend `0`、Light replay budget `128`。这是明确记录的
-upstream-initialized 评测条件，不是 root-only 初始化。smoke 模式只验证 H-tree 加载，
-因为截断数据不能覆盖全部叶子，故不运行 alignment/residual signature 初始化。
+`0.85/0.30/0.50`、route distill/MI/balance `0.25/0.15/0.10`、route encoder
+warmup/grad-scale/reliability-decay/teacher-temperature `0/0.08/0.80/0.85`、
+prune/merge `12/12`、Deep prior `0.10`、topology inertia `0.03`、semantic blend
+`0`、Light replay budget `128`。这是明确记录的 upstream-initialized 评测条件，不是
+root-only 初始化。smoke 模式只验证 H-tree 加载，因为截断数据不能覆盖全部叶子，故不
+运行 alignment/residual signature 初始化。
 
 ### 5.3 DWS-8/13/20：HM scaling
 

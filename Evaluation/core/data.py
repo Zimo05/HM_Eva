@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import csv
 import json
 import pickle
@@ -126,7 +127,280 @@ def _write_dws_native_views(
     )
 
 
-def prepare_hm_dataset(dataset: str, seed: int, work_dir: Path, variant: str | None = None) -> tuple[Path, Path]:
+def _parse_summary_sequence_indices(
+    value: Any,
+    *,
+    source: Path,
+    row_number: int,
+) -> list[int]:
+    """Parse one upstream summary ``sequences`` cell without changing IDs."""
+
+    text = "" if value is None else str(value).strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return []
+    try:
+        parsed = ast.literal_eval(text)
+    except (SyntaxError, ValueError) as error:
+        raise ValueError(
+            f"invalid sequences at {source} row {row_number}: {text!r}"
+        ) from error
+    if not isinstance(parsed, (list, tuple)):
+        raise ValueError(
+            f"sequences at {source} row {row_number} must be a list"
+        )
+
+    result: list[int] = []
+    seen: set[int] = set()
+    for raw_index in parsed:
+        if isinstance(raw_index, bool):
+            raise ValueError(
+                f"non-integer sequence ID at {source} row {row_number}: "
+                f"{raw_index!r}"
+            )
+        if isinstance(raw_index, float) and not raw_index.is_integer():
+            raise ValueError(
+                f"non-integer sequence ID at {source} row {row_number}: "
+                f"{raw_index!r}"
+            )
+        try:
+            sequence_id = int(raw_index)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"non-integer sequence ID at {source} row {row_number}: "
+                f"{raw_index!r}"
+            ) from error
+        if sequence_id < 0:
+            raise ValueError(
+                f"negative sequence ID at {source} row {row_number}: "
+                f"{sequence_id}"
+            )
+        if sequence_id in seen:
+            raise ValueError(
+                f"duplicate sequence ID at {source} row {row_number}: "
+                f"{sequence_id}"
+            )
+        seen.add(sequence_id)
+        result.append(sequence_id)
+    return result
+
+
+def prepare_hm_train_sequence_summary(
+    source_summary: Path,
+    canonical_path: Path,
+    split_manifest_path: Path,
+    output_path: Path,
+) -> Path:
+    """Create a train-only H-tree summary while preserving leaf/Hawkes rows.
+
+    The upstream summary contains membership for the complete source dataset.
+    The benchmark split manifest, not the summary, is the source of truth for
+    the training population.  We therefore retain every summary row and every
+    Hawkes parameter verbatim, filtering only each row's ``sequences`` list by
+    canonical ``source_index``.  This keeps residual initialization and
+    H-alignment train-only without regrouping or relabeling the H-tree.
+    """
+
+    source_summary = Path(source_summary).expanduser().resolve()
+    canonical_path = Path(canonical_path).expanduser().resolve()
+    split_manifest_path = Path(split_manifest_path).expanduser().resolve()
+    output_path = Path(output_path).expanduser().resolve()
+    for path in (source_summary, canonical_path, split_manifest_path):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    if output_path == source_summary:
+        raise ValueError("train summary output must not overwrite source summary")
+
+    manifest = json.loads(split_manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, Mapping):
+        raise ValueError("HM split manifest must be a JSON object")
+    splits = manifest.get("splits")
+    required_splits = ("train", "validation", "test")
+    if not isinstance(splits, Mapping) or any(
+        split not in splits for split in required_splits
+    ):
+        raise ValueError(
+            "HM split manifest must contain train, validation, and test splits"
+        )
+    manifest_data_path = manifest.get("data_path")
+    if manifest_data_path is not None:
+        declared_data_path = Path(str(manifest_data_path)).expanduser().resolve()
+        if declared_data_path != canonical_path:
+            raise ValueError(
+                "HM split manifest data_path does not match canonical_path: "
+                f"{declared_data_path} != {canonical_path}"
+            )
+    declared_data_hash = manifest.get("data_sha256")
+    if declared_data_hash is not None and sha256(canonical_path) != declared_data_hash:
+        raise ValueError("HM split manifest data SHA-256 does not match canonical CSV")
+
+    split_rows: dict[str, list[int]] = {}
+    for split in required_splits:
+        values = splits[split]
+        if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
+            raise ValueError(f"HM split {split!r} must be a list of canonical row IDs")
+        parsed_rows: list[int] = []
+        seen_rows: set[int] = set()
+        for raw_row in values:
+            if isinstance(raw_row, bool):
+                raise ValueError(f"HM split {split!r} contains a non-integer row ID")
+            try:
+                row_index = int(raw_row)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"HM split {split!r} contains a non-integer row ID: {raw_row!r}"
+                ) from error
+            if row_index < 0 or row_index in seen_rows:
+                raise ValueError(
+                    f"HM split {split!r} contains an invalid/duplicate row ID: "
+                    f"{row_index}"
+                )
+            seen_rows.add(row_index)
+            parsed_rows.append(row_index)
+        split_rows[split] = parsed_rows
+
+    with canonical_path.open("r", newline="", encoding="utf-8-sig") as handle:
+        canonical_reader = csv.DictReader(handle)
+        canonical_fields = list(canonical_reader.fieldnames or ())
+        source_field = str(manifest.get("source_index_field") or "source_index")
+        if source_field not in canonical_fields:
+            raise ValueError(
+                f"canonical CSV is missing {source_field!r}, required for summary filtering"
+            )
+        canonical_rows = list(canonical_reader)
+    if not canonical_rows:
+        raise ValueError("canonical CSV is empty")
+
+    source_indices: list[int] = []
+    for row_index, row in enumerate(canonical_rows):
+        raw_source_index = row.get(source_field)
+        if raw_source_index is None or not str(raw_source_index).strip():
+            raise ValueError(f"canonical row {row_index} has no {source_field}")
+        try:
+            source_index = int(raw_source_index)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"canonical row {row_index} has a non-integer {source_field}: "
+                f"{raw_source_index!r}"
+            ) from error
+        source_indices.append(source_index)
+    if len(set(source_indices)) != len(source_indices):
+        raise ValueError("canonical source_index values must be unique")
+
+    canonical_row_ids = set(range(len(canonical_rows)))
+    assigned_row_ids: set[int] = set()
+    for split in required_splits:
+        values = set(split_rows[split])
+        out_of_range = values - canonical_row_ids
+        if out_of_range:
+            raise ValueError(
+                f"HM split {split!r} references rows outside canonical CSV: "
+                f"{sorted(out_of_range)[:5]}"
+            )
+        overlap = assigned_row_ids & values
+        if overlap:
+            raise ValueError(
+                f"HM split rows overlap across partitions: {sorted(overlap)[:5]}"
+            )
+        assigned_row_ids.update(values)
+    if assigned_row_ids != canonical_row_ids:
+        missing = canonical_row_ids - assigned_row_ids
+        raise ValueError(
+            "HM split manifest does not partition canonical CSV rows exactly; "
+            f"missing={len(missing)}"
+        )
+
+    train_source_ids = {
+        source_indices[row_index] for row_index in split_rows["train"]
+    }
+    if not train_source_ids:
+        raise ValueError("HM train split is empty")
+    validation_source_ids = {
+        source_indices[row_index] for row_index in split_rows["validation"]
+    }
+    test_source_ids = {
+        source_indices[row_index] for row_index in split_rows["test"]
+    }
+    if train_source_ids & (validation_source_ids | test_source_ids):
+        raise ValueError("HM source_index splits overlap")
+    canonical_source_ids = set(source_indices)
+
+    with source_summary.open("r", newline="", encoding="utf-8-sig") as handle:
+        summary_reader = csv.DictReader(handle)
+        summary_fields = list(summary_reader.fieldnames or ())
+        required_fields = {"leaf_position", "cluster_id", "sequences"}
+        missing_fields = required_fields.difference(summary_fields)
+        if missing_fields:
+            raise ValueError(
+                "H-tree sequence summary is missing columns: "
+                f"{sorted(missing_fields)}"
+            )
+        summary_rows: list[dict[str, str]] = []
+        assigned_source_to_leaf: dict[int, str] = {}
+        for row_number, row in enumerate(summary_reader, start=2):
+            leaf_position = str(row.get("leaf_position", "")).strip()
+            if not leaf_position:
+                raise ValueError(f"summary row {row_number} has an empty leaf_position")
+            try:
+                int(row["cluster_id"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"summary row {row_number} has an invalid cluster_id"
+                ) from error
+            sequence_ids = _parse_summary_sequence_indices(
+                row.get("sequences"),
+                source=source_summary,
+                row_number=row_number,
+            )
+            unknown = set(sequence_ids) - canonical_source_ids
+            if unknown:
+                raise ValueError(
+                    f"summary row {row_number} references unknown source IDs: "
+                    f"{sorted(unknown)[:5]}"
+                )
+            train_sequence_ids = [
+                source_index
+                for source_index in sequence_ids
+                if source_index in train_source_ids
+            ]
+            for source_index in train_sequence_ids:
+                previous_leaf = assigned_source_to_leaf.get(source_index)
+                if previous_leaf is not None and previous_leaf != leaf_position:
+                    raise ValueError(
+                        f"train source sequence {source_index} appears in multiple "
+                        "summary leaves"
+                    )
+                assigned_source_to_leaf[source_index] = leaf_position
+            output_row = dict(row)
+            output_row["sequences"] = str(train_sequence_ids)
+            summary_rows.append(output_row)
+
+    if not summary_rows:
+        raise ValueError("H-tree sequence summary is empty")
+    assigned_train_ids = set(assigned_source_to_leaf)
+    if assigned_train_ids != train_source_ids:
+        missing = train_source_ids - assigned_train_ids
+        extra = assigned_train_ids - train_source_ids
+        raise ValueError(
+            "train sequence summary membership mismatch: "
+            f"missing={len(missing)}, extra={len(extra)}"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=summary_fields)
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    return output_path
+
+
+def prepare_hm_dataset(
+    dataset: str,
+    seed: int,
+    work_dir: Path,
+    variant: str | None = None,
+    *,
+    sequence_summary_source: Path | None = None,
+) -> tuple[Path, Path]:
     """Create one model-facing CSV plus an immutable split manifest.
 
     For DWS, this function is the benchmark-construction boundary: it creates
@@ -134,6 +408,8 @@ def prepare_hm_dataset(dataset: str, seed: int, work_dir: Path, variant: str | N
     view from it.  The canonical CSV may retain cluster as an evaluation-only
     oracle column; all formal model views omit it and use source_index instead.
     """
+    if sequence_summary_source is not None and dataset != "dws":
+        raise ValueError("sequence_summary_source is only supported for DWS HM data")
     work_dir.mkdir(parents=True, exist_ok=True)
     output = work_dir / "canonical.csv"
     manifest_path = work_dir / "split_manifest.json"
@@ -235,6 +511,22 @@ def prepare_hm_dataset(dataset: str, seed: int, work_dir: Path, variant: str | N
             max(int(record["dim_process"]) for record in dws_records),
         )
     write_json(manifest_path, manifest)
+    if sequence_summary_source is not None:
+        train_summary_path = prepare_hm_train_sequence_summary(
+            source_summary=sequence_summary_source,
+            canonical_path=output,
+            split_manifest_path=manifest_path,
+            output_path=work_dir / "sequence_summary_train.csv",
+        )
+        source_summary_path = Path(sequence_summary_source).expanduser().resolve()
+        manifest["hm_train_sequence_summary"] = {
+            "source_path": str(source_summary_path),
+            "source_sha256": sha256(source_summary_path),
+            "train_path": str(train_summary_path.resolve()),
+            "train_sha256": sha256(train_summary_path),
+            "selection": "canonical source_index in split_manifest.splits.train",
+        }
+        write_json(manifest_path, manifest)
     return output, manifest_path
 
 

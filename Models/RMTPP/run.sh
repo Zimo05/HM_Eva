@@ -32,7 +32,7 @@ Examples:
   bash run.sh covid-policy-tracker
   bash run.sh dws 13
   bash run.sh dws_15
-  GPU=1 EPOCHS=80 BATCH_SIZE=64 bash run.sh retweet
+  GPU=1 EPOCHS=60 BATCH_SIZE=64 bash run.sh retweet
   GPU=-1 bash run.sh taxi
 
 GPU=-1 runs on CPU. Other hyperparameters may also be overridden through
@@ -68,8 +68,8 @@ case "$DATASET" in
     RUN_NAME="rmtpp_amazon_${STAMP}"
     MODEL_RUN_NAME="amazon"
 
-    EPOCHS="${EPOCHS:-80}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     LEARNING_RATE="${LEARNING_RATE:-0.001}"
     HIDDEN_SIZE="${HIDDEN_SIZE:-64}"
     MC_SAMPLES="${MC_SAMPLES:-20}"
@@ -96,7 +96,7 @@ case "$DATASET" in
     RUN_NAME="rmtpp_dws_${VARIANT}_${STAMP}"
     MODEL_RUN_NAME="dws_${VARIANT}"
 
-    EPOCHS="${EPOCHS:-100}"
+    EPOCHS="${EPOCHS:-60}"
     BATCH_SIZE="${BATCH_SIZE:-64}"
     LEARNING_RATE="${LEARNING_RATE:-0.001}"
     HIDDEN_SIZE="${HIDDEN_SIZE:-64}"
@@ -117,8 +117,8 @@ case "$DATASET" in
     RUN_NAME="rmtpp_covid_policy_tracker_${STAMP}"
     MODEL_RUN_NAME="covid_policy_tracker"
 
-    EPOCHS="${EPOCHS:-200}"
-    BATCH_SIZE="${BATCH_SIZE:-4}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     LEARNING_RATE="${LEARNING_RATE:-0.001}"
     HIDDEN_SIZE="${HIDDEN_SIZE:-32}"
     MC_SAMPLES="${MC_SAMPLES:-20}"
@@ -138,8 +138,8 @@ case "$DATASET" in
     RUN_NAME="rmtpp_taxi_${STAMP}"
     MODEL_RUN_NAME="taxi"
 
-    EPOCHS="${EPOCHS:-80}"
-    BATCH_SIZE="${BATCH_SIZE:-128}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     LEARNING_RATE="${LEARNING_RATE:-0.001}"
     HIDDEN_SIZE="${HIDDEN_SIZE:-64}"
     MC_SAMPLES="${MC_SAMPLES:-20}"
@@ -159,7 +159,7 @@ case "$DATASET" in
     RUN_NAME="rmtpp_taobao_${STAMP}"
     MODEL_RUN_NAME="taobao"
 
-    EPOCHS="${EPOCHS:-80}"
+    EPOCHS="${EPOCHS:-60}"
     BATCH_SIZE="${BATCH_SIZE:-64}"
     LEARNING_RATE="${LEARNING_RATE:-0.001}"
     HIDDEN_SIZE="${HIDDEN_SIZE:-64}"
@@ -181,7 +181,7 @@ case "$DATASET" in
     MODEL_RUN_NAME="retweet"
 
     EPOCHS="${EPOCHS:-60}"
-    BATCH_SIZE="${BATCH_SIZE:-8}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     LEARNING_RATE="${LEARNING_RATE:-0.001}"
     HIDDEN_SIZE="${HIDDEN_SIZE:-64}"
     MC_SAMPLES="${MC_SAMPLES:-20}"
@@ -201,8 +201,8 @@ case "$DATASET" in
     RUN_NAME="rmtpp_stackoverflow_${STAMP}"
     MODEL_RUN_NAME="stackoverflow"
 
-    EPOCHS="${EPOCHS:-80}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     LEARNING_RATE="${LEARNING_RATE:-0.001}"
     HIDDEN_SIZE="${HIDDEN_SIZE:-64}"
     MC_SAMPLES="${MC_SAMPLES:-20}"

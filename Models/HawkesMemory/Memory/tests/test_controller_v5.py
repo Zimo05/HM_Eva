@@ -65,6 +65,90 @@ class ControllerV5Tests(unittest.TestCase):
                 torch.allclose(scalar_value, batch_value, atol=1e-7), field
             )
 
+    def test_functional_batch_controller_matches_stateful_ema(self):
+        self.controller.double()
+        stateful = copy.deepcopy(self.controller)
+        surprise = torch.tensor([0.2, 0.7, -0.1], dtype=torch.float64)
+        novelty = torch.tensor([0.3, 0.1, 0.5], dtype=torch.float64)
+        count = torch.tensor([0.4, 0.2, 0.0], dtype=torch.float64)
+        optional = dict(
+            owner_confidence=torch.tensor([0.8, 0.6, 0.9], dtype=torch.float64),
+            retrieval_similarity=torch.tensor([0.4, 0.2, 0.7], dtype=torch.float64),
+            retrieval_residual_norm=torch.tensor([0.1, 0.3, 0.2], dtype=torch.float64),
+            working_memory_norm=torch.tensor([0.2, 0.5, 0.1], dtype=torch.float64),
+            pending_write_ratio=torch.tensor([0.0, 0.25, 0.5], dtype=torch.float64),
+        )
+        before = tuple(
+            buffer.detach().clone()
+            for buffer in (
+                self.controller.surprise_mean,
+                self.controller.surprise_variance,
+                self.controller.surprise_observations,
+            )
+        )
+        functional_state = self.controller.new_surprise_state(surprise)
+        functional, next_state = (
+            self.controller.action_distribution_batch_functional(
+                surprise,
+                novelty,
+                count,
+                surprise_state=functional_state,
+                **optional,
+            )
+        )
+        expected = stateful.action_distribution_batch(
+            surprise,
+            novelty,
+            count,
+            **optional,
+        )
+
+        for key in (
+            "normalized_surprise",
+            "logits",
+            "raw_probabilities",
+            "probabilities",
+        ):
+            torch.testing.assert_close(functional[key], expected[key])
+        for field in functional["features"].__dataclass_fields__:
+            torch.testing.assert_close(
+                getattr(functional["features"], field),
+                getattr(expected["features"], field),
+            )
+        for actual, expected_state in zip(
+            next_state,
+            (
+                stateful.surprise_mean,
+                stateful.surprise_variance,
+                stateful.surprise_observations,
+            ),
+        ):
+            torch.testing.assert_close(actual, expected_state)
+        for actual, expected_before in zip(
+            (
+                self.controller.surprise_mean,
+                self.controller.surprise_variance,
+                self.controller.surprise_observations,
+            ),
+            before,
+        ):
+            torch.testing.assert_close(actual, expected_before)
+
+        self.controller.commit_surprise_state(next_state)
+        for actual, expected_state in zip(
+            (
+                self.controller.surprise_mean,
+                self.controller.surprise_variance,
+                self.controller.surprise_observations,
+            ),
+            (
+                stateful.surprise_mean,
+                stateful.surprise_variance,
+                stateful.surprise_observations,
+            ),
+        ):
+            torch.testing.assert_close(actual, expected_state)
+
     def test_write_admission_requires_every_condition(self):
         self.controller.set_calibration_thresholds(0.0, 0.0, 0.6)
         self.assertFalse(self.controller.write_admissible(0.59, 1.0, 1.0, future_window_complete=True))

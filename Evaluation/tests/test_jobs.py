@@ -35,8 +35,15 @@ def test_easytpp_prediction_protocol_wiring():
     assert "sample_times = relative_dtimes + prefix_times.unsqueeze(-1)" in source
     assert "collect_predictions=False" in source
     assert "def _plot_metrics(" in source
-    assert 'plot_dir / "likelihood.png"' in source
-    assert 'plot_dir / "test_metrics.png"' in source
+    for filename in (
+        '"likelihood.png"',
+        '"accuracy.png"',
+        '"rmse.png"',
+        '"all_metrics.png"',
+        '"test_metrics.png"',
+    ):
+        assert filename in source
+    assert ".bar(" not in source
 
 
 def test_registry_identities_are_unique():

@@ -62,48 +62,48 @@ esac
 # Complete dataset-specific defaults. Environment values always take priority.
 case "$DATASET" in
   amazon)
-    EPOCHS="${EPOCHS:-80}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   retweet)
     EPOCHS="${EPOCHS:-60}"
-    BATCH_SIZE="${BATCH_SIZE:-8}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   taxi)
-    EPOCHS="${EPOCHS:-80}"
-    BATCH_SIZE="${BATCH_SIZE:-128}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   stackoverflow)
-    EPOCHS="${EPOCHS:-80}"
-    BATCH_SIZE="${BATCH_SIZE:-32}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   taobao)
-    EPOCHS="${EPOCHS:-80}"
+    EPOCHS="${EPOCHS:-60}"
     BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   mobike)
-    EPOCHS="${EPOCHS:-100}"
-    BATCH_SIZE="${BATCH_SIZE:-128}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   mimic)
-    EPOCHS="${EPOCHS:-100}"
-    BATCH_SIZE="${BATCH_SIZE:-4}"
-    SELECTION_METRIC="${SELECTION_METRIC:-accuracy}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
+    SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   covid_policy_tracker)
-    EPOCHS="${EPOCHS:-100}"
-    BATCH_SIZE="${BATCH_SIZE:-4}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   dws_8|dws_10|dws_13|dws_15|dws_17|dws_20)
-    EPOCHS="${EPOCHS:-80}"
-    BATCH_SIZE="${BATCH_SIZE:-8}"
+    EPOCHS="${EPOCHS:-60}"
+    BATCH_SIZE="${BATCH_SIZE:-64}"
     SELECTION_METRIC="${SELECTION_METRIC:-ll}"
     ;;
   *)
@@ -113,16 +113,16 @@ case "$DATASET" in
     ;;
 esac
 
-LEARNING_RATE="${LEARNING_RATE:-0.0001}"
-D_MODEL="${D_MODEL:-64}"
-D_RNN="${D_RNN:-256}"
-D_INNER="${D_INNER:-128}"
-D_K="${D_K:-16}"
-D_V="${D_V:-16}"
+LEARNING_RATE="${LEARNING_RATE:-0.0003}"
+D_MODEL="${D_MODEL:-128}"
+D_RNN="${D_RNN:-128}"
+D_INNER="${D_INNER:-256}"
+D_K="${D_K:-32}"
+D_V="${D_V:-32}"
 NUM_HEADS="${NUM_HEADS:-4}"
-NUM_LAYERS="${NUM_LAYERS:-4}"
+NUM_LAYERS="${NUM_LAYERS:-2}"
 DROPOUT="${DROPOUT:-0.1}"
-LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.1}"
+LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.01}"
 INTEGRAL_METHOD="${INTEGRAL_METHOD:-trapezoid}"
 MC_SAMPLES="${MC_SAMPLES:-20}"
 EVENT_LOSS_WEIGHT="${EVENT_LOSS_WEIGHT:-1.0}"

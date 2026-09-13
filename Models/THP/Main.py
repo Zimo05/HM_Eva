@@ -436,26 +436,26 @@ def main():
 
     parser.add_argument('-data', required=True)
 
-    parser.add_argument('-epoch', type=int, default=30)
+    parser.add_argument('-epoch', type=int, default=60)
     parser.add_argument(
-        '-batch_size', '-batch', dest='batch_size', type=int, default=16
+        '-batch_size', '-batch', dest='batch_size', type=int, default=64
     )
     parser.add_argument('-num_workers', type=int, default=0)
 
-    parser.add_argument('-d_model', type=int, default=64)
-    parser.add_argument('-d_rnn', type=int, default=256)
+    parser.add_argument('-d_model', type=int, default=128)
+    parser.add_argument('-d_rnn', type=int, default=128)
     parser.add_argument(
-        '-d_inner_hid', '-d_inner', dest='d_inner_hid', type=int, default=128
+        '-d_inner_hid', '-d_inner', dest='d_inner_hid', type=int, default=256
     )
-    parser.add_argument('-d_k', type=int, default=16)
-    parser.add_argument('-d_v', type=int, default=16)
+    parser.add_argument('-d_k', type=int, default=32)
+    parser.add_argument('-d_v', type=int, default=32)
 
     parser.add_argument('-n_head', type=int, default=4)
-    parser.add_argument('-n_layers', type=int, default=4)
+    parser.add_argument('-n_layers', type=int, default=2)
 
     parser.add_argument('-dropout', type=float, default=0.1)
-    parser.add_argument('-lr', type=float, default=1e-4)
-    parser.add_argument('-smooth', type=float, default=0.1)
+    parser.add_argument('-lr', type=float, default=3e-4)
+    parser.add_argument('-smooth', type=float, default=0.01)
     parser.add_argument('-seed', type=int, default=2024)
     parser.add_argument('-device', type=str, default=None)
     parser.add_argument(
@@ -478,7 +478,7 @@ def main():
     parser.add_argument('-load', type=str, default=None)
     parser.add_argument('-evaluate_only', action='store_true')
     parser.add_argument(
-        '-selection_metric', choices=('ll', 'accuracy', 'rmse'), default=None
+        '-selection_metric', choices=('ll', 'accuracy', 'rmse'), default='ll'
     )
 
     opt = parser.parse_args()

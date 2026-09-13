@@ -393,6 +393,93 @@ class Controller(nn.Module):
                 self.surprise_observations.add_(1)
         return normalized
 
+    def new_surprise_state(
+        self,
+        reference: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return a detached device-local copy of the surprise EMA state.
+
+        Packed Wake keeps this state local to one causal transaction.  The
+        persistent buffers are committed once the scan finishes, so an event
+        loop does not repeatedly mutate a Python-visible Controller object.
+        """
+        if not torch.is_tensor(reference):
+            raise TypeError("reference must be a tensor")
+        return (
+            self.surprise_mean.detach().to(device=reference.device),
+            self.surprise_variance.detach().to(device=reference.device),
+            self.surprise_observations.detach().to(
+                device=reference.device,
+                dtype=torch.long,
+            ),
+        )
+
+    @torch.no_grad()
+    def commit_surprise_state(
+        self,
+        state: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> None:
+        """Commit a functional surprise EMA state atomically."""
+        if len(state) != 3:
+            raise ValueError("surprise state must contain mean, variance, observations")
+        mean, variance, observations = state
+        if mean.numel() != 1 or variance.numel() != 1 or observations.numel() != 1:
+            raise ValueError("surprise EMA state tensors must be scalar")
+        self.surprise_mean.copy_(mean.to(self.surprise_mean))
+        self.surprise_variance.copy_(variance.to(self.surprise_variance))
+        self.surprise_observations.copy_(observations.to(self.surprise_observations))
+
+    def _normalize_surprise_functional(
+        self,
+        surprise: torch.Tensor,
+        state: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        *,
+        update_statistics: bool,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Normalize a batch and return the next EMA state without mutation."""
+        if len(state) != 3:
+            raise ValueError("surprise state must contain mean, variance, observations")
+        mean, variance, observations = state
+        if (
+            mean.numel() != 1
+            or variance.numel() != 1
+            or observations.numel() != 1
+        ):
+            raise ValueError("surprise EMA state tensors must be scalar")
+        state_mean = mean.detach().to(device=surprise.device)
+        state_variance = variance.detach().to(device=surprise.device)
+        state_observations = observations.detach().to(
+            device=surprise.device,
+            dtype=torch.long,
+        )
+        normalized = (surprise - state_mean.to(surprise)) / torch.sqrt(
+            state_variance.to(surprise) + self.controller_eps
+        )
+        if not update_statistics:
+            return normalized, (
+                state_mean,
+                state_variance,
+                state_observations,
+            )
+
+        values = surprise.detach().to(state_mean)
+        decay = self.surprise_ema_decay
+        difference = values - state_mean
+        batch_decay = decay ** values.numel()
+        batch_decay_tensor = values.new_tensor(batch_decay)
+        next_mean = (
+            state_mean * batch_decay_tensor
+            + values.mean() * (1.0 - batch_decay_tensor)
+        )
+        next_variance = (
+            state_variance * batch_decay_tensor
+            + difference.square().mean() * (1.0 - batch_decay_tensor)
+        )
+        next_observations = state_observations + values.new_tensor(
+            values.numel(), dtype=torch.long
+        )
+        return normalized, (next_mean, next_variance, next_observations)
+
     def build_features(
         self,
         normalized_surprise: torch.Tensor,
@@ -516,6 +603,49 @@ class Controller(nn.Module):
             "gates": gates,
         }
 
+    def _action_distribution_batch_from_normalized(
+        self,
+        normalized: torch.Tensor,
+        novelty: torch.Tensor,
+        count: torch.Tensor,
+        *,
+        owner_confidence: Optional[torch.Tensor] = None,
+        retrieval_similarity: Optional[torch.Tensor] = None,
+        retrieval_residual_norm: Optional[torch.Tensor] = None,
+        working_memory_norm: Optional[torch.Tensor] = None,
+        pending_write_ratio: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        features = self.build_features(
+            normalized, novelty, count,
+            owner_confidence=owner_confidence,
+            retrieval_similarity=retrieval_similarity,
+            retrieval_residual_norm=retrieval_residual_norm,
+            working_memory_norm=working_memory_norm,
+            pending_write_ratio=pending_write_ratio,
+        )
+        logits = self._feature_logits(features)
+        raw_probabilities = torch.sigmoid(logits / self.action_temperature)
+        thresholds = self.calibration_thresholds.to(raw_probabilities)
+        probabilities = raw_probabilities.clone()
+        for action_index in range(3):
+            probabilities[..., action_index] = torch.where(
+                raw_probabilities[..., action_index] >= thresholds[action_index],
+                raw_probabilities[..., action_index],
+                raw_probabilities[..., action_index] * 0.0,
+            )
+        # ``split_enabled`` is a device buffer; multiplying by it avoids a
+        # CUDA-to-host scalar read on every batched controller invocation.
+        probabilities[..., 3] = raw_probabilities[..., 3] * self.split_enabled.to(
+            raw_probabilities
+        )
+        return {
+            "normalized_surprise": normalized,
+            "features": features,
+            "logits": logits,
+            "raw_probabilities": raw_probabilities,
+            "probabilities": probabilities,
+        }
+
     def action_distribution_batch(
         self,
         surprise: torch.Tensor,
@@ -566,37 +696,61 @@ class Controller(nn.Module):
                     alpha=1.0 - batch_decay,
                 )
                 self.surprise_observations.add_(values.numel())
-
-        features = self.build_features(
-            normalized, novelty, count,
+        return self._action_distribution_batch_from_normalized(
+            normalized,
+            novelty,
+            count,
             owner_confidence=owner_confidence,
             retrieval_similarity=retrieval_similarity,
             retrieval_residual_norm=retrieval_residual_norm,
             working_memory_norm=working_memory_norm,
             pending_write_ratio=pending_write_ratio,
         )
-        logits = self._feature_logits(features)
-        raw_probabilities = torch.sigmoid(logits / self.action_temperature)
-        thresholds = self.calibration_thresholds.to(raw_probabilities)
-        probabilities = raw_probabilities.clone()
-        for action_index in range(3):
-            probabilities[..., action_index] = torch.where(
-                raw_probabilities[..., action_index] >= thresholds[action_index],
-                raw_probabilities[..., action_index],
-                raw_probabilities[..., action_index] * 0.0,
+
+    def action_distribution_batch_functional(
+        self,
+        surprise: torch.Tensor,
+        novelty: torch.Tensor,
+        count: torch.Tensor,
+        *,
+        surprise_state: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        update_statistics: bool = True,
+        owner_confidence: Optional[torch.Tensor] = None,
+        retrieval_similarity: Optional[torch.Tensor] = None,
+        retrieval_residual_norm: Optional[torch.Tensor] = None,
+        working_memory_norm: Optional[torch.Tensor] = None,
+        pending_write_ratio: Optional[torch.Tensor] = None,
+    ) -> tuple[Dict[str, torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Evaluate the batch controller with a functional surprise EMA.
+
+        The probabilities and feature algebra are identical to
+        :meth:`action_distribution_batch`; only the EMA update is returned as
+        a value instead of being written into persistent buffers.
+        """
+        if (
+            surprise.ndim != 1
+            or novelty.shape != surprise.shape
+            or count.shape != surprise.shape
+        ):
+            raise ValueError(
+                "batched surprise/novelty/count must align as [B_active]"
             )
-        # ``split_enabled`` is a device buffer; multiplying by it avoids a
-        # CUDA-to-host scalar read on every batched controller invocation.
-        probabilities[..., 3] = raw_probabilities[..., 3] * self.split_enabled.to(
-            raw_probabilities
+        normalized, next_state = self._normalize_surprise_functional(
+            surprise,
+            surprise_state,
+            update_statistics=update_statistics,
         )
-        return {
-            "normalized_surprise": normalized,
-            "features": features,
-            "logits": logits,
-            "raw_probabilities": raw_probabilities,
-            "probabilities": probabilities,
-        }
+        output = self._action_distribution_batch_from_normalized(
+            normalized,
+            novelty,
+            count,
+            owner_confidence=owner_confidence,
+            retrieval_similarity=retrieval_similarity,
+            retrieval_residual_norm=retrieval_residual_norm,
+            working_memory_norm=working_memory_norm,
+            pending_write_ratio=pending_write_ratio,
+        )
+        return output, next_state
 
     @staticmethod
     def queue_weight(probabilities: torch.Tensor) -> torch.Tensor:

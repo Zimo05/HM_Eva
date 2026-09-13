@@ -1102,8 +1102,8 @@ class TrainingObjectivesMixin:
                 update_search_state=False,
                 detach_routing=True,
                 materialize_diagnostics=False,
-                visit_chunk_size=(
-                    self.wake_config.retrieval_visit_chunk_size
+                visit_chunk_size=getattr(
+                    self.wake_config, "retrieval_visit_chunk_size", 64
                 ),
             )
             # All three Global parameter variants share the same routing

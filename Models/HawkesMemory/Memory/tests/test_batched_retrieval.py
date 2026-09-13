@@ -189,6 +189,79 @@ class MaskedEntmaxTests(unittest.TestCase):
         self.assertEqual(snapshot.age_clock, 0)
         self.assertEqual(memory._packed_mirror_rebuilds, 1)
 
+    def test_packed_read_age_offsets_match_independent_causal_rows(self):
+        torch.manual_seed(95)
+        reference = TreeEpisodicMemory(
+            key_dim=3,
+            num_event_types=2,
+            num_basis=1,
+            capacity_per_node=5,
+            device="cpu",
+        )
+        node_ids = ("root", "root_L", "root_R")
+        for node_id in node_ids:
+            for _ in range(2):
+                reference.add_memory(
+                    node_id,
+                    torch.randn(3),
+                    torch.randn(reference.param_dim),
+                )
+        packed = copy.deepcopy(reference)
+        query = torch.randn(4, 3)
+        visited = torch.tensor([
+            [0, 1, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [0, 2, 1],
+        ])
+        visited_mask = torch.ones_like(visited, dtype=torch.bool)
+        offsets = torch.arange(query.size(0), dtype=torch.long)
+        packed_snapshot = packed.prepare_packed_read_snapshot(
+            node_ids,
+            query,
+        )
+        packed_delta, packed_info = packed.read_packed(
+            query,
+            visited,
+            visited_mask,
+            node_ids,
+            update_state=False,
+            snapshot=packed_snapshot,
+            age_offsets=offsets,
+            visit_chunk_size=2,
+        )
+
+        reference_snapshot = reference.prepare_packed_read_snapshot(
+            node_ids,
+            query,
+        )
+        reference_deltas = []
+        reference_info = {}
+        for row, offset in enumerate(offsets):
+            delta, info = reference.read_packed(
+                query[row:row + 1],
+                visited[row:row + 1],
+                visited_mask[row:row + 1],
+                node_ids,
+                update_state=False,
+                snapshot=reference_snapshot,
+                age_offsets=offset.reshape(1),
+                visit_chunk_size=1,
+            )
+            reference_deltas.append(delta)
+            for key, value in info.items():
+                reference_info.setdefault(key, []).append(value)
+
+        torch.testing.assert_close(
+            packed_delta,
+            torch.cat(reference_deltas, dim=0),
+        )
+        for key, values in reference_info.items():
+            torch.testing.assert_close(
+                packed_info[key],
+                torch.cat(values, dim=0),
+            )
+
     def test_owner_similarity_uses_visited_node_slots_and_checks_invariant(self):
         torch.manual_seed(94)
         memory = TreeEpisodicMemory(

@@ -68,8 +68,8 @@ def parse_args():
         ),
     )
     parser.add_argument("--variant", choices=("8", "13", "15", "17", "20"), default="13")
-    parser.add_argument("--epochs", type=int, default=80)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument(

@@ -698,6 +698,7 @@ class TreeEpisodicMemory(nn.Module):
         keep_gate: Optional[Tensor] = None,
         null_logit: Optional[float | Tensor] = None,
         snapshot: Optional[PackedMemoryReadSnapshot] = None,
+        age_offsets: Optional[Tensor] = None,
         info_fields: Optional[Sequence[str]] = None,
         visit_chunk_size: int = 64,
     ) -> Tuple[Tensor, Dict[str, Tensor]]:
@@ -707,7 +708,9 @@ class TreeEpisodicMemory(nn.Module):
         the fixed ``[node, capacity, *]`` mirror used by Wake, gathers the
         visited rows, and applies the existing batched retriever semantics.
         Pass a :class:`PackedMemoryReadSnapshot` when several calls belong to
-        one transaction and must share the same mirror and age clock.
+        one transaction and must share the same mirror and age clock.  When
+        ``age_offsets`` is supplied, it provides one deterministic clock
+        offset per query row while the mirror remains shared.
         """
         if query.ndim != 2 or query.size(-1) != self.key_dim:
             raise ValueError("query must have shape [N, key_dim]")
@@ -732,6 +735,28 @@ class TreeEpisodicMemory(nn.Module):
             raise ValueError("packed snapshot is on the wrong device")
         if mirror["keys"].dtype != query.dtype:
             raise ValueError("packed snapshot has the wrong dtype")
+        if age_offsets is not None:
+            if (
+                age_offsets.ndim != 1
+                or age_offsets.size(0) != query.size(0)
+            ):
+                raise ValueError(
+                    "age_offsets must have shape [query_rows]"
+                )
+            if age_offsets.device != query.device:
+                raise ValueError("age_offsets must share the query device")
+            if age_offsets.is_complex() or not (
+                age_offsets.is_floating_point()
+                or age_offsets.dtype in (
+                    torch.uint8,
+                    torch.int8,
+                    torch.int16,
+                    torch.int32,
+                    torch.int64,
+                )
+            ):
+                raise ValueError("age_offsets must be numeric")
+            age_offsets = age_offsets.to(dtype=query.dtype)
         visit_chunk_size = int(visit_chunk_size)
         if visit_chunk_size <= 0:
             raise ValueError("visit_chunk_size must be positive")
@@ -775,13 +800,6 @@ class TreeEpisodicMemory(nn.Module):
         quality = mirror["quality"]
         usage = mirror["usage"]
         valid = mirror["valid"]
-        age_offset = (
-            snapshot.age_clock - mirror["age_reference"]
-        ).to(query.dtype)
-        age = (
-            mirror["base_age"]
-            + age_offset[:, None] * valid.to(query.dtype)
-        )
 
         safe_nodes = node_indices.clamp_min(0)
         flat_nodes = safe_nodes.reshape(-1)
@@ -823,6 +841,30 @@ class TreeEpisodicMemory(nn.Module):
             stop = min(start + visit_chunk_size, int(active_rows.numel()))
             row_chunk = active_rows[start:stop]
             node_chunk = active_nodes[start:stop]
+            if age_offsets is None:
+                row_age_clock = query.new_full(
+                    (row_chunk.numel(),),
+                    snapshot.age_clock,
+                )
+            else:
+                # ``row_chunk`` indexes the flattened [query, visit] grid.
+                # Resolve its query row before selecting the corresponding
+                # causal offset. This keeps the mirror shared while allowing
+                # one packed transaction to represent t=0, ..., T-1.
+                query_rows = torch.div(
+                    row_chunk,
+                    node_indices.size(1),
+                    rounding_mode="floor",
+                )
+                row_age_clock = (
+                    snapshot.age_clock
+                    + age_offsets.index_select(0, query_rows)
+                )
+            age_chunk = mirror["base_age"].index_select(0, node_chunk)
+            age_chunk = age_chunk + (
+                row_age_clock[:, None]
+                - mirror["age_reference"].index_select(0, node_chunk)[:, None]
+            ) * active_valid[start:stop].to(query.dtype)
             retrieved, retrieval_info = self.retriever.forward_batched(
                 query=flat_query.index_select(0, row_chunk),
                 keys=context_keys.index_select(0, node_chunk),
@@ -832,7 +874,7 @@ class TreeEpisodicMemory(nn.Module):
                 deltas=deltas,
                 row_bank_indices=node_chunk,
                 usage=usage.index_select(0, node_chunk),
-                age=age.index_select(0, node_chunk),
+                age=age_chunk,
                 valid_mask=active_valid[start:stop],
                 write_quality=quality.index_select(0, node_chunk),
                 keep_gate=(

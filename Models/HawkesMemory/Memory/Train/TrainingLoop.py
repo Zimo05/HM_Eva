@@ -876,8 +876,9 @@ class TrainingLoopMixin:
                     projected_z=projected_flat,
                 )
             # Keep the complete hard-routing identity view packed on the
-            # device. The strict Wake wrapper decodes only one sequence slice
-            # at a time when it enters the stateful scalar protocol.
+            # device. The strict Wake wrapper consumes one sequence slice at
+            # a time, while its packed transaction keeps the tensor identity
+            # as the source of truth.
             frontier_rows = _LazyFrontierRows(
                 frontier_flat,
                 self.tree.all_node_ids,

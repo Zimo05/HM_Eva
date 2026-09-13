@@ -401,7 +401,7 @@ class StructureConfig:
 
 @dataclass
 class TrainingConfig:
-    epochs: int = 20
+    epochs: int = 60
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     grad_clip: float = 5.0

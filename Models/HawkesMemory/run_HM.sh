@@ -29,7 +29,7 @@ ATTENTION_WEIGHTS="$DATA_ROOT/encoder_weights_17.pt"
 H_TREE_OUTPUT="${H_TREE_OUTPUT:-$DATA_ROOT/h_tree_one_circle.pt}"
 
 RUN_NAME="${RUN_NAME:-dws_17_08281630}"
-EPOCHS="${EPOCHS:-10}"
+EPOCHS="${EPOCHS:-60}"
 # Dense padded GRU is enabled only for Global first.  Wake keeps packed
 # execution until its wavefront memory/throughput trade-off is benchmarked.
 GLOBAL_PADDED_GRU_MODE="${GLOBAL_PADDED_GRU_MODE:-dense}"
@@ -91,7 +91,7 @@ Usage:
   ./run_HM.sh stop             Stop the Memory background process
 
 Optional environment overrides:
-  RUN_NAME=name EPOCHS=10 PYTHON=/path/to/python DEVICES=0 ./run_HM.sh <action>
+  RUN_NAME=name EPOCHS=60 PYTHON=/path/to/python DEVICES=0 ./run_HM.sh <action>
   GLOBAL_PADDED_GRU_MODE=dense WAKE_PADDED_GRU_MODE=packed ./run_HM.sh memory
   BASE_CONTROLLER_CHECKPOINT=/path/model.pt CONTROLLER_VERSION=6 ./run_HM.sh controller-finetune
   # Optional cold-start priors for adaptive two-radius matching:
@@ -285,7 +285,7 @@ start_memory() {
     echo "[Hint] Sync Memory/Train/TrainingCLI.py to enable best-checkpoint and diagnostics artifacts." >&2
   fi
 
-  local training_epochs=50
+  local training_epochs=60
   local split_args=()
   local controller_args=()
   if [[ "$controller_mode" != "0" ]]; then

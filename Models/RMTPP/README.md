@@ -38,7 +38,7 @@ Use CPU, select a GPU, or override hyperparameters:
 ```bash
 GPU=-1 bash run.sh taxi
 GPU=1 bash run.sh dws 13
-EPOCHS=80 BATCH_SIZE=64 LEARNING_RATE=0.001 bash run.sh amazon
+EPOCHS=60 BATCH_SIZE=64 LEARNING_RATE=0.001 bash run.sh amazon
 ```
 
 Following the FullyNN runner layout, each run writes to

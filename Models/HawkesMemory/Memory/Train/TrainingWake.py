@@ -162,8 +162,8 @@ class TrainingWakeMixin:
                     materialize_diagnostics=(
                         precomputed_frontier_rows is None
                     ),
-                    visit_chunk_size=(
-                        self.wake_config.retrieval_visit_chunk_size
+                    visit_chunk_size=getattr(
+                        self.wake_config, "retrieval_visit_chunk_size", 64
                     ),
                 )
                 if precomputed_frontier_rows is not None:
@@ -269,21 +269,24 @@ class TrainingWakeMixin:
                     working_delta,
                     action_probabilities[1],
                 )
-                prediction_nll = self._batched_raw_theta_event_nll(
-                    step_flat,
-                    gated_theta,
-                ).squeeze(0)
+                # Keep the scalar reference on the same raw-theta analytic
+                # kernel as the packed path.  The gated theta is affine in
+                # working_delta, so this returns the exact dL/d(delta)
+                # without constructing a one-event autograd graph.
+                prediction_nll, working_grad = (
+                    self._batched_raw_theta_event_nll_and_grad(
+                        step_flat,
+                        gated_theta.detach(),
+                    )
+                )
+                prediction_nll = prediction_nll.squeeze(0)
+                working_grad = working_grad.squeeze(0)
                 gated_theta_1d = gated_theta.squeeze(0)
                 # The assimilation probe and the working-memory update use
                 # the same dL_pred/d(delta) vector.  Compute it once before
                 # either request is built; the request stores a detached
                 # snapshot, so no second traversal of the prediction graph
                 # is needed.
-                working_grad = torch.autograd.grad(
-                    prediction_nll,
-                    working_delta,
-                    retain_graph=False,
-                )[0]
                 assignment_counts[owner_id] += 1
                 owner_depth_total += self.tree.nodes[owner_id].depth
                 owner_lca_count += int(owner_is_lca)
@@ -809,13 +812,14 @@ class TrainingWakeMixin:
         frontier_flat: Any,
         *,
         microbatch: Optional[int] = None,
+        age_offsets: Optional[Tensor] = None,
     ) -> tuple[Tensor, Tensor, Dict[str, Tensor]]:
-        """Read an immutable episodic snapshot for the legacy batch path.
+        """Read one immutable packed mirror for a Wake transaction.
 
-        The public online-sequential Wake path does not use this helper.
-        The legacy snapshot implementation defers episodic writes and
-        retrieval-usage credit until its transaction ends, so all flat rows
-        can share one read snapshot. Chunking keeps the
+        Episodic writes and retrieval-usage credit are deferred until the
+        transaction ends, so all flat rows can share one read snapshot. The
+        optional offsets restore the causal age seen by each event while the
+        mirror stays immutable. Chunking keeps the
         ``[rows, visited_nodes, capacity]`` retrieval tensors bounded.
         """
         if query_flat.ndim != 2:
@@ -823,6 +827,18 @@ class TrainingWakeMixin:
         row_count = query_flat.size(0)
         if row_count <= 0:
             raise ValueError("flat Wake retrieval requires at least one row")
+        if age_offsets is not None:
+            if (
+                age_offsets.ndim != 1
+                or age_offsets.size(0) != row_count
+            ):
+                raise ValueError(
+                    "Wake age_offsets must have one value per flat event"
+                )
+            if age_offsets.device != query_flat.device:
+                raise ValueError(
+                    "Wake age_offsets must share the query device"
+                )
         if (
             frontier_flat.visited_indices.size(0) != row_count
             or frontier_flat.visited_mask.size(0) != row_count
@@ -853,8 +869,13 @@ class TrainingWakeMixin:
                 node_ids=node_ids,
                 update_state=False,
                 snapshot=snapshot,
-                visit_chunk_size=(
-                    self.wake_config.retrieval_visit_chunk_size
+                age_offsets=(
+                    None
+                    if age_offsets is None
+                    else age_offsets[start:end]
+                ),
+                visit_chunk_size=getattr(
+                    self.wake_config, "retrieval_visit_chunk_size", 64
                 ),
             )
             node_delta_chunks.append(node_delta)
@@ -927,7 +948,7 @@ class TrainingWakeMixin:
             owner_confidence=owner_confidence,
             retrieval_similarity=max_similarity,
             retrieval_residual_norm=retrieval_residual_norm,
-            working_memory_norm=working_delta.norm(dim=-1),
+            working_memory_norm=working_delta.norm(dim=-1).detach(),
             pending_write_ratio=pending_write_ratio,
         )
         action_probabilities = controller_output["probabilities"]
@@ -955,6 +976,189 @@ class TrainingWakeMixin:
             working_grad,
         )
 
+    def _wake_recurrent_step_tensor_functional(
+        self,
+        step_flat: Mapping[str, Tensor],
+        semantic_base: Tensor,
+        episodic_base: Tensor,
+        working_delta: Tensor,
+        novelty: Tensor,
+        similarity_count: Tensor,
+        owner_confidence: Tensor,
+        max_similarity: Tensor,
+        retrieval_residual_norm: Tensor,
+        pending_write_ratio: Tensor,
+        surprise_state: tuple[Tensor, Tensor, Tensor],
+    ) -> tuple[
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        tuple[Tensor, Tensor, Tensor],
+    ]:
+        """Run one recurrent step while returning the next Controller EMA.
+
+        This is the packed counterpart of
+        :meth:`_wake_recurrent_step_tensor`.  The Hawkes algebra and action
+        order are deliberately identical; only Controller surprise state is
+        passed by value so the scan can commit it once at sequence end.
+        """
+        pre_action_theta = semantic_base + working_delta
+        pre_action_nll = self._batched_raw_theta_event_nll(
+            step_flat,
+            pre_action_theta.detach(),
+        )
+        controller_output, next_surprise_state = (
+            self.controller.action_distribution_batch_functional(
+                pre_action_nll,
+                novelty,
+                similarity_count,
+                surprise_state=surprise_state,
+                owner_confidence=owner_confidence,
+                retrieval_similarity=max_similarity,
+                retrieval_residual_norm=retrieval_residual_norm,
+                working_memory_norm=working_delta.norm(dim=-1).detach(),
+                pending_write_ratio=pending_write_ratio,
+            )
+        )
+        action_probabilities = controller_output["probabilities"]
+        raw_action_probabilities = controller_output.get(
+            "raw_probabilities",
+            action_probabilities,
+        )
+        gated_theta = (
+            pre_action_theta
+            + action_probabilities[:, 1, None] * episodic_base
+        )
+        prediction_nll, working_grad = (
+            self._batched_raw_theta_event_nll_and_grad(
+                step_flat,
+                gated_theta.detach(),
+            )
+        )
+        return (
+            pre_action_theta,
+            pre_action_nll,
+            action_probabilities,
+            raw_action_probabilities,
+            gated_theta,
+            prediction_nll,
+            working_grad,
+            next_surprise_state,
+        )
+
+    def train_wake_sequence_packed(
+        self,
+        cpu_sequence: Mapping[str, Tensor],
+        *,
+        sequence_index: Optional[int] = None,
+        precomputed_z: Optional[Tensor] = None,
+        precomputed_projected_z: Optional[Tensor] = None,
+        precomputed_memory_query: Optional[Tensor] = None,
+        frontier_static_cache: Optional[Any] = None,
+        precomputed_frontier: Optional[Any] = None,
+        precomputed_frontier_rows: Optional[
+            Sequence[tuple[tuple[str, ...], int, int]]
+        ] = None,
+    ) -> Dict[str, Any]:
+        """Run one sequence through the causal tensor-scan Wake backend.
+
+        The bank mirror is captured once at sequence entry.  Retrieval rows
+        receive offsets ``0, ..., T - 1`` so the packed read has the same age
+        that scalar Wake would observe before each ``step_age()``.  Physical
+        writes are still committed only after the scan, in chronological
+        order, by the shared delayed-write implementation.
+        """
+        sequence = self._move_sequence(cpu_sequence)
+        event_count = int(sequence["times"].numel())
+        if event_count <= 0:
+            raise ValueError("packed Wake requires a non-empty sequence")
+
+        if frontier_static_cache is None:
+            frontier_static_cache = (
+                self.tree.frontier_routing.build_static_cache(detach=True)
+            )
+        if precomputed_z is None:
+            with torch.no_grad():
+                z_flat = self._encode_memory_sequence(sequence)
+        else:
+            z_flat = precomputed_z.to(self.device)
+        if z_flat.shape != (event_count, self.tree.z_dim):
+            raise ValueError("precomputed Wake states must have shape [events, z]")
+
+        with torch.no_grad():
+            projected_flat = (
+                self.tree.router_compat.project_z(z_flat)
+                if precomputed_projected_z is None
+                else precomputed_projected_z.to(self.device)
+            )
+            query_flat = (
+                self.tree.episodic_memory.query_net(z_flat)
+                if precomputed_memory_query is None
+                else precomputed_memory_query.to(self.device)
+            )
+        if precomputed_frontier is None:
+            with torch.no_grad():
+                frontier_flat = self.tree.frontier_routing.route_packed(
+                    z_flat,
+                    update_search_state=(
+                        not self.training_config.controller_only_finetune
+                    ),
+                    node_embedding_table=(
+                        frontier_static_cache.node_embedding_table
+                    ),
+                    normalized_node_table=(
+                        frontier_static_cache.normalized_node_table
+                    ),
+                    projected_z=projected_flat,
+                )
+        else:
+            frontier_flat = precomputed_frontier
+
+        times = sequence["times"]
+        previous = torch.cat([times.new_zeros(1), times[:-1]])
+        flat = {
+            "types": sequence["types"],
+            "duration": (times - previous).clamp_min(0.0),
+            HAWKES_HISTORY_STATS_KEY: sequence[HAWKES_HISTORY_STATS_KEY],
+            HAWKES_INTERVAL_STATS_KEY: sequence[HAWKES_INTERVAL_STATS_KEY],
+            "sequence_index": torch.zeros(
+                event_count,
+                device=self.device,
+                dtype=torch.long,
+            ),
+            "sequence_lengths": torch.tensor(
+                [event_count],
+                device=self.device,
+                dtype=torch.long,
+            ),
+            "sequence_lengths_cpu": [event_count],
+        }
+        result = self._train_wake_sequence_packed_impl(
+            sequences=(sequence,),
+            sequence_indices=(
+                0 if sequence_index is None else int(sequence_index),
+            ),
+            z_flat=z_flat,
+            projected_flat=projected_flat,
+            query_flat=query_flat,
+            frontier_static_cache=frontier_static_cache,
+            frontier_flat=frontier_flat,
+            frontier_rows=precomputed_frontier_rows,
+            flat=flat,
+            age_offsets=torch.arange(
+                event_count,
+                device=self.device,
+                dtype=torch.long,
+            ),
+            functional_controller_state=True,
+            commit_working_state=True,
+        )
+        return result[0]
+
     def train_wake_batch(
         self,
         *,
@@ -972,12 +1176,9 @@ class TrainingWakeMixin:
 
         The encoder, projection, query, and frontier are stateless for a
         prepared chunk and are therefore computed once by
-        ``_iter_masked_wavefront_batches``.  Episodic retrieval, controller
-        decisions, working-memory updates, age, usage credit, and physical
-        writes remain in :meth:`train_wake_sequence` and are executed in
-        sequence/event order.  In particular, a sequence commits its writes
-        before the next sequence starts, so later sequences observe the
-        causal bank state rather than a batch-entry snapshot.
+        ``_iter_masked_wavefront_batches``.  Each sequence then enters the
+        causal-packed tensor scan, commits its writes before the next sequence
+        starts, and therefore preserves the causal bank state between rows.
         """
         batch_size = len(sequences)
         if batch_size == 0 or len(sequence_indices) != batch_size:
@@ -1004,14 +1205,14 @@ class TrainingWakeMixin:
         ):
             raise ValueError("flattened Wake tensors do not align")
 
-        # Keep the chunk-level stateless preparation above, but delegate the
-        # stateful part to the already-tested scalar protocol. This is the
-        # intentional serialization boundary for shared Episodic Memory.
+        # Keep the chunk-level stateless preparation above, but serialize only
+        # the shared-bank transaction boundary. Each sequence itself uses the
+        # packed read/static Tree forward/recurrent tensor scan backend.
         results = []
         for row, sequence in enumerate(sequences):
             start = offsets[row]
             end = start + lengths[row]
-            results.append(self.train_wake_sequence(
+            results.append(self.train_wake_sequence_packed(
                 sequence,
                 sequence_index=sequence_indices[row],
                 precomputed_z=z_flat[start:end],
@@ -1019,7 +1220,6 @@ class TrainingWakeMixin:
                 precomputed_memory_query=query_flat[start:end],
                 frontier_static_cache=frontier_static_cache,
                 precomputed_frontier=frontier_flat.slice(start, end),
-                precomputed_frontier_rows=frontier_rows[start:end],
             ))
         return results
 
@@ -1036,13 +1236,48 @@ class TrainingWakeMixin:
         frontier_rows: Sequence[tuple[tuple[str, ...], int, int]],
         flat: Mapping[str, Tensor],
     ) -> list[Dict[str, Any]]:
-        """Run the legacy minibatch-synchronous snapshot implementation.
+        """Compatibility entry point for the old snapshot Wake protocol.
 
-        This path is retained only for experiments that explicitly define a
-        minibatch-synchronous memory algorithm. It intentionally reads one
-        bank snapshot at chunk entry and defers usage/age/write mutation, so
-        it is not used by :meth:`train_wake_batch` and must not be presented
-        as online sequential Wake training.
+        Production Wake uses :meth:`train_wake_sequence_packed`; this method
+        remains available for reference tests and experiments that need the
+        original shared-snapshot semantics.
+        """
+        return self._train_wake_sequence_packed_impl(
+            sequences=sequences,
+            sequence_indices=sequence_indices,
+            z_flat=z_flat,
+            projected_flat=projected_flat,
+            query_flat=query_flat,
+            frontier_static_cache=frontier_static_cache,
+            frontier_flat=frontier_flat,
+            frontier_rows=frontier_rows,
+            flat=flat,
+        )
+
+    def _train_wake_sequence_packed_impl(
+        self,
+        *,
+        sequences: Sequence[Mapping[str, Tensor]],
+        sequence_indices: Sequence[int],
+        z_flat: Tensor,
+        projected_flat: Tensor,
+        query_flat: Tensor,
+        frontier_static_cache: Any,
+        frontier_flat: Any,
+        frontier_rows: Optional[
+            Sequence[tuple[tuple[str, ...], int, int]]
+        ],
+        flat: Mapping[str, Tensor],
+        age_offsets: Optional[Tensor] = None,
+        functional_controller_state: bool = False,
+        commit_working_state: bool = False,
+    ) -> list[Dict[str, Any]]:
+        """Run the tensor-backed causal Wake transaction implementation.
+
+        The public packed sequence path supplies per-event age offsets and a
+        functional Controller EMA. The compatibility wrapper below invokes
+        this same implementation with the original minibatch-snapshot
+        defaults for callers that explicitly need that older semantics.
         """
         batch_size = len(sequences)
         if batch_size == 0 or len(sequence_indices) != batch_size:
@@ -1062,7 +1297,11 @@ class TrainingWakeMixin:
             cursor != z_flat.size(0)
             or projected_flat.size(0) != cursor
             or query_flat.size(0) != cursor
-            or len(frontier_rows) != cursor
+            or frontier_flat.node_indices.size(0) != cursor
+            or (
+                frontier_rows is not None
+                and len(frontier_rows) != cursor
+            )
         ):
             raise ValueError("flattened Wake tensors do not align")
 
@@ -1224,6 +1463,12 @@ class TrainingWakeMixin:
             ) = self._read_episodic_flat_batch(
                 query_flat,
                 frontier_flat,
+                age_offsets=age_offsets,
+            )
+            surprise_state = (
+                self.controller.new_surprise_state(z_flat)
+                if functional_controller_state
+                else None
             )
             # Everything below this point is independent of recurrent
             # working memory. Build it once for all flat rows so the time loop
@@ -1516,29 +1761,56 @@ class TrainingWakeMixin:
                         1,
                     ),
                 ).clamp_max(1.0)
-                (
-                    pre_action_theta,
-                    pre_action_nll,
-                    action_probabilities,
-                    raw_action_probabilities,
-                    gated_theta,
-                    prediction_nll,
-                    working_grad,
-                ) = self._wake_recurrent_step_tensor(
-                    step_flat,
-                    semantic_base,
-                    episodic_base,
-                    working_delta,
-                    novelty,
-                    similarity_count,
-                    owner_confidence,
-                    max_similarity,
-                    retrieval_residual_norm_flat.index_select(
-                        0,
-                        flat_rows,
-                    ),
-                    pending_write_ratio,
-                )
+                if surprise_state is None:
+                    (
+                        pre_action_theta,
+                        pre_action_nll,
+                        action_probabilities,
+                        raw_action_probabilities,
+                        gated_theta,
+                        prediction_nll,
+                        working_grad,
+                    ) = self._wake_recurrent_step_tensor(
+                        step_flat,
+                        semantic_base,
+                        episodic_base,
+                        working_delta,
+                        novelty,
+                        similarity_count,
+                        owner_confidence,
+                        max_similarity,
+                        retrieval_residual_norm_flat.index_select(
+                            0,
+                            flat_rows,
+                        ),
+                        pending_write_ratio,
+                    )
+                else:
+                    (
+                        pre_action_theta,
+                        pre_action_nll,
+                        action_probabilities,
+                        raw_action_probabilities,
+                        gated_theta,
+                        prediction_nll,
+                        working_grad,
+                        surprise_state,
+                    ) = self._wake_recurrent_step_tensor_functional(
+                        step_flat,
+                        semantic_base,
+                        episodic_base,
+                        working_delta,
+                        novelty,
+                        similarity_count,
+                        owner_confidence,
+                        max_similarity,
+                        retrieval_residual_norm_flat.index_select(
+                            0,
+                            flat_rows,
+                        ),
+                        pending_write_ratio,
+                        surprise_state,
+                    )
                 action_index = action_probabilities.detach().argmax(dim=-1)
                 wm_penalty = (
                     self.wake_config.lambda_wm
@@ -1694,6 +1966,16 @@ class TrainingWakeMixin:
                 ),
             )
 
+            if surprise_state is not None:
+                self.controller.commit_surprise_state(surprise_state)
+            if commit_working_state:
+                if batch_size != 1:
+                    raise ValueError(
+                        "commit_working_state requires a single sequence"
+                    )
+                with torch.no_grad():
+                    self.tree.working_memory.delta.copy_(working_state[0])
+
         # The recurrent GPU phase is complete.  The optimized v4/v5 path keeps
         # delayed Adapt/Write candidates as a tensor-backed probe buffer.  No
         # per-event Python request is created; only top-C probes cross the
@@ -1704,6 +1986,37 @@ class TrainingWakeMixin:
             flat_sequence_rows = ()
             flat_event_indices = ()
         else:
+            if frontier_rows is None:
+                # The packed tensors are authoritative during the recurrent
+                # scan. Decode compatibility IDs only after that scan, when
+                # the controller-only/v6 request path actually needs them.
+                frontier_node_indices_cpu = (
+                    frontier_flat.node_indices.detach().cpu().tolist()
+                )
+                frontier_mask_cpu = frontier_flat.mask.detach().cpu().tolist()
+                frontier_visited_cpu = (
+                    frontier_flat.visited_mask.detach().cpu().sum(dim=-1).tolist()
+                )
+                frontier_branch_cpu = (
+                    frontier_flat.expanded_mask.detach().cpu().sum(dim=-1).tolist()
+                )
+                frontier_rows = [
+                    (
+                        tuple(
+                            node_ids[int(index)]
+                            for index, valid in zip(indices, mask)
+                            if valid
+                        ),
+                        int(visited),
+                        int(branches),
+                    )
+                    for indices, mask, visited, branches in zip(
+                        frontier_node_indices_cpu,
+                        frontier_mask_cpu,
+                        frontier_visited_cpu,
+                        frontier_branch_cpu,
+                    )
+                ]
             flat_sequence_rows = [
                 sequence_row
                 for sequence_row, length in enumerate(lengths)

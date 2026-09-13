@@ -63,7 +63,7 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
     )
     protocol = Namespace(benchmark_id="synthetic", version=1)
     cl_config = _continual_cl_config(args, protocol, "full")
-    assert cl_config["epochs_per_task"] == 50
+    assert cl_config["epochs_per_task"] == 60
     assert cl_config["wake"]["retrieval_visit_chunk_size"] == 256
 
     command, _cwd, _env = _baseline_command(
@@ -74,7 +74,8 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
         None,
         False,
     )
-    assert command[command.index("--epochs") + 1] == "20"
+    assert command[command.index("--epochs") + 1] == "60"
+    assert command[command.index("--batch-size") + 1] == "64"
     assert "--learning-rate" not in command
     assert "--d-model" not in command
     assert "--label-smoothing" not in command
@@ -93,8 +94,8 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
         rmtpp_command[rmtpp_command.index("--dataset-label") + 1]
         == "CL-core-v2"
     )
-    assert rmtpp_command[rmtpp_command.index("--epochs") + 1] == "80"
-    assert rmtpp_command[rmtpp_command.index("--batch-size") + 1] == "16"
+    assert rmtpp_command[rmtpp_command.index("--epochs") + 1] == "60"
+    assert rmtpp_command[rmtpp_command.index("--batch-size") + 1] == "64"
     assert rmtpp_command[rmtpp_command.index("--learning-rate") + 1] == "5e-4"
     assert rmtpp_command[rmtpp_command.index("--hidden-size") + 1] == "64"
     assert rmtpp_command[rmtpp_command.index("--mc-samples") + 1] == "32"
@@ -148,6 +149,7 @@ def test_stationary_hm_batch_size_reaches_train_and_evaluate():
     )
 
     assert command[command.index("--validation-batch-size") + 1] == "128"
+    assert command[command.index("--epochs") + 1] == "60"
 
     with patch("core.adapters.run_command") as run:
         evaluate_hm(spec, args, ROOT / "output", {})
@@ -155,7 +157,7 @@ def test_stationary_hm_batch_size_reaches_train_and_evaluate():
     assert evaluate_command[evaluate_command.index("--eval-batch-size") + 1] == "128"
 
 
-def test_thp_defaults_match_the_pre_batch_training_protocol():
+def test_thp_defaults_match_shared_training_protocol():
     module = _load_thp_runner()
     old_argv = sys.argv
     sys.argv = [
@@ -182,44 +184,52 @@ def test_thp_defaults_match_the_pre_batch_training_protocol():
         "d_v": args.d_v,
         "num_layers": args.num_layers,
         "label_smoothing": args.label_smoothing,
+        "selection_metric": args.selection_metric,
     } == {
-        "epochs": 80,
-        "learning_rate": 1e-4,
-        "d_model": 64,
-        "d_rnn": 256,
-        "d_inner": 128,
-        "d_k": 16,
-        "d_v": 16,
-        "num_layers": 4,
-        "label_smoothing": 0.1,
+        "epochs": 60,
+        "learning_rate": 3e-4,
+        "d_model": 128,
+        "d_rnn": 128,
+        "d_inner": 256,
+        "d_k": 32,
+        "d_v": 32,
+        "num_layers": 2,
+        "label_smoothing": 0.01,
+        "selection_metric": "ll",
     }
 
     main_defaults = _main_argument_defaults(ROOT / "Models" / "THP" / "Main.py")
-    assert main_defaults["-epoch"] == 30
-    assert main_defaults["-batch_size"] == 16
-    assert main_defaults["-d_model"] == 64
-    assert main_defaults["-d_rnn"] == 256
-    assert main_defaults["-d_inner_hid"] == 128
-    assert main_defaults["-d_k"] == 16
-    assert main_defaults["-d_v"] == 16
-    assert main_defaults["-n_layers"] == 4
-    assert main_defaults["-lr"] == 1e-4
-    assert main_defaults["-smooth"] == 0.1
+    assert main_defaults["-epoch"] == 60
+    assert main_defaults["-batch_size"] == 64
+    assert main_defaults["-d_model"] == 128
+    assert main_defaults["-d_rnn"] == 128
+    assert main_defaults["-d_inner_hid"] == 256
+    assert main_defaults["-d_k"] == 32
+    assert main_defaults["-d_v"] == 32
+    assert main_defaults["-n_layers"] == 2
+    assert main_defaults["-lr"] == 3e-4
+    assert main_defaults["-smooth"] == 0.01
+    assert main_defaults["-selection_metric"] == "ll"
 
     launcher = (ROOT / "Models" / "THP" / "run.sh").read_text(
         encoding="utf-8"
     )
-    assert 'LEARNING_RATE="${LEARNING_RATE:-0.0001}"' in launcher
-    assert 'D_MODEL="${D_MODEL:-64}"' in launcher
-    assert 'NUM_LAYERS="${NUM_LAYERS:-4}"' in launcher
-    assert 'LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.1}"' in launcher
+    assert 'LEARNING_RATE="${LEARNING_RATE:-0.0003}"' in launcher
+    assert 'D_MODEL="${D_MODEL:-128}"' in launcher
+    assert 'D_RNN="${D_RNN:-128}"' in launcher
+    assert 'D_INNER="${D_INNER:-256}"' in launcher
+    assert 'D_K="${D_K:-32}"' in launcher
+    assert 'D_V="${D_V:-32}"' in launcher
+    assert 'NUM_LAYERS="${NUM_LAYERS:-2}"' in launcher
+    assert 'LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.01}"' in launcher
+    assert 'SELECTION_METRIC="${SELECTION_METRIC:-accuracy}"' not in launcher
     assert "WEIGHT_DECAY" not in launcher
 
 
-def test_rmtpp_defaults_match_the_first_recommendation():
+def test_rmtpp_defaults_match_shared_training_protocol():
     defaults = _main_argument_defaults(ROOT / "Models" / "RMTPP" / "run_experiment.py")
-    assert defaults["--epochs"] == 80
-    assert defaults["--batch-size"] == 16
+    assert defaults["--epochs"] == 60
+    assert defaults["--batch-size"] == 64
     assert defaults["--learning-rate"] == 5e-4
     assert defaults["--hidden-size"] == 64
     assert defaults["--mc-samples"] == 32

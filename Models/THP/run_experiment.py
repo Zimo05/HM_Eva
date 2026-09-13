@@ -52,18 +52,18 @@ def parse_args():
         default=None,
         help="Optional display name for plots/logs when using prepared data.",
     )
-    parser.add_argument("--epochs", type=int, default=80)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--d-model", type=int, default=64)
-    parser.add_argument("--d-rnn", type=int, default=256)
-    parser.add_argument("--d-inner", type=int, default=128)
-    parser.add_argument("--d-k", type=int, default=16)
-    parser.add_argument("--d-v", type=int, default=16)
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--d-model", type=int, default=128)
+    parser.add_argument("--d-rnn", type=int, default=128)
+    parser.add_argument("--d-inner", type=int, default=256)
+    parser.add_argument("--d-k", type=int, default=32)
+    parser.add_argument("--d-v", type=int, default=32)
     parser.add_argument("--num-heads", type=int, default=4)
-    parser.add_argument("--num-layers", type=int, default=4)
+    parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument("--label-smoothing", type=float, default=0.01)
     parser.add_argument(
         "--integral-method", choices=("trapezoid", "mc"), default="trapezoid"
     )

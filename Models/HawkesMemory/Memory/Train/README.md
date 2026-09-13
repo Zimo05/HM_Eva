@@ -148,13 +148,15 @@ sleep:          replay consolidation and structural transaction
 
 `wake_wavefront_batch_size` groups sequences for the stateless prefix
 preparation (Encoder, projection, query, and frontier routing). The public
-`train_wake_batch` then delegates the stateful part to
-`train_wake_sequence` in sequence/event order. Episodic retrieval, Controller
-decisions, working-memory updates, age/usage credit, and physical writes are
-therefore causal: sequence `i + 1` observes the bank after sequence `i` has
-committed its writes. The old bank-entry-snapshot implementation is retained
-only as the private `_train_wake_batch_snapshot` path for experiments that
-explicitly define minibatch-synchronous memory semantics.
+`train_wake_batch` then runs `train_wake_sequence_packed` in sequence order.
+Each transaction resolves one immutable packed bank mirror, applies
+per-event age offsets during the tensor scan, and commits its writes before
+the next sequence starts. Episodic retrieval, Controller decisions,
+working-memory updates, age/usage credit, and physical writes are therefore
+causal: sequence `i + 1` observes the bank after sequence `i` has committed
+its writes. The old bank-entry-snapshot entry point is retained only as the
+private `_train_wake_batch_snapshot` compatibility/reference path for
+experiments that explicitly define minibatch-synchronous memory semantics.
 
 `retrieval_visit_chunk_size` independently bounds the active
 `(event, visited-node)` rows handled by one packed episodic retrieval kernel.

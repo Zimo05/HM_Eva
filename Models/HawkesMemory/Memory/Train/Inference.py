@@ -34,6 +34,26 @@ from Wake.HawkesParams import HawkesParams
 from Wake.SequentialController import Action, Controller
 
 
+DEFAULT_RETRIEVAL_VISIT_CHUNK_SIZE = 64
+
+
+def _retrieval_visit_chunk_size(wake_config: WakeObjectiveConfig) -> int:
+    """Read the packed-retrieval chunk size with legacy-config support.
+
+    Config objects created before the packed retrieval option was added do not
+    have this attribute. Their routing semantics are unchanged, so use the
+    current computational default when such a config is restored.
+    """
+
+    return int(
+        getattr(
+            wake_config,
+            "retrieval_visit_chunk_size",
+            DEFAULT_RETRIEVAL_VISIT_CHUNK_SIZE,
+        )
+    )
+
+
 @dataclass
 class InferenceConfig:
     adapt_working_memory: bool = True
@@ -980,9 +1000,7 @@ class MemoryTreeInference:
                 # results independent of evaluation order and batch schedule.
                 update_search_state=False,
                 materialize_diagnostics=False,
-                visit_chunk_size=(
-                    self.wake_config.retrieval_visit_chunk_size
-                ),
+                visit_chunk_size=_retrieval_visit_chunk_size(self.wake_config),
             )
             frontier_energy = self._batched_event_nll(
                 static_memory_output["frontier_theta"],
@@ -2426,9 +2444,7 @@ class MemoryTreeInference:
                         self.config.allow_memory_writes
                         or self.config.update_memory_usage
                     ),
-                    visit_chunk_size=(
-                        self.wake_config.retrieval_visit_chunk_size
-                    ),
+                    visit_chunk_size=_retrieval_visit_chunk_size(self.wake_config),
                 )
                 pre_action_params = self._controller_effective_parameters(
                     memory_output,
@@ -3079,7 +3095,7 @@ class MemoryTreeInference:
             working_delta=self.tree.working_memory.delta,
             decays=self.hawkes.decays,
             update_memory_state=False,
-            visit_chunk_size=self.wake_config.retrieval_visit_chunk_size,
+            visit_chunk_size=_retrieval_visit_chunk_size(self.wake_config),
         )
         params = memory_output["effective_params"].select(0)
         if event_index == 0:

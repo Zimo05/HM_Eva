@@ -65,8 +65,8 @@ SUPPORTED_DATASETS = (
     "dws_17",
     "dws_20",
 )
-DEFAULT_EPOCHS_BY_MODEL = {"S2P2": 300, "AttNHP": 200}
-DEFAULT_BATCH_SIZE = 256
+DEFAULT_EPOCHS_BY_MODEL = {"S2P2": 60, "AttNHP": 60}
+DEFAULT_BATCH_SIZE = 64
 DEFAULT_EARLY_STOP_PATIENCE = 25
 DEFAULT_THINNING = {
     "num_sample": 1,
@@ -699,13 +699,13 @@ def _plot_metrics(
     test_row: Mapping[str, Any],
     predictions: list[Mapping[str, Any]],
 ) -> list[Path]:
-    """Write diagnostic plots without changing the benchmark metrics contract.
+    """Write THP-style train/validation curves and test diagnostics.
 
-    Validation intentionally collects no thinning predictions, so only the
-    likelihood curve is drawn across epochs. Accuracy/RMSE and the prediction
-    diagnostics are computed from the single final test evaluation. This
-    keeps plots useful without inventing validation values or running an extra
-    prediction pass.
+    The native AttNHP and S2P2 loops already record all three scalar metrics
+    for every train and validation epoch.  Plot those rows as curves, just as
+    the native THP runner does; validation still does not run thinning
+    predictions.  The final test metrics are reported in the curve figure
+    subtitle, so no single-value bar chart is needed.
     """
 
     try:
@@ -749,87 +749,85 @@ def _plot_metrics(
         return epochs, values
 
     colors = {"train": "#2563EB", "valid": "#EA580C"}
-    figure, axis = plt.subplots(figsize=(7.4, 4.8), constrained_layout=True)
-    has_curve = False
-    for split in ("train", "valid"):
-        epochs, values = series(split, "Log-likelihood")
-        if not values:
-            continue
-        has_curve = True
-        axis.plot(
-            epochs,
-            values,
-            color=colors[split],
-            linewidth=2.1,
-            marker="o" if len(values) <= 20 else None,
-            markersize=3.5,
-            label="Train" if split == "train" else "Validation",
-        )
-    if has_curve:
-        best_epoch = finite(test_row.get("Epoch"))
-        if best_epoch is not None and best_epoch > 0:
-            axis.axvline(
-                int(best_epoch),
-                color="#6B7280",
-                linestyle="--",
-                linewidth=1.1,
-                label="Selected epoch",
+    panels = (
+        ("Log-likelihood", "Log-likelihood per event", "likelihood.png"),
+        ("Accuracy", "Accuracy", "accuracy.png"),
+        ("RMSE", "Time RMSE", "rmse.png"),
+    )
+
+    def draw(axis, metric: str, title: str, ylabel: str) -> None:
+        plotted = False
+        for split in ("train", "valid"):
+            epochs, values = series(split, metric)
+            if not values:
+                continue
+            plotted = True
+            axis.plot(
+                epochs,
+                values,
+                color=colors[split],
+                linewidth=2.0,
+                label="Train" if split == "train" else "Validation",
             )
-        axis.legend(frameon=False)
-    else:
-        axis.text(
-            0.5,
-            0.5,
-            "No training epochs recorded\n(evaluate-only run)",
-            ha="center",
-            va="center",
-            transform=axis.transAxes,
-        )
-    axis.set_title(f"{model} on {dataset} - log-likelihood")
-    axis.set_xlabel("Epoch")
-    axis.set_ylabel("Log-likelihood per event")
-    axis.grid(True, alpha=0.3)
-    axis.spines["top"].set_visible(False)
-    axis.spines["right"].set_visible(False)
-    likelihood_path = plot_dir / "likelihood.png"
-    figure.savefig(likelihood_path, dpi=220, bbox_inches="tight")
-    plt.close(figure)
-    plot_paths.append(likelihood_path)
+        if not plotted:
+            axis.text(
+                0.5,
+                0.5,
+                "No training epochs recorded\n(evaluate-only run)",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+            )
+        else:
+            axis.legend(frameon=False)
+        axis.set_title(title)
+        axis.set_xlabel("Epoch")
+        axis.set_ylabel(ylabel)
+        axis.grid(True, alpha=0.3)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        if metric == "Accuracy":
+            axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+
+    for metric, title, filename in panels:
+        figure, axis = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
+        draw(axis, metric, f"{model} on {dataset} - {title}", title)
+        path = plot_dir / filename
+        figure.savefig(path, dpi=220, bbox_inches="tight")
+        plt.close(figure)
+        plot_paths.append(path)
 
     test_loglike = finite(test_row.get("Log-likelihood"))
     test_accuracy = finite(test_row.get("Accuracy"))
     test_rmse = finite(test_row.get("RMSE"))
-    test_metrics = (
-        ("NLL/event", None if test_loglike is None else -test_loglike, "#7C3AED"),
-        ("Accuracy", test_accuracy, "#059669"),
-        ("Time RMSE", test_rmse, "#EA580C"),
-    )
-    figure, axes = plt.subplots(1, 3, figsize=(11.2, 4.2), constrained_layout=True)
-    for axis, (label, value, color) in zip(axes, test_metrics):
-        axis.spines["top"].set_visible(False)
-        axis.spines["right"].set_visible(False)
-        axis.set_title(label)
-        axis.set_xticks([])
-        if value is None:
-            axis.text(0.5, 0.5, "N/A", ha="center", va="center", transform=axis.transAxes)
-            axis.set_ylim(0, 1)
-            continue
-        axis.bar([0], [value], color=color, width=0.55)
-        axis.text(0, value, f"{value:.4f}", ha="center", va="bottom", fontsize=10)
-        if label == "Accuracy":
-            axis.set_ylim(0, 1)
-            axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
-        else:
-            axis.set_ylim(bottom=0)
-        axis.grid(True, axis="y", alpha=0.25)
+    test_details: list[str] = []
+    if test_loglike is not None:
+        test_details.append(f"LL={test_loglike:.4f}")
+    if test_accuracy is not None:
+        test_details.append(f"Accuracy={test_accuracy:.2%}")
+    if test_rmse is not None:
+        test_details.append(f"RMSE={test_rmse:.4f}")
     epoch_value = int(finite(test_row.get("Epoch")) or 0)
+    subtitle = f"Final test from epoch {epoch_value}"
+    if test_details:
+        subtitle += ": " + ", ".join(test_details)
+
+    figure, axes = plt.subplots(1, 3, figsize=(15.5, 4.7), constrained_layout=True)
+    for axis, (metric, title, _filename) in zip(axes, panels):
+        draw(axis, metric, title, title)
     figure.suptitle(
-        f"{model} on {dataset} - final test metrics (epoch {epoch_value})",
+        f"{model} on {dataset}\n{subtitle}",
         fontsize=13,
     )
-    test_metrics_path = plot_dir / "test_metrics.png"
-    figure.savefig(test_metrics_path, dpi=220, bbox_inches="tight")
+    all_metrics_path = plot_dir / "all_metrics.png"
+    figure.savefig(all_metrics_path, dpi=220, bbox_inches="tight")
     plt.close(figure)
+    plot_paths.append(all_metrics_path)
+
+    # Keep the historical artifact name for downstream consumers, but make it
+    # the same line-based figure rather than the former one-value bar chart.
+    test_metrics_path = plot_dir / "test_metrics.png"
+    shutil.copyfile(all_metrics_path, test_metrics_path)
     plot_paths.append(test_metrics_path)
 
     time_points: list[tuple[float, float]] = []

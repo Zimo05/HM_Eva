@@ -35,7 +35,7 @@ from .resources import resource_record
 from .specs import JobSpec
 
 
-DEFAULT_HM_CONTINUAL_EPOCHS = 50
+DEFAULT_HM_CONTINUAL_EPOCHS = 60
 
 
 def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full", script: str = "") -> Path:
@@ -381,17 +381,13 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
     python = args.python_executable or sys.executable
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(__import__("pathlib").Path(__file__).resolve().parents[2]), env.get("PYTHONPATH", "")))
-    if model == "RMTPP":
-        epochs = args.epochs or (1 if args.smoke else 80)
-        batch = args.batch_size or (2 if args.smoke else 16)
-    elif model in {"S2P2", "AttNHP"}:
-        official_epochs = 300 if model == "S2P2" else 200
+    if model in {"RMTPP", "THP", "S2P2", "AttNHP"}:
         epochs = (
-            (1 if args.smoke else official_epochs)
+            (1 if args.smoke else 60)
             if args.epochs is None
             else args.epochs
         )
-        batch = (2 if args.smoke else 256) if args.batch_size is None else args.batch_size
+        batch = (2 if args.smoke else 64) if args.batch_size is None else args.batch_size
     else:
         epochs = args.epochs or (1 if args.smoke else (1 if model == "TPP_LLM" else 20))
         batch = args.batch_size or (2 if args.smoke else 32)

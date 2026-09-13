@@ -409,7 +409,7 @@ def _resolve_cli_values(
             else None
         )
         if args.epochs is None:
-            args.epochs = parser_defaults.get("epochs", 20)
+            args.epochs = parser_defaults.get("epochs", 60)
     if args.cold_start_epochs is None:
         args.cold_start_epochs = (
             _cl_config_value(cl_config, "cold_start_epochs")
@@ -604,7 +604,7 @@ def _parse_args(argv=None):
         action="store_true",
         help="Disable the automatic post-training metrics log and PNG.",
     )
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument(
         "--validation-batch-size", type=int, default=64,
         help=(

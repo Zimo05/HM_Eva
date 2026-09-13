@@ -436,9 +436,10 @@ class MaskedWavefrontWakeTests(unittest.TestCase):
             [result["event_count"] for result in results],
             [3, 2],
         )
-        # Prefix/frontier preparation is batched, but the stateful tree call
-        # follows strict sequence/event order.
-        self.assertEqual(len(tree_calls), 5)
+        # Prefix/frontier preparation and the Tree forward are packed per
+        # sequence; only the causal working-memory/controller scan remains
+        # time ordered inside each transaction.
+        self.assertEqual(len(tree_calls), 2)
         self.assertEqual(
             [
                 sum(result["action_counts"].values())

@@ -141,7 +141,7 @@ def stationary_command(
             rank = "8" if args.rank == "D" else args.rank
             command += ["--residual-init-rank", str(rank)]
         command += [
-            "--epochs", str(epochs or 20),
+            "--epochs", str(epochs or 60),
             "--cold-start-epochs", str(1 if args.smoke else 5),
             "--validation-batch-size", str(eval_batch),
         ]

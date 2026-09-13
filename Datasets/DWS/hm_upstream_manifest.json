@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "source": "HawkesMemory_wfy/Memory/AttentionEncoderAdapter.py",
+  "variants": {
+    "8": {
+      "h_tree": "../../../HawkesMemory_wfy/Data/tree_8/h_tree_8.pt",
+      "node_dim": 128,
+      "node_count": 15,
+      "sha256": "697dede116dc94a3c9d86610f378cb9220369ac0d1c2008cb187b26515b3c159",
+      "sequence_summary": "../../../HawkesMemory_wfy/Data/tree_8/sequence_summary.csv",
+      "sequence_summary_sha256": "8f0fbcd7ec0f45ce9d8af22721064d7d42bfd83bb5e71745a5749641e4ebce1f"
+    },
+    "13": {
+      "h_tree": "../../../HawkesMemory_wfy/Data/tree_13/h_tree_13.pt",
+      "node_dim": 128,
+      "node_count": 25,
+      "sha256": "38609609a08dbe20238392aa870811e266b5e2b122d70029979e2e393571d6f1",
+      "sequence_summary": "../../../HawkesMemory_wfy/Data/tree_13/sequence_summary.csv",
+      "sequence_summary_sha256": "c7ce35765df10391ebb01f2471515b78676b1a6d626c8788e7ab1a3f1b903f4d"
+    },
+    "20": {
+      "h_tree": "../../../HawkesMemory_wfy/Data/tree_20/h_tree_one_circle.pt",
+      "node_dim": 128,
+      "node_count": 39,
+      "sha256": "cc569f5f9a14c3851f3a101b6eb09e323b98bc6225382cf922a62119402816ce",
+      "sequence_summary": "../../../HawkesMemory_wfy/Data/tree_20/sequence_summary.csv",
+      "sequence_summary_sha256": "65f8d7cd777884578e4f91cea00b554fd1c0d97a68041caff432caf4c81d628b"
+    }
+  }
+}

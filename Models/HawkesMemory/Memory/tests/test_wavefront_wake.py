@@ -419,6 +419,74 @@ class MaskedWavefrontWakeTests(unittest.TestCase):
             actual["memory_assignment_counts"],
         )
 
+    def test_packed_controller_context_matches_scalar_zero_contract(self):
+        """Packed action selection must keep scalar Controller defaults."""
+        base = self._trainer(seed=420)
+        with torch.no_grad():
+            base.controller.context_gate.weight.copy_(torch.tensor([
+                [0.0, 0.0, 0.0, 2.0, 0.0],
+                [0.0, 0.0, 0.0, -2.0, 0.0],
+                [0.0, 0.0, 0.0, 1.5, 2.0],
+                [0.0, 0.0, 0.0, -1.0, -1.5],
+            ]))
+        base.controller.exploration_rate = 0.0
+        streaming = copy.deepcopy(base)
+        packed = copy.deepcopy(base)
+        sequence_stream = self._cached(
+            streaming,
+            [0.1, 0.4, 0.9, 1.4],
+            [0, 1, 0, 1],
+        )
+        sequence_packed = self._cached(
+            packed,
+            [0.1, 0.4, 0.9, 1.4],
+            [0, 1, 0, 1],
+        )
+
+        torch.manual_seed(9420)
+        expected = self._run_prepared_serial(
+            streaming,
+            [sequence_stream],
+        )[0]
+        torch.manual_seed(9420)
+        actual = self._run_prepared_batch(
+            packed,
+            [sequence_packed],
+        )[0]
+
+        self.assertEqual(expected["actions"], actual["actions"])
+        for key in (
+            "accepted_write_count",
+            "append_count",
+            "refresh_count",
+        ):
+            self.assertEqual(expected[key], actual[key])
+        for action, expected_probability in expected[
+            "mean_action_probabilities"
+        ].items():
+            self.assertAlmostEqual(
+                expected_probability,
+                actual["mean_action_probabilities"][action],
+                places=6,
+            )
+        for field in (
+            "surprise_mean",
+            "surprise_variance",
+            "surprise_observations",
+        ):
+            expected_value = getattr(streaming.controller, field)
+            actual_value = getattr(packed.controller, field)
+            if expected_value.is_floating_point():
+                self.assertTrue(torch.allclose(
+                    expected_value,
+                    actual_value,
+                    atol=1e-6,
+                    rtol=1e-6,
+                ))
+            else:
+                self.assertTrue(torch.equal(expected_value, actual_value))
+        self._assert_memory_state_equal(streaming, packed)
+
     def test_variable_length_wake_preserves_sequence_event_order(self):
         trainer = self._trainer(seed=421)
         sequences = [

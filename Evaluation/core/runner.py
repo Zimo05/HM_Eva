@@ -11,7 +11,16 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from .adapters import copy_checkpoint_contract, copy_prediction_contract, evaluate_hm, normalize_native_metrics, resolved_device, run_command, stationary_command
+from .adapters import (
+    copy_checkpoint_contract,
+    copy_prediction_contract,
+    evaluate_hm,
+    hm_upstream_input_paths,
+    normalize_native_metrics,
+    resolved_device,
+    run_command,
+    stationary_command,
+)
 from .cl_protocol import CLProtocol
 from .data import (
     continual_root,
@@ -44,6 +53,8 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
     prepared = target / "prepared" if dataset == "dws" or model == "HM" else None
     command, cwd, env = stationary_command(spec, args, target, prepared=prepared)
     inputs = dataset_inputs(dataset, getattr(args, "variant", None))
+    if model == "HM" and dataset == "dws":
+        inputs.extend(hm_upstream_input_paths(str(args.variant)))
     if args.checkpoint is not None:
         inputs.append(args.checkpoint)
     manifest = build_manifest(spec, args, inputs, command)
@@ -173,6 +184,28 @@ def _continual_hm_command(
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(PROJECT_ROOT), str(MODELS_ROOT / "HawkesMemory"), str(memory), env.get("PYTHONPATH", "")))
     return command, memory, env
+
+
+def _hm_continual_resume_checkpoint(
+    target: Path,
+    protocol: CLProtocol,
+    task_start: int,
+    explicit: Path | None,
+) -> Path | None:
+    """Resolve the state checkpoint used to enter the first requested task.
+
+    HM checkpoints have two deliberately different roles: ``best`` is the
+    validation-selected artifact for evaluation, while ``last`` is the
+    end-of-task state that must carry the continual memory trajectory into the
+    next task.
+    """
+    if explicit is not None:
+        return explicit
+    start_index = protocol.task_ids.index(task_start)
+    if start_index == 0:
+        return None
+    previous_task = protocol.task_ids[start_index - 1]
+    return target / "checkpoint" / f"task_{previous_task:02d}_last.pt"
 
 
 def _hm_state_bytes(checkpoint: Path) -> dict[str, int]:
@@ -1171,11 +1204,12 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
         )
         (target / "topology_events.jsonl").touch(exist_ok=True)
         if model == "HM":
-            previous = args.checkpoint
-            start_index = protocol.task_ids.index(task_start)
-            if previous is None and start_index > 0:
-                previous_task = protocol.task_ids[start_index - 1]
-                previous = target / "checkpoint" / f"task_{previous_task:02d}_best.pt"
+            previous = _hm_continual_resume_checkpoint(
+                target,
+                protocol,
+                task_start,
+                args.checkpoint,
+            )
             if previous is not None and not previous.exists():
                 raise FileNotFoundError(f"resume checkpoint required for task-start: {previous}")
             config_path = target / "cl_config.json"
@@ -1273,7 +1307,9 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
                     ),
                 }
                 write_json(stage_manifest_path, stage_manifest)
-                previous = best_checkpoint
+                # ``last`` is the state-propagation checkpoint.  ``best`` is
+                # kept exclusively for validation selection and evaluation.
+                previous = last_checkpoint
                 resource_manifest["stages"][str(task)] = {
                     **_hm_state_bytes(best_checkpoint),
                     "checkpoint": str(best_checkpoint.resolve()),

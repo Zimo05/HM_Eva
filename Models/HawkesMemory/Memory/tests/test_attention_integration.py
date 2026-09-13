@@ -53,6 +53,38 @@ class HTreeSemanticInitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             synchronize_tree_topology_from_node_ids(tree, ("root", "l"))
 
+    def test_checked_in_dws_h_tree_reconstructs_matching_leaf_count(self):
+        repository = Path(__file__).resolve().parents[4]
+        h_tree_path = repository / "Datasets" / "DWS" / "tree_13" / "h_tree_13.pt"
+        node_ids, h_tree = load_h_tree(h_tree_path)
+        tree = HawkesTree(
+            3,
+            int(h_tree.size(1)),
+            2,
+            1,
+            init_depth=0,
+            memory_key_dim=3,
+        )
+
+        mapped = initialize_tree_from_h_tree_file(
+            tree,
+            h_tree_path,
+            strict_coverage=True,
+            synchronize_topology=True,
+        )
+        target = {attention_id_to_memory_id(node_id) for node_id in node_ids}
+        internal = {
+            node_id
+            for node_id in target
+            if f"{node_id}_L" in target and f"{node_id}_R" in target
+        }
+        self.assertEqual(set(tree.leaf_ids), target - internal)
+        self.assertEqual(len(tree.node_emb), len(node_ids))
+        self.assertEqual(set(mapped), target)
+        for index, node_id in enumerate(node_ids):
+            memory_id = attention_id_to_memory_id(node_id)
+            self.assertTrue(torch.equal(tree.node_emb[memory_id], h_tree[index]))
+
     def test_initialize_copies_matching_node_embeddings(self):
         torch.manual_seed(0)
         node_dim = 4

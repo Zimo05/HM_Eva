@@ -158,7 +158,15 @@ python evaluate_dws_TPP_LLM.py --variant 13 --seed 42 --device cuda:0
 
 正式种子为 `42, 43, 44, 45, 46`。每位同事只需将命令中的 seed 换成自己领取的值。
 
-DWS 的 `cluster` 和 ground-truth Hawkes 参数只允许用于 test 后诊断，不能进入训练 adapter。HM 使用 root-only、无 oracle 初始化。
+DWS 的 `cluster` 和 ground-truth Hawkes 参数只允许用于 test 后诊断，不能进入训练 adapter。stationary HM 按
+`Datasets/DWS/hm_upstream_manifest.json` 选择对应的上游 H-tree，并以 `--tree-init-depth 0`
+重建完整拓扑，同时使用 manifest 中的 `sequence_summary.csv` 做 residual signature
+初始化（scale `0.08`、rank `4`、grad clip `0`）。评测命令同时显式固定 upstream HM
+协议：`z_dim/node_dim/memory_key_dim=50/128/64`、alignment `5` epochs、frontier
+`2..7`、routing temperature `1.10`、posterior/credible/owner confidence
+`0.85/0.30/0.50`、semantic blend `0`、Light replay budget `128`。这是明确记录的
+upstream-initialized 评测条件，不是 root-only 初始化。smoke 模式只验证 H-tree 加载，
+因为截断数据不能覆盖全部叶子，故不运行 alignment/residual signature 初始化。
 
 ### 5.3 DWS-8/13/20：HM scaling
 
@@ -259,7 +267,7 @@ python Datasets/CL/generate_continual_hawkes.py --benchmark unified --output Dat
 
 ### 6.2 每个阶段做什么
 
-每个 continual 脚本会在当前 task 学习前做 pre-update，训练并保存独立的 `task_XX_last.pt` 与 `task_XX_best.pt`，随后由 `best` checkpoint 做 post-update，并在所有 frozen anchors 上评估。`train.csv` 只用于更新，`val.csv` 只用于 checkpoint selection，`test.csv` 只用于最终报告；由此构建 checkpoint × law 矩阵。
+每个 continual 脚本会在当前 task 学习前做 pre-update，训练并保存独立的 `task_XX_last.pt` 与 `task_XX_best.pt`。当前 task 的 validation selection 和 evaluation 使用 `best`；下一个 task 的 state propagation 使用 `last`，因此 HM 的 memory/topology/optimizer/sleep 状态不会因 validation best 选择而回滚。`train.csv` 只用于更新，`val.csv` 只用于 checkpoint selection，`test.csv` 只用于最终报告；由此构建 checkpoint × law 矩阵。
 
 主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。HM continual 默认每个 task 训练 60 epochs；仍可通过 `--epochs` 显式覆盖，smoke 模式仍固定为 1 epoch。
 
@@ -318,10 +326,10 @@ S2P2 和 AttNHP 的 replay 入口分别为 `evaluate_continual_S2P2_replay.py` �
 
 ### 6.7 从中间 checkpoint 继续
 
-如果 task 0–4 已在另一台机器完成，可以把 `task_04_best.pt` 复制过来，再将 task 5–9 作为独立结果包运行：
+如果 task 0–4 已在另一台机器完成，可以把 `task_04_last.pt` 复制过来，再将 task 5–9 作为独立结果包运行：
 
 ```bash
-python evaluate_continual_HM.py --seed 7 --task-start 5 --task-end 9 --checkpoint D:/shared/task_04_best.pt --run-id tasks_05_09 --device cuda:0
+python evaluate_continual_HM.py --seed 7 --task-start 5 --task-end 9 --checkpoint D:/shared/task_04_last.pt --run-id tasks_05_09 --device cuda:0
 ```
 
 RMTPP、THP、S2P2、AttNHP 和 TPP-LLM continual 入口同样支持这种方式。请保证 checkpoint 的模型、策略、seed 和超参数与前半段一致。

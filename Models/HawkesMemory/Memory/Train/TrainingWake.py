@@ -948,7 +948,11 @@ class TrainingWakeMixin:
             owner_confidence=owner_confidence,
             retrieval_similarity=max_similarity,
             retrieval_residual_norm=retrieval_residual_norm,
-            working_memory_norm=working_delta.norm(dim=-1).detach(),
+            # Match the production scalar ``_decide_action`` contract.  These
+            # context features were not part of the original Controller
+            # action input; feeding the evolving working-memory norm here
+            # would make packed Wake a different algorithm.
+            working_memory_norm=pre_action_nll.new_zeros(pre_action_nll.shape),
             pending_write_ratio=pending_write_ratio,
         )
         action_probabilities = controller_output["probabilities"]
@@ -1020,7 +1024,11 @@ class TrainingWakeMixin:
                 owner_confidence=owner_confidence,
                 retrieval_similarity=max_similarity,
                 retrieval_residual_norm=retrieval_residual_norm,
-                working_memory_norm=working_delta.norm(dim=-1).detach(),
+                # Keep packed action selection bit-for-bit aligned with the
+                # scalar ``_decide_action`` path.  Working-memory norm is
+                # still used for the recurrent update, but not as a new
+                # Controller feature.
+                working_memory_norm=pre_action_nll.new_zeros(pre_action_nll.shape),
                 pending_write_ratio=pending_write_ratio,
             )
         )
@@ -1752,15 +1760,13 @@ class TrainingWakeMixin:
                 # the final Wake objective below uses only the gated result.
                 semantic_base = semantic_base_flat.index_select(0, flat_rows)
                 episodic_base = episodic_base_flat.index_select(0, flat_rows)
-                pending_write_ratio = semantic_base.new_full(
-                    (active.numel(),),
-                    float(event_index)
-                    / max(
-                        self.tree.frontier_routing.config
-                        .max_writes_per_sequence,
-                        1,
-                    ),
-                ).clamp_max(1.0)
+                # ``_decide_action`` historically supplies zero for both
+                # context features. Preserve that scalar contract in packed
+                # production Wake; the working-memory norm remains relevant
+                # to the update itself, not to action selection.
+                controller_context_zeros = working_delta.new_zeros(
+                    active.numel()
+                )
                 if surprise_state is None:
                     (
                         pre_action_theta,
@@ -1783,7 +1789,7 @@ class TrainingWakeMixin:
                             0,
                             flat_rows,
                         ),
-                        pending_write_ratio,
+                        controller_context_zeros,
                     )
                 else:
                     (
@@ -1808,7 +1814,7 @@ class TrainingWakeMixin:
                             0,
                             flat_rows,
                         ),
-                        pending_write_ratio,
+                        controller_context_zeros,
                         surprise_state,
                     )
                 action_index = action_probabilities.detach().argmax(dim=-1)
@@ -1890,8 +1896,8 @@ class TrainingWakeMixin:
                                 0,
                                 flat_rows,
                             ),
-                            working_delta.norm(dim=-1),
-                            pending_write_ratio,
+                            controller_context_zeros,
+                            controller_context_zeros,
                         ],
                         dim=-1,
                     ).detach(),

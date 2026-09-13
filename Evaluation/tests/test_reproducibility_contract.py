@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
+import os
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -16,9 +18,17 @@ for import_root in (ROOT, EVALUATION_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
-from core.adapters import evaluate_hm, stationary_command
+from core.adapters import (
+    evaluate_hm,
+    resolve_hm_upstream_h_tree,
+    stationary_command,
+)
 from core.manifest import compatible
-from core.runner import _baseline_command, _continual_cl_config
+from core.runner import (
+    _baseline_command,
+    _continual_cl_config,
+    _hm_continual_resume_checkpoint,
+)
 from core.specs import JobSpec
 
 
@@ -107,6 +117,32 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
     assert rmtpp_command[rmtpp_command.index("--lr-factor") + 1] == "0.3"
 
 
+def test_hm_continual_propagates_last_state_not_validation_best():
+    protocol = Namespace(task_ids=(0, 1, 2))
+    target = ROOT / "tmp-hm-continual"
+
+    assert _hm_continual_resume_checkpoint(
+        target,
+        protocol,
+        0,
+        None,
+    ) is None
+    assert _hm_continual_resume_checkpoint(
+        target,
+        protocol,
+        2,
+        None,
+    ) == target / "checkpoint" / "task_01_last.pt"
+
+    explicit = target / "external_state.pt"
+    assert _hm_continual_resume_checkpoint(
+        target,
+        protocol,
+        2,
+        explicit,
+    ) == explicit
+
+
 def test_continual_manifest_rejects_results_without_learner_protocol_binding():
     keys = (
         "job_key",
@@ -155,6 +191,88 @@ def test_stationary_hm_batch_size_reaches_train_and_evaluate():
         evaluate_hm(spec, args, ROOT / "output", {})
     evaluate_command = run.call_args.args[0]
     assert evaluate_command[evaluate_command.index("--eval-batch-size") + 1] == "128"
+
+
+def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
+    args = Namespace(
+        epochs=None,
+        smoke=False,
+        seed=27,
+        batch_size=None,
+        eval_batch_size=64,
+        device="cpu",
+        python_executable=sys.executable,
+        variant="13",
+    )
+    spec = JobSpec(dataset="dws", model="HM")
+    command, _cwd, _env = stationary_command(
+        spec, args, ROOT / "prepared", prepared=ROOT / "prepared"
+    )
+
+    assert command[command.index("--tree-init-depth") + 1] == "0"
+    assert command[command.index("--z-dim") + 1] == "50"
+    assert command[command.index("--node-dim") + 1] == "128"
+    assert command[command.index("--memory-key-dim") + 1] == "64"
+    expected_stationary_hm = {
+        "--frontier-min-experts": "2",
+        "--frontier-budget": "7",
+        "--frontier-routing-temperature": "1.10",
+        "--frontier-exploration": "0",
+        "--frontier-confidence-weight": "0.60",
+        "--frontier-compute-cost": "0.005",
+        "--frontier-posterior-temperature": "0.85",
+        "--frontier-credible-mass": "0.30",
+        "--frontier-owner-confidence": "0.50",
+        "--max-writes-per-sequence": "8",
+        "--semantic-blend": "0",
+        "--leaf-symmetry-scale": "0",
+        "--light-replay-budget": "128",
+        "--alignment-epochs": "5",
+        "--alignment-batch-size": "16",
+        "--alignment-lr": "0.001",
+        "--alignment-weight-decay": "0.00001",
+        "--alignment-temperature": "1.0",
+        "--alignment-grad-clip": "5.0",
+    }
+    for option, expected in expected_stationary_hm.items():
+        assert command[command.index(option) + 1] == expected
+    h_tree = Path(command[command.index("--h-tree") + 1])
+    original_root = (ROOT / "Datasets" / "DWS" / "../../../HawkesMemory_wfy").resolve()
+    assert h_tree == (original_root / "Data" / "tree_13" / "h_tree_13.pt").resolve()
+    sequence_summary = Path(
+        command[command.index("--sequence-summary") + 1]
+    )
+    assert sequence_summary == (
+        original_root / "Data" / "tree_13" / "sequence_summary.csv"
+    ).resolve()
+    assert command[command.index("--residual-init-scale") + 1] == "0.08"
+    assert command[command.index("--residual-init-rank") + 1] == "4"
+    assert command[command.index("--residual-init-grad-clip") + 1] == "0"
+    assert command[command.index("--leaf-symmetry-scale") + 1] == "0"
+
+    smoke_args = Namespace(**{**vars(args), "smoke": True})
+    smoke_command, _cwd, _env = stationary_command(
+        spec, smoke_args, ROOT / "prepared", prepared=ROOT / "prepared"
+    )
+    assert "--h-tree" in smoke_command
+    assert "--sequence-summary" not in smoke_command
+
+    resolved, metadata = resolve_hm_upstream_h_tree("20")
+    assert resolved == (original_root / "Data" / "tree_20" / "h_tree_one_circle.pt").resolve()
+    assert metadata["node_dim"] == 128
+
+
+def test_hawkes_backbone_matches_original_checkout_when_available():
+    original_root = Path(
+        os.environ.get("HM_ORIGINAL_ROOT", "/Volumes/shenzm/Shuang_RA/HawkesMemory_wfy")
+    )
+    original = original_root / "Memory" / "HawkesBackbone.py"
+    if not original.is_file():
+        return
+    current = ROOT / "Models" / "HawkesMemory" / "Memory" / "HawkesBackbone.py"
+    assert hashlib.sha256(current.read_bytes()).hexdigest() == hashlib.sha256(
+        original.read_bytes()
+    ).hexdigest()
 
 
 def test_thp_defaults_match_shared_training_protocol():

@@ -7,11 +7,12 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .io import write_json
-from .paths import MODELS_ROOT, PROJECT_ROOT
+from .io import sha256, write_json
+from .paths import DATASETS_ROOT, MODELS_ROOT, PROJECT_ROOT
 
 
 def python_for(args) -> str:
@@ -38,6 +39,184 @@ def resolved_device(device: str) -> str:
         return "cuda:0" if torch.cuda.is_available() else "cpu"
     except ImportError:
         return "cpu"
+
+
+HM_UPSTREAM_MANIFEST_ENV = "HM_UPSTREAM_MANIFEST"
+HM_UPSTREAM_MANIFEST_NAME = "hm_upstream_manifest.json"
+
+
+def hm_upstream_manifest_path() -> Path:
+    """Return the manifest describing the upstream H-tree used by HM eval."""
+
+    override = os.environ.get(HM_UPSTREAM_MANIFEST_ENV)
+    if override:
+        return Path(override).expanduser().resolve()
+    return (DATASETS_ROOT / "DWS" / HM_UPSTREAM_MANIFEST_NAME).resolve()
+
+
+def resolve_hm_upstream_h_tree(
+    variant: str | None,
+    *,
+    manifest_path: Path | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve and validate the variant-specific upstream H-tree artifact.
+
+    The manifest is deliberately the source of truth for stationary HM
+    evaluation.  This keeps artifact selection reproducible and avoids
+    silently falling back to a root-only tree when a variant is misconfigured.
+    """
+
+    if variant is None:
+        raise ValueError("DWS HM evaluation requires a variant for H-tree resolution")
+
+    manifest = (manifest_path or hm_upstream_manifest_path()).expanduser().resolve()
+    if not manifest.is_file():
+        raise FileNotFoundError(
+            f"HM upstream manifest not found: {manifest}; "
+            f"set {HM_UPSTREAM_MANIFEST_ENV} to an explicit manifest if needed"
+        )
+
+    with manifest.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"HM upstream manifest must be a JSON object: {manifest}")
+
+    variants = payload.get("variants")
+    if not isinstance(variants, Mapping):
+        raise ValueError(f"HM upstream manifest has no 'variants' mapping: {manifest}")
+
+    variant_key = str(variant)
+    entry = variants.get(variant_key)
+    if entry is None:
+        entry = variants.get(f"variant_{variant_key}")
+    if entry is None:
+        available = ", ".join(sorted(str(key) for key in variants))
+        raise KeyError(
+            f"HM upstream manifest has no entry for DWS variant {variant_key!r} "
+            f"(available: {available})"
+        )
+
+    if isinstance(entry, str):
+        artifact_name = entry
+        entry_metadata: dict[str, Any] = {}
+    elif isinstance(entry, Mapping):
+        entry_metadata = dict(entry)
+        artifact_name = (
+            entry.get("h_tree")
+            or entry.get("h_tree_path")
+            or entry.get("path")
+        )
+    else:
+        raise ValueError(
+            f"HM upstream manifest entry for variant {variant_key!r} must be a path or object"
+        )
+
+    if not isinstance(artifact_name, str) or not artifact_name:
+        raise ValueError(
+            f"HM upstream manifest entry for variant {variant_key!r} has no H-tree path"
+        )
+
+    artifact = Path(artifact_name).expanduser()
+    if not artifact.is_absolute():
+        artifact = manifest.parent / artifact
+    artifact = artifact.resolve()
+    if not artifact.is_file():
+        raise FileNotFoundError(
+            f"HM upstream H-tree for DWS variant {variant_key!r} not found: {artifact}"
+        )
+
+    expected_hash = entry_metadata.get("sha256") or entry_metadata.get("artifact_sha256")
+    if expected_hash is not None:
+        if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+            raise ValueError(
+                f"invalid sha256 for DWS variant {variant_key!r} in {manifest}"
+            )
+        actual_hash = sha256(artifact)
+        if actual_hash != expected_hash:
+            raise ValueError(
+                f"H-tree sha256 mismatch for DWS variant {variant_key!r}: "
+                f"expected {expected_hash}, got {actual_hash}"
+            )
+
+    summary_name = (
+        entry_metadata.get("sequence_summary")
+        or entry_metadata.get("sequence_summary_path")
+        or entry_metadata.get("summary_csv")
+    )
+    sequence_summary: Path | None = None
+    if summary_name is not None:
+        if not isinstance(summary_name, str) or not summary_name:
+            raise ValueError(
+                f"invalid sequence_summary for DWS variant {variant_key!r}"
+            )
+        sequence_summary = Path(summary_name).expanduser()
+        if not sequence_summary.is_absolute():
+            sequence_summary = manifest.parent / sequence_summary
+        sequence_summary = sequence_summary.resolve()
+        if not sequence_summary.is_file():
+            raise FileNotFoundError(
+                f"H-tree sequence summary for DWS variant {variant_key!r} "
+                f"not found: {sequence_summary}"
+            )
+        expected_summary_hash = entry_metadata.get(
+            "sequence_summary_sha256",
+            entry_metadata.get("summary_sha256"),
+        )
+        if expected_summary_hash is not None:
+            if (
+                not isinstance(expected_summary_hash, str)
+                or len(expected_summary_hash) != 64
+            ):
+                raise ValueError(
+                    f"invalid sequence_summary sha256 for DWS variant "
+                    f"{variant_key!r} in {manifest}"
+                )
+            actual_summary_hash = sha256(sequence_summary)
+            if actual_summary_hash != expected_summary_hash:
+                raise ValueError(
+                    f"sequence_summary sha256 mismatch for DWS variant "
+                    f"{variant_key!r}: expected {expected_summary_hash}, "
+                    f"got {actual_summary_hash}"
+                )
+
+    node_dim_value = entry_metadata.get(
+        "node_dim",
+        entry_metadata.get(
+            "d_model",
+            payload.get("node_dim", payload.get("d_model", 128)),
+        ),
+    )
+    try:
+        node_dim = int(node_dim_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"invalid node_dim for DWS variant {variant_key!r}: {node_dim_value!r}"
+        ) from exc
+    if node_dim <= 0:
+        raise ValueError(
+            f"node_dim for DWS variant {variant_key!r} must be positive: {node_dim}"
+        )
+
+    metadata = {
+        "manifest_path": str(manifest),
+        "variant": variant_key,
+        "node_dim": node_dim,
+        "entry": entry_metadata,
+    }
+    if sequence_summary is not None:
+        metadata["sequence_summary_path"] = str(sequence_summary)
+    return artifact, metadata
+
+
+def hm_upstream_input_paths(variant: str | None) -> list[Path]:
+    """Return manifest and artifact paths for result-manifest provenance."""
+
+    artifact, metadata = resolve_hm_upstream_h_tree(variant)
+    inputs = [Path(metadata["manifest_path"]), artifact]
+    sequence_summary = metadata.get("sequence_summary_path")
+    if sequence_summary is not None:
+        inputs.append(Path(sequence_summary))
+    return inputs
 
 
 def stationary_command(
@@ -119,6 +298,20 @@ def stationary_command(
         eval_batch = int(getattr(args, "eval_batch_size", 64))
         if eval_batch <= 0:
             raise ValueError("eval_batch_size must be positive")
+        upstream_h_tree: Path | None = None
+        upstream_sequence_summary: Path | None = None
+        upstream_node_dim: int | None = None
+        if spec.dataset == "dws":
+            upstream_h_tree, upstream_metadata = resolve_hm_upstream_h_tree(
+                str(args.variant)
+            )
+            upstream_node_dim = int(upstream_metadata["node_dim"])
+            summary_path = upstream_metadata.get("sequence_summary_path")
+            if summary_path is None:
+                raise ValueError(
+                    "DWS HM upstream manifest must provide sequence_summary"
+                )
+            upstream_sequence_summary = Path(summary_path)
         # Dataset preparation belongs to the runner, after the result manifest
         # has been accepted.  Keeping command construction side-effect free is
         # important for --dry-run and for clean failure reporting.
@@ -127,7 +320,101 @@ def stationary_command(
         memory = MODELS_ROOT / "HawkesMemory" / "Memory"
         checkpoint = result_dir / "checkpoint" / "model.pt"
         best = result_dir / "checkpoint" / "best.pt"
-        command = [python, "-m", "Train.Train", "--data-path", str(data_path), "--split-manifest", str(split_manifest), "--split", "train", "--tree-init-depth", "0", "--checkpoint", str(checkpoint), "--best-checkpoint", str(best), "--seed", str(args.seed), "--device", device]
+        command = [
+            python,
+            "-m",
+            "Train.Train",
+            "--data-path",
+            str(data_path),
+            "--split-manifest",
+            str(split_manifest),
+            "--split",
+            "train",
+            "--tree-init-depth",
+            "0",
+        ]
+        if upstream_h_tree is not None:
+            command += [
+                "--h-tree",
+                str(upstream_h_tree),
+                # Keep the stationary DWS HM architecture identical to the
+                # upstream run_HM.sh contract.  In particular, do not let
+                # TrainingCLI's generic node_dim=64 default silently create
+                # a different checkpoint from the 128-dimensional H-tree.
+                "--z-dim",
+                "50",
+                "--node-dim",
+                str(upstream_node_dim),
+                "--memory-key-dim",
+                "64",
+                # Restore the complete standalone frontier configuration,
+                # not just its maximum width.  These values determine both
+                # the local router and posterior/owner selection semantics.
+                "--frontier-min-experts",
+                "2",
+                "--frontier-budget",
+                "7",
+                "--frontier-routing-temperature",
+                "1.10",
+                "--frontier-exploration",
+                "0",
+                "--frontier-confidence-weight",
+                "0.60",
+                "--frontier-compute-cost",
+                "0.005",
+                "--frontier-posterior-temperature",
+                "0.85",
+                "--frontier-credible-mass",
+                "0.30",
+                "--frontier-owner-confidence",
+                "0.50",
+                "--max-writes-per-sequence",
+                "8",
+                "--semantic-blend",
+                "0",
+                "--leaf-symmetry-scale",
+                "0",
+                "--light-replay-budget",
+                "128",
+            ]
+            if not getattr(args, "smoke", False):
+                # Alignment and residual signatures require the complete
+                # training population so every H-tree leaf has non-zero
+                # mass.  A smoke run intentionally truncates sequences and
+                # therefore exercises H-tree loading without pretending to
+                # run either full-data initializer.
+                command += [
+                    "--sequence-summary",
+                    str(upstream_sequence_summary),
+                    "--residual-init-scale",
+                    "0.08",
+                    "--residual-init-rank",
+                    "4",
+                    "--residual-init-grad-clip",
+                    "0",
+                    "--alignment-epochs",
+                    "5",
+                    "--alignment-batch-size",
+                    "16",
+                    "--alignment-lr",
+                    "0.001",
+                    "--alignment-weight-decay",
+                    "0.00001",
+                    "--alignment-temperature",
+                    "1.0",
+                    "--alignment-grad-clip",
+                    "5.0",
+                ]
+        command += [
+            "--checkpoint",
+            str(checkpoint),
+            "--best-checkpoint",
+            str(best),
+            "--seed",
+            str(args.seed),
+            "--device",
+            device,
+        ]
         if spec.condition in {
             "no_working",
             "no_episodic",

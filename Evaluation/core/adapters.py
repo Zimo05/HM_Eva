@@ -224,6 +224,7 @@ def stationary_command(
     args,
     result_dir: Path,
     prepared: Path | None = None,
+    hm_upstream: Any | None = None,
 ) -> tuple[list[str], Path, dict[str, str]]:
     native = result_dir / "native"
     python = python_for(args)
@@ -301,7 +302,37 @@ def stationary_command(
         upstream_h_tree: Path | None = None
         train_sequence_summary: Path | None = None
         upstream_node_dim: int | None = None
-        if spec.dataset == "dws":
+        if hm_upstream is not None:
+            def upstream_value(name: str, default: Any = None) -> Any:
+                if isinstance(hm_upstream, Mapping):
+                    return hm_upstream.get(name, default)
+                return getattr(hm_upstream, name, default)
+
+            upstream_h_tree_value = upstream_value("h_tree")
+            train_sequence_summary_value = upstream_value("sequence_summary")
+            if upstream_h_tree_value is None or train_sequence_summary_value is None:
+                raise ValueError(
+                    "HM upstream descriptor must provide h_tree and sequence_summary"
+                )
+            upstream_h_tree = Path(upstream_h_tree_value).expanduser().resolve()
+            train_sequence_summary = (
+                Path(train_sequence_summary_value).expanduser().resolve()
+            )
+            upstream_node_dim = int(upstream_value("node_dim", 128))
+        elif spec.dataset == "retweet":
+            # The runner replaces this deterministic descriptor with the
+            # completed train-only bootstrap.  Keeping the fallback here
+            # makes command construction useful for dry-runs and unit tests
+            # without ever falling back to a root-only Retweet HM model.
+            from .hm_bootstrap import expected_retweet_hm_upstream
+
+            descriptor = expected_retweet_hm_upstream(
+                prepared or result_dir / "prepared"
+            )
+            upstream_h_tree = descriptor.h_tree
+            train_sequence_summary = descriptor.sequence_summary
+            upstream_node_dim = descriptor.node_dim
+        elif spec.dataset == "dws":
             upstream_h_tree, upstream_metadata = resolve_hm_upstream_h_tree(
                 str(args.variant)
             )
@@ -315,9 +346,10 @@ def stationary_command(
                 (prepared or result_dir / "prepared")
                 / "sequence_summary_train.csv"
             )
-        # Dataset preparation belongs to the runner, after the result manifest
-        # has been accepted.  Keeping command construction side-effect free is
-        # important for --dry-run and for clean failure reporting.
+        # Dataset preparation belongs to the runner, before the final result
+        # manifest is assembled so canonical/upstream hashes can be recorded.
+        # Keeping command construction itself side-effect free is important for
+        # --dry-run and for clean failure reporting.
         data_path = prepared / "canonical.csv"
         split_manifest = prepared / "split_manifest.json"
         memory = MODELS_ROOT / "HawkesMemory" / "Memory"
@@ -335,13 +367,18 @@ def stationary_command(
             "train",
             "--tree-init-depth",
             "0",
+            "--num-basis",
+            "2",
+            "--decays",
+            "0.5",
+            "1.5",
         ]
         if upstream_h_tree is not None:
             command += [
                 "--h-tree",
                 str(upstream_h_tree),
-                # Keep the stationary DWS HM architecture identical to the
-                # upstream run_HM.sh contract.  In particular, do not let
+                # Keep stationary HM architecture identical to the upstream
+                # run_HM.sh contract.  In particular, do not let
                 # TrainingCLI's generic node_dim=64 default silently create
                 # a different checkpoint from the 128-dimensional H-tree.
                 "--z-dim",
@@ -401,6 +438,8 @@ def stationary_command(
                 "0.85",
                 "--route-balance-batch-size",
                 "32",
+                "--wake-wavefront-batch-size",
+                str(int(getattr(args, "batch_size", None) or eval_batch)),
                 # Preserve the upstream structural transaction thresholds.
                 "--prune-warmup-epochs",
                 "12",
@@ -426,9 +465,9 @@ def stationary_command(
             if not getattr(args, "smoke", False):
                 # Alignment and residual signatures require the complete
                 # training population so every H-tree leaf has non-zero
-                # mass.  A smoke run intentionally truncates sequences and
-                # therefore exercises H-tree loading without pretending to
-                # run either full-data initializer.
+                # mass.  Strict inductive H-trees also cannot be paired with
+                # a truncated manifest train split, so smoke keeps the full
+                # split and only reduces the training epochs below.
                 command += [
                     "--sequence-summary",
                     str(train_sequence_summary),
@@ -479,7 +518,9 @@ def stationary_command(
             "--validation-batch-size", str(eval_batch),
         ]
         if args.smoke:
-            command += ["--max-sequences", "4", "--max-events-per-sequence", "16", "--no-training-plots"]
+            if upstream_h_tree is None:
+                command += ["--max-sequences", "4", "--max-events-per-sequence", "16"]
+            command += ["--no-training-plots"]
         env["PYTHONPATH"] = os.pathsep.join((str(MODELS_ROOT / "HawkesMemory"), str(memory), env.get("PYTHONPATH", "")))
         return command, memory, env
     raise KeyError(f"unsupported model: {spec.model}")

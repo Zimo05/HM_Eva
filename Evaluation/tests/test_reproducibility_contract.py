@@ -121,7 +121,7 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
     assert rmtpp_command[rmtpp_command.index("--lr-factor") + 1] == "0.3"
 
 
-def test_hm_continual_propagates_last_state_not_validation_best():
+def test_hm_continual_propagates_validation_best_state():
     protocol = Namespace(task_ids=(0, 1, 2))
     target = ROOT / "tmp-hm-continual"
 
@@ -136,7 +136,7 @@ def test_hm_continual_propagates_last_state_not_validation_best():
         protocol,
         2,
         None,
-    ) == target / "checkpoint" / "task_01_last.pt"
+    ) == target / "checkpoint" / "task_01_best.pt"
 
     explicit = target / "external_state.pt"
     assert _hm_continual_resume_checkpoint(

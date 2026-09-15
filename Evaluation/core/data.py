@@ -449,7 +449,18 @@ def prepare_hm_dataset(
             for record in _read_standard(base / filename):
                 times, types = _times_types(record)
                 source_index = len(rows)
-                rows.append({"event_times": json.dumps(times), "event_types": json.dumps(types)})
+                # Keep the canonical row ID explicit for every stationary HM
+                # dataset.  Retweet (and the other standard datasets) used to
+                # omit this field because their source files are already
+                # ordered.  That made the upstream THP/attention pipeline
+                # infer IDs from insertion order, while DWS used an explicit
+                # source index.  HM's train-only H-tree contract needs one
+                # mapping in both cases.
+                rows.append({
+                    "event_times": json.dumps(times),
+                    "event_types": json.dumps(types),
+                    "source_index": source_index,
+                })
                 splits[split].append(source_index)
     if not rows or any(not values for values in splits.values()):
         raise ValueError(f"empty data or split for {dataset}")
@@ -470,7 +481,7 @@ def prepare_hm_dataset(
         "counts": {k: len(v) for k, v in splits.items()},
         "splits": splits,
         "oracle_fields_hidden_from_model": ["cluster", "ground_truth", "regime_id"],
-        "source_index_field": "source_index" if dataset == "dws" else None,
+        "source_index_field": "source_index",
     }
     if dataset == "dws":
         assert dws_records is not None

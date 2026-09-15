@@ -1004,6 +1004,20 @@ class TrainingLifecycleMixin:
             trainer.controller_utility_replay.load_state_dict(replay_state)
         trainer._reconcile_optimizer_parameters()
         trainer.history = list(checkpoint.get("history", []))
+        validation_selection = checkpoint.get("validation_selection", {})
+        if isinstance(validation_selection, Mapping):
+            saved_validation_history = validation_selection.get("history", [])
+            trainer.validation_history = (
+                list(saved_validation_history)
+                if isinstance(saved_validation_history, (list, tuple))
+                else []
+            )
+            saved_best_validation = validation_selection.get("best")
+            trainer.best_validation = (
+                dict(saved_best_validation)
+                if isinstance(saved_best_validation, Mapping)
+                else None
+            )
         trainer.completed_epochs = int(checkpoint.get("epoch", 0))
         rng_state = checkpoint.get("rng_state", {})
         if "torch" in rng_state:

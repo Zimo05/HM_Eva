@@ -6,6 +6,7 @@ import inspect
 import json
 from collections import defaultdict
 
+from Train.TrainingCheckpoint import atomic_torch_save
 from Train.TrainingComponents import *  # noqa: F403
 from Train.TrainingWakeSupport import ResidentSequenceStore
 
@@ -1900,9 +1901,7 @@ class TrainingLoopMixin:
                 "fallback_to_baseline": True,
                 "selection_reason": "no ranking checkpoint improved realized rollout",
             }
-            temporary = best_path.with_suffix(best_path.suffix + ".tmp")
-            torch.save(fallback, temporary)
-            temporary.replace(best_path)
+            atomic_torch_save(fallback, best_path)
         if self.training_config.plot_after_training and self.history:
             try:
                 from Train.PlotTraining import save_training_diagnostics

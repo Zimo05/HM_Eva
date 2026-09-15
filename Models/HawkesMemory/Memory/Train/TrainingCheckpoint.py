@@ -2,7 +2,82 @@
 
 from __future__ import annotations
 
+import errno
+import shutil
+
 from Train.TrainingComponents import *  # noqa: F403
+
+
+_CHECKPOINT_STORAGE_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.ENOSPC,
+        getattr(errno, "EDQUOT", None),
+        getattr(errno, "EFBIG", None),
+        getattr(errno, "EIO", None),
+    )
+    if value is not None
+)
+
+
+def _looks_like_checkpoint_write_error(error: BaseException) -> bool:
+    if isinstance(error, OSError):
+        return error.errno in _CHECKPOINT_STORAGE_ERRNOS
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "pytorchstreamwriter failed writing",
+            "file write failed",
+            "unexpected pos",
+        )
+    )
+
+
+def _checkpoint_storage_context(output_path: Path, temporary: Path) -> str:
+    try:
+        usage = shutil.disk_usage(output_path.parent)
+        return (
+            f"output={output_path} temporary={temporary} "
+            f"free_bytes={usage.free} total_bytes={usage.total}"
+        )
+    except OSError as error:
+        return (
+            f"output={output_path} temporary={temporary} "
+            f"disk_usage_error={error}"
+        )
+
+
+def atomic_torch_save(payload: Any, path: str | Path) -> Path:
+    """Write a checkpoint atomically and clean partial files on failure.
+
+    PyTorch's ZIP writer can raise a secondary ``unexpected pos`` error after
+    the real filesystem write has failed. Keep the original failure chained,
+    but add the target path and filesystem context so quota/full-disk errors
+    are actionable from a remote training log.
+    """
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    try:
+        torch.save(payload, temporary)
+        temporary.replace(output_path)
+    except BaseException as error:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Preserve the serialization error if cleanup is also blocked.
+            pass
+        if _looks_like_checkpoint_write_error(error):
+            context = _checkpoint_storage_context(output_path, temporary)
+            raise RuntimeError(
+                "checkpoint write failed; check filesystem free space, "
+                f"user quota, inode quota, and maximum file size ({context})"
+            ) from error
+        raise
+    return output_path.resolve()
 
 
 class TrainingCheckpointMixin:
@@ -336,9 +411,5 @@ class TrainingCheckpointMixin:
     def save_checkpoint(self, path: str | Path, *, epoch: int) -> Path:
         """Atomically serialize one complete checkpoint payload."""
         output_path = Path(path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = self.build_checkpoint_payload(output_path, epoch=epoch)
-        temporary = output_path.with_suffix(output_path.suffix + ".tmp")
-        torch.save(checkpoint, temporary)
-        temporary.replace(output_path)
-        return output_path.resolve()
+        return atomic_torch_save(checkpoint, output_path)

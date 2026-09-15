@@ -3,8 +3,10 @@
 The ordinary :mod:`Evaluate` entry point evaluates one flat CSV with one
 train/validation/test split.  CL has a different contract: checkpoint ``C_t``
 is evaluated on its current task, the next task before learning, and the
-independent frozen anchor banks.  The primary benchmark runs frozen,
-fast-adapt, and online-write inference as separate state transitions.
+independent frozen anchor banks.  When a saved ``C_init`` is supplied, it is
+also evaluated on the first task test set before task-0 learning.  The
+primary benchmark runs frozen, fast-adapt, and online-write inference as
+separate state transitions.
 Mechanism ablations remain separate memory-view runs.
 
 Run from the repository root with ``PYTHONPATH`` containing both the project
@@ -14,6 +16,7 @@ root and ``Memory``::
       --data-root "$PWD/Datasets/CL/hm_continual_v2" \
       --checkpoint-dir "/path/to/continual/checkpoints" \
       --output-dir "$PWD/Memory/Eval/CL" \
+      --fwt-scratch-checkpoint "/path/to/initial_seed.pt" \
       --device cuda
 """
 
@@ -112,6 +115,10 @@ CL_PROTOCOL_VARIANTS = (
     "fast_adapt/full",
     "online_write/full",
 )
+# ``C_init`` is not a learned task checkpoint.  Keep a negative sentinel in
+# tabular output for the one initial evaluation so it cannot be confused with
+# the post-task ``C_0`` row while still fitting the existing integer schema.
+INITIAL_CHECKPOINT_TASK = -1
 CL_MEMORY_ABLATION_VARIANTS = (
     "frozen/no_episodic",
     "frozen/semantic_only",
@@ -305,6 +312,20 @@ def _discover_task_sets(
             task_id=task_id,
         )
     return result
+
+
+def _task_test_pre_set(task_set: EvaluationSet) -> EvaluationSet:
+    """Return the pre-update view of a task-test evaluation set."""
+
+    return EvaluationSet(
+        name=f"{task_set.name}_pre",
+        kind="task_test_pre",
+        path=task_set.path,
+        task_id=task_set.task_id,
+        regime_id=task_set.regime_id,
+        stage_label=task_set.stage_label,
+        evaluation_scope=task_set.evaluation_scope,
+    )
 
 
 def _discover_checkpoints(checkpoint_dir: Path) -> dict[int, Path]:
@@ -970,16 +991,30 @@ def _stage_metrics(
     variants: Sequence[str],
     protocol: CLProtocol | None = None,
     scratch_nll_by_task: Mapping[int, float | None] | None = None,
+    initial_nll_by_task: Mapping[int, float | None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Compute task-boundary fields through the canonical metric engine."""
+    """Compute task-boundary fields through the canonical metric engine.
+
+    ``initial_nll_by_task`` is intentionally a separate input from the FWT
+    scratch baseline.  Only its first protocol task may fill a missing pre
+    boundary; later scratch values must never become recurrence baselines.
+    """
 
     output: list[dict[str, Any]] = []
-    task_ids = sorted({
+    task_ids = {
         int(row["eval_task"])
         for row in metric_rows
         if row.get("eval_task") is not None
         and row["eval_kind"] in {"task_test", "task_test_pre"}
-    })
+    }
+    if initial_nll_by_task:
+        task_ids.update(int(task_id) for task_id in initial_nll_by_task)
+    task_ids = sorted(task_ids)
+    first_protocol_task = (
+        min(protocol.task_ids)
+        if protocol is not None and protocol.task_ids
+        else None
+    )
     for variant in variants:
         records: list[TaskBoundaryRecord] = []
         source_rows: dict[
@@ -1005,12 +1040,31 @@ def _stage_metrics(
                 ),
                 None,
             )
-            if pre is None and post is None:
+            has_initial_pre = bool(
+                variant == "frozen/full"
+                and initial_nll_by_task is not None
+                and task_id == first_protocol_task
+                and task_id in initial_nll_by_task
+            )
+            if pre is None and post is None and not has_initial_pre:
                 continue
             spec = protocol.task(task_id) if protocol is not None else None
+            pre_nll = (
+                pre.get("nll_per_event")
+                if pre is not None
+                else (
+                    initial_nll_by_task.get(task_id)
+                    if (
+                        variant == "frozen/full"
+                        and initial_nll_by_task is not None
+                        and task_id == first_protocol_task
+                    )
+                    else None
+                )
+            )
             records.append(TaskBoundaryRecord(
                 task_id=task_id,
-                pre_nll=pre.get("nll_per_event") if pre else None,
+                pre_nll=pre_nll,
                 post_nll=post.get("nll_per_event") if post else None,
                 scratch_nll=(
                     scratch_nll_by_task.get(task_id)
@@ -1035,7 +1089,20 @@ def _stage_metrics(
                 "regime_id": source.get("regime_id"),
                 "shift_type": row["shift_type"],
                 "recurrence_of": row["recurrence_of"],
-                "pre_checkpoint_task": pre.get("checkpoint_task") if pre else None,
+                "pre_checkpoint_task": (
+                    pre.get("checkpoint_task")
+                    if pre is not None
+                    else (
+                        INITIAL_CHECKPOINT_TASK
+                        if (
+                            variant == "frozen/full"
+                            and initial_nll_by_task is not None
+                            and row["task_id"] == first_protocol_task
+                            and row["pre_nll"] is not None
+                        )
+                        else None
+                    )
+                ),
                 "post_checkpoint_task": post.get("checkpoint_task") if post else None,
                 "pre_nll_per_event": row["pre_nll"],
                 "post_nll_per_event": row["post_nll"],
@@ -1120,11 +1187,18 @@ def _task_boundary_records(
     *,
     variant: str = "frozen/full",
     scratch_nll_by_task: Mapping[int, float | None] | None = None,
+    initial_nll_by_task: Mapping[int, float | None] | None = None,
 ) -> list[TaskBoundaryRecord]:
-    """Reduce task-test pre/post rows to one record per protocol task."""
+    """Reduce task-test pre/post rows to one record per protocol task.
+
+    The optional initial map is only consulted for the first protocol task;
+    this keeps the C_init boundary distinct from the per-task FWT scratch
+    measurements.
+    """
 
     variant = _canonical_variant(variant)
     output: list[TaskBoundaryRecord] = []
+    first_protocol_task = min(protocol.task_ids) if protocol.task_ids else None
     for task_id in protocol.task_ids:
         pre = next(
             (
@@ -1147,12 +1221,31 @@ def _task_boundary_records(
             ),
             None,
         )
-        if pre is None and post is None:
+        has_initial_pre = bool(
+            variant == "frozen/full"
+            and initial_nll_by_task is not None
+            and task_id == first_protocol_task
+            and task_id in initial_nll_by_task
+        )
+        if pre is None and post is None and not has_initial_pre:
             continue
         spec = protocol.task(task_id)
+        pre_nll = (
+            pre.get("nll_per_event")
+            if pre is not None
+            else (
+                initial_nll_by_task.get(task_id)
+                if (
+                    variant == "frozen/full"
+                    and initial_nll_by_task is not None
+                    and task_id == first_protocol_task
+                )
+                else None
+            )
+        )
         output.append(TaskBoundaryRecord(
             task_id=task_id,
-            pre_nll=pre.get("nll_per_event") if pre else None,
+            pre_nll=pre_nll,
             post_nll=post.get("nll_per_event") if post else None,
             scratch_nll=(
                 scratch_nll_by_task.get(task_id)
@@ -2770,8 +2863,11 @@ def _write_report(
         f"- Checkpoints: `{checkpoint_dir.resolve()}`",
         f"- Checkpoint tasks: `{list(checkpoint_tasks)}`",
         f"- Variants: `{list(variants)}`",
-        "- Task-test protocol: checkpoint `task_k_best` is evaluated on `D_k^test`; "
+        "- Task-test protocol: `C_init` (when supplied) is evaluated on `D_0^test` "
+        "before task-0 learning; checkpoint `task_k_best` is evaluated on `D_k^test`; "
         "`D_{k+1}^test` is also evaluated before learning when available.",
+        "- In tabular outputs the non-task `C_init` row uses `checkpoint_task=-1`; "
+        "this is separate from the learned `C_0` row.",
         f"- Frozen anchors: `{'enabled' if anchors_enabled else 'disabled'}`.",
         "",
         "## Checkpoint topology",
@@ -3263,8 +3359,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "fixed C_init checkpoint for protocol-scoped FWT; when omitted, "
-            "FWT is reported as unavailable rather than inferred from C_0"
+            "fixed C_init checkpoint for protocol-scoped FWT and the task-0 "
+            "pre-update boundary; when omitted, those values remain unavailable "
+            "rather than being inferred from C_0"
         ),
     )
     parser.add_argument(
@@ -3471,6 +3568,92 @@ def main() -> None:
         else None
     )
     protocol_task_ids = list(protocol.task_ids)
+
+    # The ordinary loop deliberately evaluates C_t on D_t after learning and
+    # C_t on D_{t+1} before the next learning step.  That leaves the first
+    # protocol task without a pre-update row because there is no C_{-1}.
+    # HM's runner writes ``initial_seed*.pt`` before any task-0 cold start and
+    # passes it as ``--fwt-scratch-checkpoint``.  Use that exact C_init once
+    # for D_0^test; its other scratch evaluations remain FWT-only diagnostics.
+    initial_checkpoint_path: Path | None = None
+    initial_pre_evaluated = False
+    initial_nll_by_task: dict[int, float | None] = {}
+    configured_initial_checkpoint = getattr(args, "fwt_scratch_checkpoint", None)
+    first_protocol_task = protocol_task_ids[0] if protocol_task_ids else None
+    if (
+        configured_initial_checkpoint is not None
+        and first_protocol_task is not None
+        and first_protocol_task in selected_ids
+        and "frozen/full" in variants
+    ):
+        initial_checkpoint_path = (
+            Path(configured_initial_checkpoint).expanduser().resolve()
+        )
+        if not initial_checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"C_init checkpoint does not exist: {initial_checkpoint_path}"
+            )
+        first_task_set = task_sets[first_protocol_task]
+        initial_pre_set = _task_test_pre_set(first_task_set)
+        if initial_pre_set.path not in evaluation_cache:
+            evaluation_cache[initial_pre_set.path] = _load_cl_dataset(
+                initial_pre_set.path,
+                expected_types,
+                args.max_sequences,
+            )
+            data_sha_cache[initial_pre_set.path] = dataset_fingerprint(
+                initial_pre_set.path
+            )
+        initial_sha256 = _sha256(initial_checkpoint_path)
+        print(
+            f"[CL Eval] checkpoint=C_init sets={[initial_pre_set.name]} "
+            "variant=frozen/full "
+            f"sequences={len(evaluation_cache[initial_pre_set.path])} "
+            f"batch_size={args.eval_batch_size}",
+            flush=True,
+        )
+        (
+            initial_metrics_by_set,
+            initial_event_rows,
+            initial_elapsed,
+            initial_from_cache,
+        ) = _load_or_run_batch(
+            checkpoint=initial_checkpoint_path,
+            checkpoint_task=INITIAL_CHECKPOINT_TASK,
+            evaluation_sets=[initial_pre_set],
+            variant="frozen/full",
+            evaluation_cache=evaluation_cache,
+            data_sha_cache=data_sha_cache,
+            checkpoint_sha256=initial_sha256,
+            args=args,
+        )
+        initial_metric_row = _metric_row(
+            checkpoint_task=INITIAL_CHECKPOINT_TASK,
+            checkpoint=initial_checkpoint_path,
+            evaluation_set=initial_pre_set,
+            variant="frozen/full",
+            metrics=initial_metrics_by_set.get(initial_pre_set.name, {}),
+            tree=_tree_health(initial_checkpoint_path),
+            elapsed=initial_elapsed,
+            from_cache=initial_from_cache,
+            data_sha256=data_sha_cache[initial_pre_set.path],
+        )
+        metric_rows.append(initial_metric_row)
+        task_matrix_rows.append(initial_metric_row)
+        selected_initial_event_rows = [
+            row for row in initial_event_rows
+            if row.get("eval_set_id") == initial_pre_set.name
+        ]
+        protocol_event_rows.extend(
+            _decorate_event_rows(selected_initial_event_rows, initial_metric_row)
+        )
+        if event_writer is not None:
+            event_writer.write(selected_initial_event_rows, initial_metric_row)
+        initial_nll_by_task[first_protocol_task] = initial_metric_row.get(
+            "nll_per_event"
+        )
+        initial_pre_evaluated = True
+
     for checkpoint_task in selected_ids:
         checkpoint = checkpoint_paths[checkpoint_task]
         evaluation_sets: list[EvaluationSet] = []
@@ -3484,15 +3667,7 @@ def main() -> None:
             )
             if next_task is not None and next_task in task_sets:
                 next_set = task_sets[next_task]
-                evaluation_sets.append(EvaluationSet(
-                    name=f"{next_set.name}_pre",
-                    kind="task_test_pre",
-                    path=next_set.path,
-                    task_id=next_set.task_id,
-                    regime_id=next_set.regime_id,
-                    stage_label=next_set.stage_label,
-                    evaluation_scope=next_set.evaluation_scope,
-                ))
+                evaluation_sets.append(_task_test_pre_set(next_set))
                 next_control = _paired_control_set(
                     protocol, next_task, pre_update=True
                 )
@@ -3585,6 +3760,7 @@ def main() -> None:
         frozen_metric_rows,
         protocol,
         scratch_nll_by_task=scratch_nll_by_task,
+        initial_nll_by_task=initial_nll_by_task,
     )
     adaptation_records: list[AdaptationRecord] = []
     for adaptation_variant in ("fast_adapt/full", "online_write/full"):
@@ -3654,6 +3830,7 @@ def main() -> None:
         frozen_variants,
         protocol=protocol,
         scratch_nll_by_task=scratch_nll_by_task,
+        initial_nll_by_task=initial_nll_by_task,
     )
     anchor_matrix_rows_wide = [
         {"variant": "frozen/full", **row}
@@ -3874,6 +4051,12 @@ def main() -> None:
         "rrr": metric_report["rrr"],
         "hm_state": hm_state_rows,
         "topology_events": [dict(row) for row in topology_events],
+        "initial_pre_evaluated": initial_pre_evaluated,
+        "initial_checkpoint": (
+            None
+            if not initial_pre_evaluated or initial_checkpoint_path is None
+            else str(initial_checkpoint_path)
+        ),
         "fwt_scratch_checkpoint": (
             None
             if getattr(args, "fwt_scratch_checkpoint", None) is None

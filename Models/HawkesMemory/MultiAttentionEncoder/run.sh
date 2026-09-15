@@ -28,10 +28,17 @@ THP_BATCH_SIZE="${THP_BATCH_SIZE:-64}"
 THP_NUM_WORKERS="${THP_NUM_WORKERS:-4}"
 THP_EPOCHS="${THP_EPOCHS:-100}"
 THP_DATA_PARALLEL="${THP_DATA_PARALLEL:-1}"
+THP_SEED="${THP_SEED:-42}"
 ATTENTION_BATCH_SIZE="${ATTENTION_BATCH_SIZE:-64}"
 ATTENTION_EPOCHS="${ATTENTION_EPOCHS:-50}"
+ATTENTION_SEED="${ATTENTION_SEED:-42}"
 
 DATA_PATH="${DATA_PATH:-$PROJECT_ROOT/Data/tree_13/13Cluster/THP_13.json}"
+# The strict training/attention stages use the complete keyed JSON so their
+# split manifest can prove coverage.  An upstream bootstrap may nevertheless
+# request a train-only encoding for clustering; keeping this override local to
+# the encode action prevents validation/test rows from entering that artifact.
+ENCODE_DATA_PATH="${ENCODE_DATA_PATH:-$DATA_PATH}"
 OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/Data/tree_13/thp_checkpoints}"
 TRAIN_LOG="${TRAIN_LOG:-$PROJECT_ROOT/Data/tree_13/thp_train.log}"
 BEST_CHECKPOINT="${CHECKPOINT:-$OUTPUT_DIR/checkpoint_best.pt}"
@@ -72,6 +79,7 @@ case "$ACTION" in
         -weight_decay 0.0001 \
         -smooth 0 \
         -epoch "$THP_EPOCHS" \
+        -seed "$THP_SEED" \
         -event_loss_weight 0 \
         -time_loss_weight 0 \
         -class_weight 0 \
@@ -92,7 +100,7 @@ case "$ACTION" in
 
     CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$DEVICE_IDS" \
       "$PYTHON_BIN" "$THP_DIR/EncodeMain.py" \
-        --data "$DATA_PATH" \
+        --data "$ENCODE_DATA_PATH" \
         --checkpoint "$BEST_CHECKPOINT" \
         --output "$ENCODED_OUTPUT" \
         --batch-size "$THP_BATCH_SIZE" \
@@ -134,7 +142,7 @@ case "$ACTION" in
         --path_weight 0.0 \
         --recon_weight 0.5 \
         --grad_clip 1.0 \
-        --seed 42 \
+        --seed "$ATTENTION_SEED" \
         --train_ratio 0.8 \
         --dev_ratio 0.1 \
         --patience 10 \

@@ -17,10 +17,15 @@ from .adapters import (
     evaluate_hm,
     hm_upstream_input_paths,
     normalize_native_metrics,
+    python_for,
     resolve_hm_upstream_h_tree,
     resolved_device,
     run_command,
     stationary_command,
+)
+from .hm_bootstrap import (
+    build_retweet_hm_upstream,
+    expected_retweet_hm_upstream,
 )
 from .cl_protocol import CLProtocol
 from .data import (
@@ -52,7 +57,6 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
     spec = JobSpec(dataset=dataset, model=model, condition=condition, script=script)
     target = result_dir(spec, args)
     prepared = target / "prepared" if dataset == "dws" or model == "HM" else None
-    command, cwd, env = stationary_command(spec, args, target, prepared=prepared)
     inputs = dataset_inputs(dataset, getattr(args, "variant", None))
     sequence_summary_source: Path | None = None
     if model == "HM" and dataset == "dws":
@@ -62,16 +66,33 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
         if summary_path is None:
             raise ValueError("DWS HM upstream manifest must provide sequence_summary")
         sequence_summary_source = Path(summary_path)
-    if args.checkpoint is not None:
-        inputs.append(args.checkpoint)
-    manifest = build_manifest(spec, args, inputs, command)
-    if not begin(target, manifest, args.resume):
-        print(f"Complete result already exists: {target}")
-        return target
+
+    # HM Retweet has no checked-in oracle H-tree.  Construct its train-only
+    # upstream before composing the Memory command; DWS continues to resolve
+    # its immutable external artifact through the manifest above.  A dry-run
+    # receives deterministic expected paths so it can still show the complete
+    # command without launching THP/attention training.
+    hm_upstream = None
     if args.dry_run:
+        if model == "HM" and dataset == "retweet":
+            hm_upstream = expected_retweet_hm_upstream(prepared or target / "prepared")
+        command, cwd, env = stationary_command(
+            spec,
+            args,
+            target,
+            prepared=prepared,
+            hm_upstream=hm_upstream,
+        )
+        if args.checkpoint is not None:
+            inputs.append(args.checkpoint)
+        manifest = build_manifest(spec, args, inputs, command)
+        if not begin(target, manifest, args.resume):
+            print(f"Complete result already exists: {target}")
+            return target
         finish(target, "dry_run")
         print(" ".join(command))
         return target
+
     started = time.perf_counter()
     try:
         if prepared is not None:
@@ -82,6 +103,53 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
                 getattr(args, "variant", None),
                 sequence_summary_source=sequence_summary_source,
             )
+            if model == "HM":
+                inputs.extend([
+                    prepared / "canonical.csv",
+                    prepared / "split_manifest.json",
+                ])
+                if sequence_summary_source is not None:
+                    inputs.append(prepared / "sequence_summary_train.csv")
+
+        if model == "HM" and dataset == "retweet":
+            if prepared is None:
+                raise RuntimeError("Retweet HM upstream requires a prepared dataset")
+            hm_upstream = build_retweet_hm_upstream(
+                canonical_path=prepared / "canonical.csv",
+                split_manifest_path=prepared / "split_manifest.json",
+                output_dir=prepared / "hm_upstream",
+                seed=int(args.seed),
+                device=resolved_device(args.device),
+                python_executable=python_for(args),
+                batch_size=(
+                    getattr(args, "batch_size", None)
+                    or getattr(args, "eval_batch_size", 64)
+                ),
+                epochs=getattr(args, "epochs", None),
+                smoke=bool(getattr(args, "smoke", False)),
+            )
+            inputs.extend(hm_upstream.input_paths)
+
+        command, cwd, env = stationary_command(
+            spec,
+            args,
+            target,
+            prepared=prepared,
+            hm_upstream=hm_upstream,
+        )
+        if args.checkpoint is not None:
+            inputs.append(args.checkpoint)
+        manifest = build_manifest(spec, args, inputs, command)
+        if hm_upstream is not None:
+            manifest["hm_upstream"] = {
+                "h_tree": str(hm_upstream.h_tree.resolve()),
+                "sequence_summary": str(hm_upstream.sequence_summary.resolve()),
+                "node_dim": int(hm_upstream.node_dim),
+                **dict(hm_upstream.metadata),
+            }
+        if not begin(target, manifest, args.resume):
+            print(f"Complete result already exists: {target}")
+            return target
         run_command(command, cwd, env, target / "logs" / "train.log")
         copy_checkpoint_contract(target)
         if model == "HM":
@@ -203,9 +271,9 @@ def _hm_continual_resume_checkpoint(
     """Resolve the state checkpoint used to enter the first requested task.
 
     HM checkpoints have two deliberately different roles: ``best`` is the
-    validation-selected artifact for evaluation, while ``last`` is the
-    end-of-task state that must carry the continual memory trajectory into the
-    next task.
+    validation-selected artifact used both for evaluation and for carrying
+    the continual state into the next task, while ``last`` remains the
+    end-of-task artifact for diagnostics and comparison.
     """
     if explicit is not None:
         return explicit
@@ -213,7 +281,7 @@ def _hm_continual_resume_checkpoint(
     if start_index == 0:
         return None
     previous_task = protocol.task_ids[start_index - 1]
-    return target / "checkpoint" / f"task_{previous_task:02d}_last.pt"
+    return target / "checkpoint" / f"task_{previous_task:02d}_best.pt"
 
 
 def _hm_state_bytes(checkpoint: Path) -> dict[str, int]:
@@ -1315,9 +1383,10 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
                     ),
                 }
                 write_json(stage_manifest_path, stage_manifest)
-                # ``last`` is the state-propagation checkpoint.  ``best`` is
-                # kept exclusively for validation selection and evaluation.
-                previous = last_checkpoint
+                # ``best`` is the checkpoint selected on validation and is
+                # also the state propagated into the next continual task.
+                # Keep ``last`` as the end-of-task artifact for diagnostics.
+                previous = best_checkpoint
                 resource_manifest["stages"][str(task)] = {
                     **_hm_state_bytes(best_checkpoint),
                     "checkpoint": str(best_checkpoint.resolve()),

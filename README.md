@@ -274,7 +274,9 @@ python Datasets/CL/generate_continual_hawkes.py --benchmark unified --output Dat
 
 ### 6.2 每个阶段做什么
 
-每个 continual 脚本会在当前 task 学习前做 pre-update，训练并保存独立的 `task_XX_last.pt` 与 `task_XX_best.pt`。当前 task 的 validation selection 和 evaluation 使用 `best`；下一个 task 的 state propagation 使用 `last`，因此 HM 的 memory/topology/optimizer/sleep 状态不会因 validation best 选择而回滚。`train.csv` 只用于更新，`val.csv` 只用于 checkpoint selection，`test.csv` 只用于最终报告；由此构建 checkpoint × law 矩阵。
+每个 continual 脚本会在当前 task 学习前做 pre-update，训练并保存独立的 `task_XX_last.pt` 与 `task_XX_best.pt`。当前 task 的 validation selection、evaluation，以及下一个 task 的 state propagation 统一使用 `best`；`last` 保留为末轮训练产物，供诊断和对比使用。这样 HM 的 memory/topology/optimizer/sleep 状态会从 validation-selected 状态继续。`train.csv` 只用于更新，`val.csv` 只用于 checkpoint selection，`test.csv` 只用于最终报告；由此构建 checkpoint × law 矩阵。
+
+HM 另外在 task 0 的任何 cold-start/optimization 之前保存 `C_init`（`initial_seed*.pt`）。`EvaluateCL` 用 `C_init` 评估 `D_0^test` 作为 task 0 的唯一 `pre` 边界；后续 task 的 `pre` 仍由前一阶段 checkpoint 评估下一 task。RRR 只使用这个 task-0 `C_init` 观测补首次 gain，不把其它 FWT scratch 观测当作 recurrence 的 `pre`。
 
 主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。HM continual 默认每个 task 训练 60 epochs；仍可通过 `--epochs` 显式覆盖，smoke 模式仍固定为 1 epoch。
 
@@ -333,10 +335,10 @@ S2P2 和 AttNHP 的 replay 入口分别为 `evaluate_continual_S2P2_replay.py` �
 
 ### 6.7 从中间 checkpoint 继续
 
-如果 task 0–4 已在另一台机器完成，可以把 `task_04_last.pt` 复制过来，再将 task 5–9 作为独立结果包运行：
+如果 task 0–4 已在另一台机器完成，可以把 `task_04_best.pt` 复制过来，再将 task 5–9 作为独立结果包运行：
 
 ```bash
-python evaluate_continual_HM.py --seed 7 --task-start 5 --task-end 9 --checkpoint D:/shared/task_04_last.pt --run-id tasks_05_09 --device cuda:0
+python evaluate_continual_HM.py --seed 7 --task-start 5 --task-end 9 --checkpoint D:/shared/task_04_best.pt --run-id tasks_05_09 --device cuda:0
 ```
 
 RMTPP、THP、S2P2、AttNHP 和 TPP-LLM continual 入口同样支持这种方式。请保证 checkpoint 的模型、策略、seed 和超参数与前半段一致。

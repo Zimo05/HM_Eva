@@ -11,6 +11,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .hm_bootstrap import (
+    STATIONARY_HM_DATASETS,
+    STATIONARY_HM_WAKE_WAVEFRONT_BATCH_SIZE,
+    expected_stationary_hm_upstream,
+)
 from .io import sha256, write_json
 from .paths import DATASETS_ROOT, MODELS_ROOT, PROJECT_ROOT
 
@@ -299,13 +304,12 @@ def stationary_command(
         eval_batch = int(getattr(args, "eval_batch_size", 64))
         if eval_batch <= 0:
             raise ValueError("eval_batch_size must be positive")
-        # Retweet's stationary HM run has a dataset-specific wavefront
-        # contract.  Keep the existing batch-size fallback for DWS and every
-        # other HM dataset; only Retweet uses the larger wake transaction.
-        wake_wavefront_batch_size = (
-            128
-            if spec.dataset == "retweet"
-            else int(getattr(args, "batch_size", None) or eval_batch)
+        # The upstream algorithm is shared, but the Memory wake transaction
+        # starts from conservative dataset-specific values because the
+        # multi-type Hawkes/residual tensors are substantially larger.
+        wake_wavefront_batch_size = STATIONARY_HM_WAKE_WAVEFRONT_BATCH_SIZE.get(
+            spec.dataset,
+            int(getattr(args, "batch_size", None) or eval_batch),
         )
         upstream_h_tree: Path | None = None
         train_sequence_summary: Path | None = None
@@ -327,15 +331,14 @@ def stationary_command(
                 Path(train_sequence_summary_value).expanduser().resolve()
             )
             upstream_node_dim = int(upstream_value("node_dim", 128))
-        elif spec.dataset == "retweet":
+        elif spec.dataset in STATIONARY_HM_DATASETS:
             # The runner replaces this deterministic descriptor with the
             # completed train-only bootstrap.  Keeping the fallback here
             # makes command construction useful for dry-runs and unit tests
-            # without ever falling back to a root-only Retweet HM model.
-            from .hm_bootstrap import expected_retweet_hm_upstream
-
-            descriptor = expected_retweet_hm_upstream(
-                prepared or result_dir / "prepared"
+            # without ever falling back to a root-only stationary HM model.
+            descriptor = expected_stationary_hm_upstream(
+                prepared or result_dir / "prepared",
+                spec.dataset,
             )
             upstream_h_tree = descriptor.h_tree
             train_sequence_summary = descriptor.sequence_summary
@@ -353,6 +356,11 @@ def stationary_command(
             train_sequence_summary = (
                 (prepared or result_dir / "prepared")
                 / "sequence_summary_train.csv"
+            )
+        else:
+            raise ValueError(
+                "HM requires a train-only upstream H-tree descriptor for "
+                f"dataset {spec.dataset!r}"
             )
         # Dataset preparation belongs to the runner, before the final result
         # manifest is assembled so canonical/upstream hashes can be recorded.

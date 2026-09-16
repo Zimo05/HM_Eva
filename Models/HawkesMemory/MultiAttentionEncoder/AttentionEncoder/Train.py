@@ -568,6 +568,15 @@ def main() -> None:
     parser.add_argument("--tree_csv", type=str,
                         default="/Volumes/shenzm/Shuang_RA/Data/tree_8/tree_node_sequences.csv")
     parser.add_argument("--summary_csv", type=str, default=None)
+    parser.add_argument(
+        "--encoded_embeddings",
+        type=Path,
+        default=None,
+        help=(
+            "Optional train-only THP embedding cache from the upstream stage. "
+            "When supplied, avoid re-encoding the same sequences."
+        ),
+    )
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Pretrained THP checkpoint (.pt), kept frozen.")
     parser.add_argument("--weights_out", type=str,
@@ -664,7 +673,10 @@ def main() -> None:
             data_path=args.split_data_path,
             available_source_ids=pipeline.global_id_to_key.keys(),
         )
-    pipeline.encode_all_sequences_thp()   # frozen, run under no_grad internally
+    if args.encoded_embeddings is not None:
+        pipeline.load_cached_sequence_embeddings(args.encoded_embeddings)
+    else:
+        pipeline.encode_all_sequences_thp()   # frozen, run under no_grad internally
 
     # ---- Build trainable modules + features + relation tensors ----
     pipeline.setup_modules()

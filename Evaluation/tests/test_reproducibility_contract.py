@@ -27,6 +27,7 @@ from core.adapters import (
     stationary_command,
 )
 from core.data import prepare_hm_train_sequence_summary
+from core.hm_bootstrap import expected_stationary_hm_upstream
 from core.manifest import compatible
 from core.runner import (
     _baseline_command,
@@ -284,6 +285,43 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
     resolved, metadata = resolve_hm_upstream_h_tree("20")
     assert resolved == (original_root / "Data" / "tree_20" / "h_tree_one_circle.pt").resolve()
     assert metadata["node_dim"] == 128
+
+
+def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
+    args = Namespace(
+        epochs=None,
+        smoke=False,
+        seed=27,
+        batch_size=None,
+        eval_batch_size=64,
+        device="cpu",
+        python_executable=sys.executable,
+        variant=None,
+    )
+    expected_wavefront = {
+        "retweet": "128",
+        "taobao": "32",
+        "stackoverflow": "64",
+    }
+    for dataset, wavefront in expected_wavefront.items():
+        spec = JobSpec(dataset=dataset, model="HM")
+        command, _cwd, _env = stationary_command(
+            spec,
+            args,
+            ROOT / "output" / dataset,
+            prepared=ROOT / "prepared" / dataset,
+        )
+        descriptor = expected_stationary_hm_upstream(
+            ROOT / "prepared" / dataset,
+            dataset,
+        )
+        assert Path(command[command.index("--h-tree") + 1]) == descriptor.h_tree
+        assert (
+            Path(command[command.index("--sequence-summary") + 1])
+            == descriptor.sequence_summary
+        )
+        assert command[command.index("--wake-wavefront-batch-size") + 1] == wavefront
+        assert "--residual-init-rank" in command
 
 
 def test_hm_train_sequence_summary_filters_only_train_source_indices():

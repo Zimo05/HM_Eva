@@ -1,8 +1,8 @@
 """Train-only upstream construction for stationary HawkesMemory datasets.
 
-The DWS H-tree is an external, pre-existing artifact.  Retweet has no such
-oracle tree, so its stationary HM job must construct the upstream state before
-Memory training:
+The DWS H-tree is an external, pre-existing artifact.  The stationary
+discovery datasets have no checked-in oracle tree, so their HM jobs construct
+the upstream state before Memory training:
 
     D_train -> THP pretrain -> THP train encoding -> residual signatures
              -> train-only hierarchy + Hawkes structural cut selection
@@ -10,7 +10,8 @@ Memory training:
 
 This module deliberately keeps the construction separate from the Memory
 trainer.  The returned artifact descriptor is consumed by ``runner.py`` and
-``adapters.py`` as the common HM contract used by DWS and Retweet.
+``adapters.py`` as the common HM contract used by DWS and the stationary
+discovery datasets.
 """
 
 from __future__ import annotations
@@ -47,6 +48,21 @@ DEFAULT_HAWKES_STRUCTURE_LAMBDA = 1.0
 # semantic-law experts; adjacent cuts reuse already-fitted tree nodes.
 DEFAULT_HAWKES_SELECTION_EPOCHS = DEFAULT_HAWKES_EPOCHS
 
+# These datasets all use the same train-only discovery contract.  Their raw
+# event labels are mapped to contiguous Hawkes indices at bootstrap time, so
+# the upstream implementation does not need dataset-specific branches.
+STATIONARY_HM_DATASETS = frozenset({"retweet", "taobao", "stackoverflow"})
+
+# The wake transaction is a downstream Memory setting, not a change in the
+# upstream algorithm.  Keep the conservative dataset-specific starting points
+# explicit because the D^2 Hawkes/residual tensors are much larger for the
+# multi-type datasets than for Retweet.
+STATIONARY_HM_WAKE_WAVEFRONT_BATCH_SIZE = {
+    "retweet": 128,
+    "taobao": 32,
+    "stackoverflow": 64,
+}
+
 
 @dataclass(frozen=True)
 class HMUpstreamArtifacts:
@@ -60,7 +76,20 @@ class HMUpstreamArtifacts:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
-def expected_retweet_hm_upstream(prepared_dir: Path) -> HMUpstreamArtifacts:
+def _validate_stationary_dataset(dataset: str) -> str:
+    normalized = str(dataset).strip().lower()
+    if normalized not in STATIONARY_HM_DATASETS:
+        allowed = ", ".join(sorted(STATIONARY_HM_DATASETS))
+        raise ValueError(
+            f"unsupported stationary HM dataset {dataset!r}; expected one of {allowed}"
+        )
+    return normalized
+
+
+def expected_stationary_hm_upstream(
+    prepared_dir: Path,
+    dataset: str,
+) -> HMUpstreamArtifacts:
     """Return deterministic output paths without running any training.
 
     ``--dry-run`` uses this descriptor to render the final Memory command.
@@ -69,13 +98,18 @@ def expected_retweet_hm_upstream(prepared_dir: Path) -> HMUpstreamArtifacts:
     result manifest.
     """
 
+    dataset = _validate_stationary_dataset(dataset)
     root = Path(prepared_dir).expanduser().resolve() / "hm_upstream"
     return HMUpstreamArtifacts(
         h_tree=root / "h_tree_train.pt",
         sequence_summary=root / "sequence_summary_train.csv",
         node_dim=DEFAULT_NODE_DIM,
         manifest_path=root / "hm_upstream_manifest.json",
-        metadata={"dataset": "retweet", "status": "expected"},
+        metadata={
+            "dataset": dataset,
+            "status": "expected",
+            "upstream_kind": "stationary_discovery",
+        },
     )
 
 
@@ -137,7 +171,7 @@ def _load_train_records(
     # Standard stationary preparation intentionally creates this identity map.
     if sorted(source_ids) != list(range(len(source_ids))):
         raise ValueError(
-            "Retweet HM upstream requires source_index values 0..N-1; "
+            "stationary HM upstream requires source_index values 0..N-1; "
             "prepare the canonical dataset through core.data first"
         )
 
@@ -298,7 +332,7 @@ def _load_torch():
         import torch
     except ImportError as error:  # pragma: no cover - target env validates this
         raise RuntimeError(
-            "Retweet HM upstream requires PyTorch in the experiment environment"
+            "stationary HM upstream requires PyTorch in the experiment environment"
         ) from error
     return torch
 
@@ -473,7 +507,7 @@ def _build_block_weighted_features(
     *,
     alpha: float,
 ):
-    """Build the metric used by Retweet's train-only structural scaffold.
+    """Build the metric used by the train-only structural scaffold.
 
     Each block is normalized per sequence before its square-root metric weight
     is applied.  Consequently the squared Euclidean metric has coefficients
@@ -670,8 +704,8 @@ def _hierarchical_clusters(
 
     if selector is None:
         # Keep the helper usable for small geometry-only callers, but make the
-        # absence of the structural selector explicit.  Retweet production
-        # always passes _select_hawkes_cut below.
+        # absence of the structural selector explicit.  Production stationary
+        # HM bootstrap always passes _select_hawkes_cut below.
         selected_k = min(available_k)
         selection_stats: Mapping[str, Any] = {
             "criterion": "coarse_scaffold_minimum_fallback",
@@ -920,6 +954,7 @@ def _device_environment(
     env["PYTHONPATH"] = os.pathsep.join(python_paths)
     env.update({
         "PYTHON": str(python_executable),
+        "PYTHONUNBUFFERED": "1",
         "THP_BATCH_SIZE": str(max(1, int(batch_size))),
         "THP_NUM_WORKERS": "0",
         "THP_EPOCHS": str(max(1, int(thp_epochs))),
@@ -935,6 +970,7 @@ def _device_environment(
         "TRAIN_LOG": str(paths["thp_model_log"]),
         "CHECKPOINT": str(paths["thp_checkpoint"]),
         "ENCODED_OUTPUT": str(paths["encoded_train"]),
+        "ATTENTION_ENCODED_PATH": str(paths["attention_encoded_train"]),
         "SUMMARY_CSV": str(paths["summary"]),
         "TREE_CSV": str(paths["tree_csv"]),
         "ATTENTION_SUMMARY_CSV": str(paths["attention_summary"]),
@@ -981,8 +1017,9 @@ def _run_encoder_stage(
         )
 
 
-def build_retweet_hm_upstream(
+def build_stationary_hm_upstream(
     *,
+    dataset: str,
     canonical_path: Path,
     split_manifest_path: Path,
     output_dir: Path,
@@ -993,10 +1030,11 @@ def build_retweet_hm_upstream(
     epochs: int | None = None,
     smoke: bool = False,
 ) -> HMUpstreamArtifacts:
-    """Build the Retweet H-tree using only the declared training split."""
+    """Build a stationary discovery H-tree using only the training split."""
 
     import numpy as np
 
+    dataset = _validate_stationary_dataset(dataset)
     canonical_path = Path(canonical_path).expanduser().resolve()
     split_manifest_path = Path(split_manifest_path).expanduser().resolve()
     root = Path(output_dir).expanduser().resolve()
@@ -1023,6 +1061,7 @@ def build_retweet_hm_upstream(
         "thp_model_log": root / "thp_model.log",
         "thp_checkpoint": root / "thp_checkpoints" / "checkpoint_best.pt",
         "encoded_train": root / "thp_encoded_train.pt",
+        "attention_encoded_train": root / "thp_encoded_attention_train.pt",
         "global_hawkes": root / "hawkes_global.pt",
         "residual_signatures": root / "residual_signatures.pt",
         "summary": root / "sequence_summary_train.csv",
@@ -1070,7 +1109,9 @@ def build_retweet_hm_upstream(
     )
 
     logs = root / "logs"
+    print(f"[HM Upstream] {dataset} THP ...", flush=True)
     _run_encoder_stage("train", env=env, log_path=logs / "01_thp_train.log")
+    print(f"[HM Upstream] {dataset} Encoding ...", flush=True)
     _run_encoder_stage("encode", env=env, log_path=logs / "02_thp_encode_train.log")
 
     source_ids_from_encoding, z_matrix = _load_encoded(paths["encoded_train"])
@@ -1085,6 +1126,30 @@ def build_retweet_hm_upstream(
     ordered_train_records = [record_by_source_id[source_id] for source_id in source_ids_from_encoding]
 
     torch = _load_torch()
+    attention_source_ids = [
+        source_id
+        for source_id, _local_id in sorted(
+            source_to_attention_id.items(), key=lambda item: item[1]
+        )
+    ]
+    attention_embeddings = np.stack(
+        [z_matrix[order[source_id]] for source_id in attention_source_ids],
+        axis=0,
+    )
+    torch.save(
+        {
+            "embeddings": torch.from_numpy(attention_embeddings),
+            "sequence_ids": [str(local_id) for local_id in range(len(attention_source_ids))],
+            "source_ids": attention_source_ids,
+            "source_to_local": {
+                str(source_id): int(source_to_attention_id[source_id])
+                for source_id in attention_source_ids
+            },
+            "evaluation_regime": "strict_inductive",
+            "population": "D_train",
+        },
+        paths["attention_encoded_train"],
+    )
     HawkesFamily, compute_residuals = _memory_imports()
     type_to_index = {
         int(value): index
@@ -1094,6 +1159,7 @@ def build_retweet_hm_upstream(
             for event_type in record["event_types"]
         }))
     }
+    print(f"[HM Upstream] {dataset} Residual ...", flush=True)
     global_model, hawkes_sequences = _fit_hawkes(
         ordered_train_records,
         torch=torch,
@@ -1157,12 +1223,14 @@ def build_retweet_hm_upstream(
             lambda_structure=DEFAULT_HAWKES_STRUCTURE_LAMBDA,
         )
 
+    print(f"[HM Upstream] {dataset} Hierarchy ...", flush=True)
     clusters, cluster_stats = _hierarchical_clusters(
         features,
         source_id_array,
         selector=select_hawkes_cut,
     )
 
+    print(f"[HM Upstream] {dataset} Hawkes laws ...", flush=True)
     cluster_models: dict[int, Any] = {}
     for cluster in clusters:
         cluster_records = [
@@ -1191,6 +1259,7 @@ def build_retweet_hm_upstream(
 
     # The final two stages consume the exact original attention implementation:
     # summary -> Process_input -> attention training -> node-only final encode.
+    print(f"[HM Upstream] {dataset} Attention ...", flush=True)
     _run_encoder_stage(
         "train_attention",
         env=env,
@@ -1209,7 +1278,8 @@ def build_retweet_hm_upstream(
 
     upstream_manifest = {
         "format_version": 1,
-        "dataset": "retweet",
+        "dataset": dataset,
+        "upstream_kind": "stationary_discovery",
         "evaluation_regime": "strict_inductive",
         "population": "D_train",
         "canonical_path": str(canonical_path),
@@ -1276,6 +1346,7 @@ def build_retweet_hm_upstream(
         json.dumps(upstream_manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    print(f"[HM Upstream] {dataset} complete: {paths['h_tree']}", flush=True)
 
     input_paths = tuple(
         path for path in (
@@ -1286,6 +1357,7 @@ def build_retweet_hm_upstream(
             paths["attention_manifest"],
             paths["thp_checkpoint"],
             paths["encoded_train"],
+            paths["attention_encoded_train"],
             paths["global_hawkes"],
             paths["residual_signatures"],
             paths["summary"],
@@ -1304,7 +1376,8 @@ def build_retweet_hm_upstream(
         input_paths=input_paths,
         manifest_path=paths["manifest"],
         metadata={
-            "dataset": "retweet",
+            "dataset": dataset,
+            "upstream_kind": "stationary_discovery",
             "evaluation_regime": "strict_inductive",
             "population": "D_train",
             "cluster_selection": cluster_stats,

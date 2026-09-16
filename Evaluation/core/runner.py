@@ -8,6 +8,7 @@ import math
 import shutil
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +25,9 @@ from .adapters import (
     stationary_command,
 )
 from .hm_bootstrap import (
-    build_retweet_hm_upstream,
-    expected_retweet_hm_upstream,
+    STATIONARY_HM_DATASETS,
+    build_stationary_hm_upstream,
+    expected_stationary_hm_upstream,
 )
 from .cl_protocol import CLProtocol
 from .data import (
@@ -53,6 +55,20 @@ from .specs import JobSpec
 DEFAULT_HM_CONTINUAL_EPOCHS = 60
 
 
+def _mark_hm_phase(target: Path, dataset: str, phase: str) -> None:
+    """Expose stationary HM progress before the final manifest is committed."""
+
+    write_json(
+        target / "status.json",
+        {
+            "state": "running",
+            "phase": phase,
+            "dataset": dataset,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
 def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full", script: str = "") -> Path:
     spec = JobSpec(dataset=dataset, model=model, condition=condition, script=script)
     target = result_dir(spec, args)
@@ -67,15 +83,19 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
             raise ValueError("DWS HM upstream manifest must provide sequence_summary")
         sequence_summary_source = Path(summary_path)
 
-    # HM Retweet has no checked-in oracle H-tree.  Construct its train-only
-    # upstream before composing the Memory command; DWS continues to resolve
-    # its immutable external artifact through the manifest above.  A dry-run
-    # receives deterministic expected paths so it can still show the complete
-    # command without launching THP/attention training.
+    # Stationary discovery HM datasets have no checked-in oracle H-tree.
+    # Construct their train-only upstream before composing the Memory command;
+    # DWS continues to resolve its immutable external artifact through the
+    # manifest above.  A dry-run receives deterministic expected paths so it
+    # can still show the complete command without launching THP/attention
+    # training.
     hm_upstream = None
     if args.dry_run:
-        if model == "HM" and dataset == "retweet":
-            hm_upstream = expected_retweet_hm_upstream(prepared or target / "prepared")
+        if model == "HM" and dataset in STATIONARY_HM_DATASETS:
+            hm_upstream = expected_stationary_hm_upstream(
+                prepared or target / "prepared",
+                dataset,
+            )
         command, cwd, env = stationary_command(
             spec,
             args,
@@ -95,6 +115,9 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
 
     started = time.perf_counter()
     try:
+        if model == "HM" and dataset in STATIONARY_HM_DATASETS:
+            target.mkdir(parents=True, exist_ok=True)
+            _mark_hm_phase(target, dataset, "prepare")
         if prepared is not None:
             prepare_hm_dataset(
                 spec.dataset,
@@ -110,11 +133,16 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
                 ])
                 if sequence_summary_source is not None:
                     inputs.append(prepared / "sequence_summary_train.csv")
+                if dataset in STATIONARY_HM_DATASETS:
+                    _mark_hm_phase(target, dataset, "hm_upstream")
 
-        if model == "HM" and dataset == "retweet":
+        if model == "HM" and dataset in STATIONARY_HM_DATASETS:
             if prepared is None:
-                raise RuntimeError("Retweet HM upstream requires a prepared dataset")
-            hm_upstream = build_retweet_hm_upstream(
+                raise RuntimeError(
+                    f"{dataset} HM upstream requires a prepared dataset"
+                )
+            hm_upstream = build_stationary_hm_upstream(
+                dataset=dataset,
                 canonical_path=prepared / "canonical.csv",
                 split_manifest_path=prepared / "split_manifest.json",
                 output_dir=prepared / "hm_upstream",
@@ -148,8 +176,11 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
                 **dict(hm_upstream.metadata),
             }
         if not begin(target, manifest, args.resume):
+            finish(target, "complete")
             print(f"Complete result already exists: {target}")
             return target
+        if model == "HM" and dataset in STATIONARY_HM_DATASETS:
+            _mark_hm_phase(target, dataset, "memory_training")
         run_command(command, cwd, env, target / "logs" / "train.log")
         copy_checkpoint_contract(target)
         if model == "HM":

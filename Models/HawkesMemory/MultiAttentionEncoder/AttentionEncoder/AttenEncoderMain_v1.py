@@ -453,6 +453,73 @@ class MultiAttentionEncoderPipeline:
               f"(dim={self.d_model})")
         return self.seq_embeddings
 
+    def load_cached_sequence_embeddings(
+        self,
+        encoded_path: str | Path,
+    ) -> Dict[str, torch.Tensor]:
+        """Load the train-only THP representation produced by the upstream stage.
+
+        Stationary HM bootstrap already runs the frozen THP encoder once before
+        residual and structural discovery.  Attention training should consume
+        that exact representation instead of encoding the same sequences a
+        second time.
+        """
+
+        encoded_path = Path(encoded_path).expanduser().resolve()
+        try:
+            payload = torch.load(
+                encoded_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+        except TypeError:  # older torch versions
+            payload = torch.load(encoded_path, map_location="cpu")
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"cached THP encoding artifact must be a mapping: {encoded_path}"
+            )
+
+        raw_embeddings = payload.get("embeddings")
+        raw_ids = payload.get("sequence_ids")
+        if raw_embeddings is None or raw_ids is None:
+            raise ValueError(
+                "cached THP encoding artifact is missing embeddings/sequence_ids: "
+                f"{encoded_path}"
+            )
+        embeddings = torch.as_tensor(raw_embeddings).detach().cpu().float()
+        sequence_ids = [str(value) for value in raw_ids]
+        if embeddings.ndim != 2 or embeddings.shape[0] != len(sequence_ids):
+            raise ValueError(
+                "cached THP encoding shape does not match its sequence ID index: "
+                f"{encoded_path}"
+            )
+        if len(set(sequence_ids)) != len(sequence_ids):
+            raise ValueError(
+                f"cached THP encoding sequence IDs are not unique: {encoded_path}"
+            )
+
+        expected_ids = set(self.all_sequences)
+        actual_ids = set(sequence_ids)
+        if actual_ids != expected_ids:
+            missing = sorted(expected_ids - actual_ids)[:5]
+            extra = sorted(actual_ids - expected_ids)[:5]
+            raise ValueError(
+                "cached THP encoding IDs do not match the attention input "
+                f"(missing={missing}, extra={extra}): {encoded_path}"
+            )
+
+        self.seq_embeddings = {
+            sequence_id: embeddings[index]
+            for index, sequence_id in enumerate(sequence_ids)
+        }
+        self.d_model = int(embeddings.shape[1])
+        print(
+            f"[Phase 1] Loaded cached THP embeddings for "
+            f"{len(self.seq_embeddings)} sequences (dim={self.d_model}) "
+            f"from {encoded_path}"
+        )
+        return self.seq_embeddings
+
     # ======================================================================
     # Phase 2 — Per-Node Pooling via NodeEmbedding
     # ======================================================================
@@ -1015,6 +1082,7 @@ class MultiAttentionEncoderPipeline:
         output_path: Optional[str] = None,
         weights_path: Optional[str] = None,
         node_only: bool = False,
+        encoded_embeddings_path: Optional[str | Path] = None,
     ) -> CrossAttentionOutput:
         """Run the full multi-attention encoder pipeline.
 
@@ -1025,6 +1093,9 @@ class MultiAttentionEncoderPipeline:
         weights_path : str or None
             If provided, load trained attention-module weights so the encoder
             uses learned (not randomly-initialised) parameters.
+        encoded_embeddings_path : str, Path or None
+            Optional train-only THP embedding cache produced by the upstream
+            stage.  When supplied, reuse it instead of re-encoding THP.
         """
         print("=" * 60)
         print("Multi-Attention Encoder Pipeline")
@@ -1044,7 +1115,10 @@ class MultiAttentionEncoderPipeline:
         self.build_global_id_mapping()
 
         # ---- Phase 1: THP Global Encoding ----
-        self.encode_all_sequences_thp()
+        if encoded_embeddings_path is None:
+            self.encode_all_sequences_thp()
+        else:
+            self.load_cached_sequence_embeddings(encoded_embeddings_path)
 
         # ---- Phase 2: Node Input  h_i^0 = [u_i ; s_i ; g_i] ----
         self.encode_nodes()
@@ -1146,7 +1220,16 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to trained attention-module weights (.pt) from Train.py. "
-             "If omitted, modules use random init.",
+        "If omitted, modules use random init.",
+    )
+    parser.add_argument(
+        "--encoded_embeddings",
+        type=Path,
+        default=None,
+        help=(
+            "Optional train-only THP embedding cache from the upstream stage; "
+            "avoids a second THP encoding pass."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -1262,4 +1345,9 @@ if __name__ == "__main__":
                 "attention weights were not trained with the requested split manifest"
             )
 
-    output = pipeline.run(output_path=args.output, weights_path=args.weights, node_only=args.node_only)
+    output = pipeline.run(
+        output_path=args.output,
+        weights_path=args.weights,
+        node_only=args.node_only,
+        encoded_embeddings_path=args.encoded_embeddings,
+    )

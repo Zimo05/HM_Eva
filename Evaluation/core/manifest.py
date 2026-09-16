@@ -113,4 +113,17 @@ def begin(result_dir: Path, manifest: dict[str, Any], resume: bool) -> bool:
 
 
 def finish(result_dir: Path, state: str, error: str | None = None) -> None:
-    write_json(result_dir / "status.json", {"state": state, "error": error, "updated_at": datetime.now(timezone.utc).isoformat()})
+    payload = {
+        "state": state,
+        "error": error,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    status_path = result_dir / "status.json"
+    if status_path.is_file():
+        try:
+            existing = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict) and existing.get("phase") is not None:
+            payload["phase"] = existing["phase"]
+    write_json(status_path, payload)

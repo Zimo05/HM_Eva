@@ -294,6 +294,22 @@ class TreeEpisodicMemory(nn.Module):
             base_age[node_index, :width] = bank.age[:width]
             age_reference[node_index] = bank._age_reference_clock
             valid[node_index, :width] = True
+        # Keep a flattened view and fixed offsets alongside the padded view.
+        # The non-CL/DWS Wake branch uses these identities to schedule active
+        # frontier pairs by node without rebuilding a Python bank object per
+        # event.  They are views (apart from the tiny index tensors), so the
+        # established mirror memory footprint and checkpoint format do not
+        # change.
+        node_offsets = torch.arange(
+            node_count + 1,
+            device=reference.device,
+            dtype=torch.long,
+        ) * capacity
+        memory_node_index = torch.arange(
+            node_count,
+            device=reference.device,
+            dtype=torch.long,
+        ).repeat_interleave(capacity)
         self._packed_mirror = {
             "keys": keys,
             "context_keys": context_keys,
@@ -313,10 +329,24 @@ class TreeEpisodicMemory(nn.Module):
             "base_age": base_age,
             "age_reference": age_reference,
             "valid": valid,
+            "packed_keys": keys.reshape(-1, self.key_dim),
+            "packed_context_keys": context_keys.reshape(
+                -1, max_aliases, self.key_dim
+            ),
+            "packed_residuals": deltas.reshape(-1, self.param_dim),
+            "packed_age": base_age.reshape(-1),
+            "packed_usage": usage.reshape(-1),
+            "node_offsets": node_offsets,
+            "memory_node_index": memory_node_index,
         }
         self._packed_mirror_signature = signature
         self._packed_mirror_rebuilds += 1
         return self._packed_mirror
+
+    def invalidate_packed_mirror(self) -> None:
+        """Invalidate the cached packed read mirror after an ordered commit."""
+        self._packed_mirror_signature = None
+        self._packed_mirror = None
 
     def prepare_packed_read_snapshot(
         self,
@@ -701,6 +731,7 @@ class TreeEpisodicMemory(nn.Module):
         age_offsets: Optional[Tensor] = None,
         info_fields: Optional[Sequence[str]] = None,
         visit_chunk_size: int = 64,
+        block_sparse: bool = False,
     ) -> Tuple[Tensor, Dict[str, Tensor]]:
         """Retrieve all ``prefix × visited-node × bank-row`` entries at once.
 
@@ -710,7 +741,10 @@ class TreeEpisodicMemory(nn.Module):
         Pass a :class:`PackedMemoryReadSnapshot` when several calls belong to
         one transaction and must share the same mirror and age clock.  When
         ``age_offsets`` is supplied, it provides one deterministic clock
-        offset per query row while the mirror remains shared.
+        offset per query row while the mirror remains shared.  The optional
+        ``block_sparse`` mode is reserved for the non-CL/DWS Wake branch: it
+        groups active query rows by frontier node before invoking the same
+        retriever, so H-tree blocks are gathered once per node group.
         """
         if query.ndim != 2 or query.size(-1) != self.key_dim:
             raise ValueError("query must have shape [N, key_dim]")
@@ -817,6 +851,20 @@ class TreeEpisodicMemory(nn.Module):
         active_nodes = flat_nodes.index_select(0, active_rows)
         active_valid = gathered_valid.index_select(0, active_rows)
         active_context_valid = gathered_context_valid.index_select(0, active_rows)
+        if block_sparse and active_rows.numel() > 1:
+            # Flattened frontier visits are the sparse query-node graph. Sort
+            # that graph by node on device so adjacent GEMM rows reuse one
+            # H-tree bank block. Stable sorting preserves chronological order
+            # within a node, while the index-copy below restores query order.
+            # No ``unique().cpu().tolist()`` or event-level host dispatch is
+            # involved.
+            node_order = torch.argsort(active_nodes, stable=True)
+            active_rows = active_rows.index_select(0, node_order)
+            active_nodes = active_nodes.index_select(0, node_order)
+            active_valid = active_valid.index_select(0, node_order)
+            active_context_valid = active_context_valid.index_select(
+                0, node_order
+            )
         flat_delta = query.new_zeros(
             flat_query.size(0), self.param_dim
         )
@@ -865,38 +913,146 @@ class TreeEpisodicMemory(nn.Module):
                 row_age_clock[:, None]
                 - mirror["age_reference"].index_select(0, node_chunk)[:, None]
             ) * active_valid[start:stop].to(query.dtype)
-            retrieved, retrieval_info = self.retriever.forward_batched(
-                query=flat_query.index_select(0, row_chunk),
-                keys=context_keys.index_select(0, node_chunk),
-                # Keep the large [node, capacity, param] residual mirror
-                # shared.  ``node_chunk`` selects the source bank without
-                # expanding deltas to one copy per frontier visit.
-                deltas=deltas,
-                row_bank_indices=node_chunk,
-                usage=usage.index_select(0, node_chunk),
-                age=age_chunk,
-                valid_mask=active_valid[start:stop],
-                write_quality=quality.index_select(0, node_chunk),
-                keep_gate=(
-                    None
-                    if keep_gate is None
-                    else keep_gate.index_select(0, node_chunk)
-                ),
-                null_logit=null_logit,
-                context_valid=active_context_valid[start:stop],
-                keys_normalized=True,
-            )
-            flat_delta = flat_delta.index_copy(0, row_chunk, retrieved)
-            alpha.index_copy_(0, row_chunk, retrieval_info["alpha"])
-            similarity.index_copy_(0, row_chunk, retrieval_info["sim"])
-            effective_k.index_copy_(
-                0, row_chunk, retrieval_info["effective_k"]
-            )
-            null_alpha.index_copy_(
-                0, row_chunk, retrieval_info["null_alpha"]
-            )
+            if block_sparse:
+                # The active frontier is already sorted by node above.  Keep
+                # the remaining grouping entirely on device: each Python
+                # iteration is one unique H-tree node, never one event/node
+                # visit.  The retriever still performs the full tensorized
+                # entmax/top-support calculation for all queries in the node
+                # group, while avoiding a repeated key-bank block per query.
+                chunk_size = stop - start
+                chunk_delta = query.new_zeros(
+                    chunk_size,
+                    self.param_dim,
+                )
+                chunk_alpha = query.new_zeros(chunk_size, capacity)
+                chunk_similarity = query.new_zeros(chunk_size, capacity)
+                chunk_effective_k = torch.zeros(
+                    chunk_size,
+                    dtype=torch.long,
+                    device=device,
+                )
+                chunk_null_alpha = query.new_zeros(chunk_size)
+                unique_nodes = torch.unique_consecutive(node_chunk)
+                query_chunk = flat_query.index_select(0, row_chunk)
+                valid_chunk = active_valid[start:stop]
+                context_valid_chunk = active_context_valid[start:stop]
+                for group_index in range(unique_nodes.size(0)):
+                    group_node = unique_nodes[group_index:group_index + 1]
+                    group_rows = torch.nonzero(
+                        node_chunk.eq(group_node[0]),
+                        as_tuple=False,
+                    ).flatten()
+                    group_size = group_rows.numel()
+                    group_query = query_chunk.index_select(0, group_rows)
+                    group_keys = context_keys.index_select(
+                        0,
+                        group_node,
+                    ).expand(group_size, -1, -1, -1)
+                    group_deltas = deltas.index_select(0, group_node)
+                    group_valid = valid_chunk.index_select(0, group_rows)
+                    group_context_valid = context_valid_chunk.index_select(
+                        0,
+                        group_rows,
+                    )
+                    group_usage = usage.index_select(0, group_node).expand(
+                        group_size,
+                        -1,
+                    )
+                    group_age = age_chunk.index_select(0, group_rows)
+                    group_quality = quality.index_select(0, group_node).expand(
+                        group_size,
+                        -1,
+                    )
+                    group_keep_gate = (
+                        None
+                        if keep_gate is None
+                        else keep_gate.index_select(0, group_node).expand(
+                            group_size,
+                            -1,
+                        )
+                    )
+                    # ``row_bank_indices`` selects the single shared bank
+                    # block without materializing [group, capacity, P].
+                    group_delta, group_info = self.retriever.forward_batched(
+                        query=group_query,
+                        keys=group_keys,
+                        deltas=group_deltas,
+                        row_bank_indices=torch.zeros(
+                            group_size,
+                            dtype=torch.long,
+                            device=device,
+                        ),
+                        usage=group_usage,
+                        age=group_age,
+                        valid_mask=group_valid,
+                        write_quality=group_quality,
+                        keep_gate=group_keep_gate,
+                        null_logit=null_logit,
+                        context_valid=group_context_valid,
+                        keys_normalized=True,
+                    )
+                    chunk_delta.index_copy_(0, group_rows, group_delta)
+                    chunk_alpha.index_copy_(
+                        0,
+                        group_rows,
+                        group_info["alpha"],
+                    )
+                    chunk_similarity.index_copy_(
+                        0,
+                        group_rows,
+                        group_info["sim"],
+                    )
+                    chunk_effective_k.index_copy_(
+                        0,
+                        group_rows,
+                        group_info["effective_k"],
+                    )
+                    chunk_null_alpha.index_copy_(
+                        0,
+                        group_rows,
+                        group_info["null_alpha"],
+                    )
+                flat_delta.index_copy_(0, row_chunk, chunk_delta)
+                alpha.index_copy_(0, row_chunk, chunk_alpha)
+                similarity.index_copy_(0, row_chunk, chunk_similarity)
+                effective_k.index_copy_(0, row_chunk, chunk_effective_k)
+                null_alpha.index_copy_(0, row_chunk, chunk_null_alpha)
+                retrieval_alpha = chunk_alpha
+            else:
+                retrieved, retrieval_info = self.retriever.forward_batched(
+                    query=flat_query.index_select(0, row_chunk),
+                    keys=context_keys.index_select(0, node_chunk),
+                    # Keep the large [node, capacity, param] residual mirror
+                    # shared.  ``node_chunk`` selects the source bank without
+                    # expanding deltas to one copy per frontier visit.
+                    deltas=deltas,
+                    row_bank_indices=node_chunk,
+                    usage=usage.index_select(0, node_chunk),
+                    age=age_chunk,
+                    valid_mask=active_valid[start:stop],
+                    write_quality=quality.index_select(0, node_chunk),
+                    keep_gate=(
+                        None
+                        if keep_gate is None
+                        else keep_gate.index_select(0, node_chunk)
+                    ),
+                    null_logit=null_logit,
+                    context_valid=active_context_valid[start:stop],
+                    keys_normalized=True,
+                )
+                flat_delta = flat_delta.index_copy(0, row_chunk, retrieved)
+                alpha.index_copy_(0, row_chunk, retrieval_info["alpha"])
+                similarity.index_copy_(0, row_chunk, retrieval_info["sim"])
+                effective_k.index_copy_(
+                    0, row_chunk, retrieval_info["effective_k"]
+                )
+                null_alpha.index_copy_(
+                    0, row_chunk, retrieval_info["null_alpha"]
+                )
+                retrieval_alpha = retrieval_info["alpha"]
             if credit is not None:
-                credit.index_add_(0, node_chunk, retrieval_info["alpha"])
+                credit.index_add_(0, node_chunk, retrieval_alpha)
 
         if update_state:
             with torch.no_grad():

@@ -241,6 +241,12 @@ class WakeObjectiveConfig:
     # Appended to preserve positional construction of older configs.
     # Accepted-sample calibrated duplicate radius quantile.
     prototype_duplicate_quantile: float = 0.85
+    # Optional instrumentation for the dataset-specific non-CL/DWS Wake
+    # branch.  These are deliberately appended so older positional configs
+    # and checkpoints remain loadable.
+    wake_profile: bool = False
+    wake_profile_max_wavefronts: int = 20
+    wake_profile_epoch: int = 1
 
 
 @dataclass
@@ -445,6 +451,10 @@ class TrainingConfig:
     # batches.  Online-write/controller rollouts remain sequential.  Appended
     # to preserve positional construction of older configs.
     validation_batch_size: int = 64
+    # Wake dispatch is dataset-aware only at the outer entry point.  ``cl``
+    # and ``dws`` retain the established path; other datasets opt into the
+    # read-batched, ordered-transaction entry point.
+    wake_dataset_family: str = "unknown"
 
 
 def _differentiable_merge_settings(

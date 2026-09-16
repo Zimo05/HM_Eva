@@ -97,6 +97,10 @@ def prepare_dataloader(opt):
     all_streams, num_types = load_json_data(opt.data)
     print(f"[Info] Loaded {len(all_streams)} sequences, num_types={num_types}")
     opt.data_provenance = None
+    strict_bootstrap = bool(
+        getattr(opt, "strict_bootstrap", False)
+        or opt.split_manifest is not None
+    )
     if opt.split_manifest is None:
         train_data, dev_data, test_data = split_data(
             all_streams,
@@ -135,7 +139,15 @@ def prepare_dataloader(opt):
         splits = manifest["splits"]
         train_data = [source_to_stream[index] for index in splits["train"]]
         dev_data = [source_to_stream[index] for index in splits["validation"]]
-        test_data = [source_to_stream[index] for index in splits["test"]]
+        # Strict bootstrap never materializes the formal test partition.  The
+        # shared manifest is still recorded on the checkpoint, but formal
+        # test evaluation belongs exclusively to Evaluate.py after HM has
+        # produced its final checkpoint.
+        test_data = (
+            []
+            if strict_bootstrap
+            else [source_to_stream[index] for index in splits["test"]]
+        )
         opt.data_provenance = build_data_provenance(manifest)
     print(f"[Info] Split: train={len(train_data)}, dev={len(dev_data)}, test={len(test_data)}")
 
@@ -469,6 +481,11 @@ def main():
                         help="Strict shared train/validation/test manifest.")
     parser.add_argument("--split-data-path", type=Path, default=None,
                         help="Source CSV whose SHA-256 is recorded by the manifest.")
+    parser.add_argument(
+        "--strict-bootstrap",
+        action="store_true",
+        help="Train/validate only; defer formal test evaluation to Evaluate.py.",
+    )
 
     # Training
     parser.add_argument("-epoch", type=int, default=100)
@@ -516,6 +533,9 @@ def main():
                         help="Directory to save checkpoint.pt files")
 
     opt = parser.parse_args()
+
+    if opt.strict_bootstrap and opt.split_manifest is None:
+        parser.error("--strict-bootstrap requires --split-manifest")
 
     np.random.seed(opt.seed)
     torch.manual_seed(opt.seed)
@@ -615,19 +635,30 @@ def main():
         opt,
     )
 
-    # --- Test evaluation with the validation-selected checkpoint ---
-    checkpoint = torch.load(best_path, map_location=opt.device)
-    unwrap_model(model).load_state_dict(checkpoint["state_dict"])
-    print(f"\n[Info] Loaded best validation-accuracy checkpoint: {best_path}")
-    print("[Info] Evaluating on test set ...")
-    test_event, test_type, test_time, test_top3, test_f1 = eval_epoch(
-        model, testloader, pred_loss_func, opt
+    strict_bootstrap = bool(
+        getattr(opt, "strict_bootstrap", False)
+        or opt.split_manifest is not None
     )
-    print(
-        f"  - (Test)  loglikelihood: {test_event: 8.5f}, "
-        f"accuracy: {test_type: 8.5f}, top3: {test_top3: 8.5f}, "
-        f"macro-F1: {test_f1: 8.5f}, RMSE: {test_time: 8.5f}"
-    )
+    if strict_bootstrap:
+        print(
+            "\n[Strict bootstrap] Formal THP test evaluation is deferred "
+            "to Evaluate.py after the final HM checkpoint."
+        )
+    else:
+        # Legacy standalone mode retains its historical post-training test
+        # report.  The shared-manifest benchmark path never enters this arm.
+        checkpoint = torch.load(best_path, map_location=opt.device)
+        unwrap_model(model).load_state_dict(checkpoint["state_dict"])
+        print(f"\n[Info] Loaded best validation-accuracy checkpoint: {best_path}")
+        print("[Info] Evaluating on test set ...")
+        test_event, test_type, test_time, test_top3, test_f1 = eval_epoch(
+            model, testloader, pred_loss_func, opt
+        )
+        print(
+            f"  - (Test)  loglikelihood: {test_event: 8.5f}, "
+            f"accuracy: {test_type: 8.5f}, top3: {test_top3: 8.5f}, "
+            f"macro-F1: {test_f1: 8.5f}, RMSE: {test_time: 8.5f}"
+        )
 
 
 if __name__ == "__main__":

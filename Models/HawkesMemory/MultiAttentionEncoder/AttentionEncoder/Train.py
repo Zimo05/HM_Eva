@@ -104,6 +104,39 @@ def split_sequence_indices(
     )
 
 
+def split_train_internal_dev_ids(
+    source_ids: Collection[int],
+    train_ratio: float = 0.8,
+    dev_ratio: float = 0.1,
+    seed: int = 42,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Split only ``D_train`` into optimizer-fit and internal-dev IDs.
+
+    The formal validation and test partitions are intentionally not accepted
+    here.  The two requested ratios are normalized within ``D_train`` so
+    every training source is assigned to either the fit or internal-dev pool;
+    the unused third split from the legacy helper cannot become an accidental
+    formal-test evaluation.
+    """
+    ids = np.asarray([int(value) for value in source_ids], dtype=np.int64)
+    if ids.size < 2:
+        raise ValueError("At least two D_train sequences are required for internal dev.")
+    if train_ratio <= 0.0 or dev_ratio <= 0.0:
+        raise ValueError(
+            "train_ratio and dev_ratio must be positive for strict bootstrap."
+        )
+
+    permutation = np.random.RandomState(seed).permutation(ids.size)
+    dev_fraction = dev_ratio / (train_ratio + dev_ratio)
+    n_dev = max(1, min(ids.size - 1, int(ids.size * dev_fraction)))
+    n_fit = ids.size - n_dev
+    shuffled = ids[permutation]
+    return (
+        torch.as_tensor(shuffled[:n_fit], dtype=torch.long),
+        torch.as_tensor(shuffled[n_fit:], dtype=torch.long),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routing-supervision targets
 # ---------------------------------------------------------------------------
@@ -300,9 +333,10 @@ class EncoderTrainer:
         train_ratio: float = 0.8,
         dev_ratio: float = 0.1,
         split_seed: int = 42,
-        patience: int = 10,
+        patience: int = 0,
         min_delta: float = 1e-4,
         split_manifest: Dict[str, object] | None = None,
+        strict_bootstrap: bool | None = None,
     ) -> Dict[str, object]:
         p = self.p
         Z = p.Z_matrix                                   # [S, d]
@@ -310,6 +344,10 @@ class EncoderTrainer:
         leaf_t, path_t = build_routing_targets(p)
         leaf_t = leaf_t.to(self.device)
         path_t = path_t.to(self.device)
+        if strict_bootstrap is None:
+            strict_bootstrap = split_manifest is not None
+        if strict_bootstrap and split_manifest is None:
+            raise ValueError("strict bootstrap requires a shared split manifest")
         if split_manifest is None:
             train_pos, dev_pos, test_pos = split_sequence_indices(
                 S,
@@ -327,17 +365,42 @@ class EncoderTrainer:
             test_cpu = thp_order_global_ids[test_pos]
         else:
             splits = split_manifest["splits"]
-            train_cpu = torch.tensor(splits["train"], dtype=torch.long)
-            dev_cpu = torch.tensor(splits["validation"], dtype=torch.long)
-            test_cpu = torch.tensor(splits["test"], dtype=torch.long)
+            formal_train_cpu = torch.tensor(splits["train"], dtype=torch.long)
+            if strict_bootstrap:
+                # Attention bootstrap is an unsupervised train-only stage. It
+                # may use an internal dev slice of D_train for checkpoint
+                # selection, but formal validation/test IDs never enter this
+                # trainer and no formal test metrics are produced.
+                train_cpu, dev_cpu = split_train_internal_dev_ids(
+                    formal_train_cpu.tolist(),
+                    train_ratio=train_ratio,
+                    dev_ratio=dev_ratio,
+                    seed=split_seed,
+                )
+                test_cpu = torch.empty(0, dtype=torch.long)
+            else:
+                train_cpu = formal_train_cpu
+                dev_cpu = torch.tensor(splits["validation"], dtype=torch.long)
+                test_cpu = torch.tensor(splits["test"], dtype=torch.long)
+        node_pool_cpu = formal_train_cpu if strict_bootstrap else train_cpu
         train_pool_ids = frozenset(train_cpu.tolist())
         train_idx = train_cpu.to(self.device)
 
         print("\n" + "=" * 60)
-        print(
-            f"Split: train={train_cpu.numel()}, dev={dev_cpu.numel()}, "
-            f"test={test_cpu.numel()} (seed={split_seed})"
-        )
+        if strict_bootstrap:
+            print(
+                f"Strict bootstrap split: D_train fit={train_cpu.numel()}, "
+                f"internal-dev={dev_cpu.numel()} (seed={split_seed})"
+            )
+            print(
+                "Formal validation/test are excluded; formal test is deferred "
+                "to Evaluate.py after final HM checkpoint."
+            )
+        else:
+            print(
+                f"Split: train={train_cpu.numel()}, dev={dev_cpu.numel()}, "
+                f"test={test_cpu.numel()} (seed={split_seed})"
+            )
         print(
             f"Training: {epochs} epochs, {train_cpu.numel()} train sequences, "
             f"batch={batch_size}"
@@ -429,10 +492,11 @@ class EncoderTrainer:
                     f"dev[{self._format_metrics(dev_metrics)}]"
                 )
 
-            if patience > 0 and stale_epochs >= patience:
+            effective_patience = 0 if strict_bootstrap else patience
+            if effective_patience > 0 and stale_epochs >= effective_patience:
                 print(
                     f"[Early stopping] dev route loss did not improve by "
-                    f"{min_delta:g} for {patience} epochs."
+                    f"{min_delta:g} for {effective_patience} epochs."
                 )
                 break
 
@@ -442,23 +506,14 @@ class EncoderTrainer:
             module.load_state_dict(state)
         self.recon_head.load_state_dict(best_recon)
 
-        test_metrics = self._evaluate(
-            test_cpu,
-            leaf_t,
-            path_t,
-            train_pool_ids=train_pool_ids,
-            batch_size=batch_size,
-        )
         print("=" * 60)
         print(
             f"Training complete. Restored epoch {best_epoch} "
             f"(best dev route loss={best_dev_route:.6f})."
         )
-        print(f"[Test] {self._format_metrics(test_metrics)}")
-        return {
+        result: Dict[str, object] = {
             "best_epoch": best_epoch,
             "best_dev_route_loss": best_dev_route,
-            "test_metrics": test_metrics,
             "split": {
                 "seed": split_seed,
                 "train_ratio": train_ratio,
@@ -466,9 +521,41 @@ class EncoderTrainer:
                 "train_indices": train_cpu.tolist(),
                 "dev_indices": dev_cpu.tolist(),
                 "test_indices": test_cpu.tolist(),
-                "node_pool": "train_only",
+                "node_pool_indices": node_pool_cpu.tolist(),
+                "node_pool": "D_train" if strict_bootstrap else "train_only",
+                "fit_pool": (
+                    "D_train_internal_fit" if strict_bootstrap else "train"
+                ),
             },
         }
+        if strict_bootstrap:
+            internal_dev_metrics = self._evaluate(
+                dev_cpu,
+                leaf_t,
+                path_t,
+                train_pool_ids=train_pool_ids,
+                batch_size=batch_size,
+            )
+            print(f"[Internal-dev] {self._format_metrics(internal_dev_metrics)}")
+            result["internal_dev_metrics"] = internal_dev_metrics
+            result["bootstrap_protocol"] = {
+                "scope": "D_train",
+                "formal_validation_used": False,
+                "formal_test_used": False,
+                "formal_test_evaluation": "deferred_to_Evaluate.py",
+                "early_stopping": False,
+            }
+        else:
+            test_metrics = self._evaluate(
+                test_cpu,
+                leaf_t,
+                path_t,
+                train_pool_ids=train_pool_ids,
+                batch_size=batch_size,
+            )
+            print(f"[Test] {self._format_metrics(test_metrics)}")
+            result["test_metrics"] = test_metrics
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -514,17 +601,25 @@ def main() -> None:
                         help="Random seed for reproducible attention weights.")
     parser.add_argument("--train_ratio", type=float, default=0.8)
     parser.add_argument("--dev_ratio", type=float, default=0.1)
-    parser.add_argument("--patience", type=int, default=10,
+    parser.add_argument("--patience", type=int, default=0,
                         help="Early-stop patience measured on dev routing loss; "
-                             "0 disables early stopping.")
+                             "0 disables early stopping (fixed 50-epoch contract).")
     parser.add_argument("--min_delta", type=float, default=1e-4,
                         help="Minimum dev routing-loss improvement.")
     parser.add_argument("--split-manifest", type=Path, default=None,
                         help="Strict shared split manifest.")
     parser.add_argument("--split-data-path", type=Path, default=None,
                         help="Source CSV whose SHA-256 is recorded by the manifest.")
+    parser.add_argument(
+        "--strict-bootstrap",
+        action="store_true",
+        help="Use D_train/internal-dev only and defer formal test to Evaluate.py.",
+    )
 
     args = parser.parse_args()
+
+    if args.strict_bootstrap and args.split_manifest is None:
+        parser.error("--strict-bootstrap requires --split-manifest")
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -593,18 +688,26 @@ def main() -> None:
         patience=args.patience,
         min_delta=args.min_delta,
         split_manifest=strict_manifest,
+        strict_bootstrap=args.strict_bootstrap or strict_manifest is not None,
     )
 
     # ---- Save the best dev checkpoint and its split metadata ----
     metadata = {
         "best_epoch": training_result["best_epoch"],
         "best_dev_route_loss": training_result["best_dev_route_loss"],
-        "test_metrics": training_result["test_metrics"],
         "split": training_result["split"],
         "evaluation_regime": (
-            "strict_inductive" if strict_manifest is not None else "transductive"
+            "strict_inductive"
+            if strict_manifest is not None or args.strict_bootstrap
+            else "transductive"
         ),
     }
+    if "test_metrics" in training_result:
+        metadata["test_metrics"] = training_result["test_metrics"]
+    if "internal_dev_metrics" in training_result:
+        metadata["internal_dev_metrics"] = training_result["internal_dev_metrics"]
+    if "bootstrap_protocol" in training_result:
+        metadata["bootstrap_protocol"] = training_result["bootstrap_protocol"]
     if strict_manifest is not None:
         metadata["data_provenance"] = build_data_provenance(
             strict_manifest, thp_checkpoint=args.checkpoint

@@ -2080,7 +2080,9 @@ class TrainingWakeSupportMixin:
                 persistent = action != "queue"
                 if persistent:
                     persistent_selected[probe_index] = True
+                    self._wake_profile_start("queue_split")
                     self.controller.split_queues[owner_id] += item.queue_weight
+                    self._wake_profile_stop("queue_split")
 
         def request_token(probe_index: int) -> tuple[int, int]:
             sequence_row = int(sequence_rows[probe_index].detach().cpu())

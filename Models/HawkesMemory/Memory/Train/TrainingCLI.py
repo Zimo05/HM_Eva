@@ -133,6 +133,33 @@ def _normalise_config_value(value):
     return value
 
 
+def _infer_wake_dataset_family(args) -> str:
+    """Classify the dataset only for the Wake entry-point dispatch.
+
+    Continual stages carry explicit CL metadata.  Stationary DWS runs keep
+    ``DWS`` in their source/prepared path.  Everything else is deliberately
+    treated as the non-CL/DWS family, which covers Retweet, Taxi, and Taobao
+    without adding a new required CLI argument to existing commands.
+    """
+
+    if any(
+        getattr(args, name, None) is not None
+        for name in ("cl_task_id", "cl_config", "benchmark_manifest")
+    ):
+        return "cl"
+
+    data_path = Path(str(getattr(args, "data_path", ""))).expanduser()
+    path_text = str(data_path).casefold()
+    path_parts = {part.casefold() for part in data_path.parts}
+    if "continual" in path_parts or "cl-core" in path_text:
+        return "cl"
+    if "dws" in path_parts or data_path.name.casefold().startswith(
+        "hawkes_dataset_"
+    ):
+        return "dws"
+    return "non_cl_dws"
+
+
 def _load_json_object(path: str | Path) -> dict:
     path = Path(path).expanduser().resolve()
     if not path.is_file():
@@ -477,6 +504,11 @@ def _check_resume_config_drift(args, payload: Mapping) -> None:
 def _apply_cl_metadata(trainer, args) -> None:
     """Attach immutable benchmark/config provenance to future checkpoints."""
 
+    # This is metadata only; it selects the optional outer Wake entry point.
+    # The CL/DWS branches remain on the established implementation.
+    trainer.training_config.wake_dataset_family = _infer_wake_dataset_family(
+        args
+    )
     if args.cl_config:
         path = Path(args.cl_config).expanduser().resolve()
         trainer.training_config.cl_config_path = str(path)
@@ -852,6 +884,23 @@ def _parse_args(argv=None):
             "Maximum active (event, visited-node) pairs processed by one "
             "packed episodic retrieval kernel."
         ),
+    )
+    parser.add_argument(
+        "--wake-profile",
+        action="store_true",
+        help="Profile only the non-CL/DWS Wake branch.",
+    )
+    parser.add_argument(
+        "--wake-profile-max-wavefronts",
+        type=int,
+        default=20,
+        help="Maximum number of Wake wavefronts included in the profile.",
+    )
+    parser.add_argument(
+        "--wake-profile-epoch",
+        type=int,
+        default=1,
+        help="Absolute training epoch to profile.",
     )
     parser.add_argument(
         "--route-balance-max-steps",
@@ -1892,6 +1941,11 @@ def main() -> None:
         trainer.wake_config.retrieval_visit_chunk_size = (
             args.retrieval_visit_chunk_size
         )
+        trainer.wake_config.wake_profile = args.wake_profile
+        trainer.wake_config.wake_profile_max_wavefronts = (
+            args.wake_profile_max_wavefronts
+        )
+        trainer.wake_config.wake_profile_epoch = args.wake_profile_epoch
         trainer.wake_config.route_balance_max_steps = (
             args.route_balance_max_steps
         )
@@ -2287,6 +2341,9 @@ def main() -> None:
             wake_wavefront_batch_size=args.wake_wavefront_batch_size,
             retrieval_microbatch=args.retrieval_microbatch,
             retrieval_visit_chunk_size=args.retrieval_visit_chunk_size,
+            wake_profile=args.wake_profile,
+            wake_profile_max_wavefronts=args.wake_profile_max_wavefronts,
+            wake_profile_epoch=args.wake_profile_epoch,
             route_balance_max_steps=args.route_balance_max_steps,
             route_balance_target_kl=args.route_balance_target_kl,
             count_similarity_low=args.count_similarity_low,
@@ -2348,6 +2405,7 @@ def main() -> None:
             training_metrics_path=args.training_metrics_path,
             training_plot_path=args.training_plot_path,
             validation_batch_size=args.validation_batch_size,
+            wake_dataset_family=_infer_wake_dataset_family(args),
         ),
         device=constructor.device,
     )

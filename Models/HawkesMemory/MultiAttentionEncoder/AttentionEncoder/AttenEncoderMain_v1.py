@@ -1059,7 +1059,10 @@ class MultiAttentionEncoderPipeline:
             metadata = self.load_module_weights(weights_path)
             self._set_module_mode()
             split = metadata.get("split", {})
-            train_pool_ids = split.get("train_indices")
+            train_pool_ids = split.get(
+                "node_pool_indices",
+                split.get("train_indices"),
+            )
             if train_pool_ids is not None:
                 print(
                     f"[Leakage guard] Rebuilding H_tree from "
@@ -1173,6 +1176,18 @@ if __name__ == "__main__":
                         help="Strict shared split manifest.")
     parser.add_argument("--split-data-path", type=Path, default=None,
                         help="Source CSV whose SHA-256 is recorded by the manifest.")
+    parser.add_argument(
+        "--provenance-split-manifest",
+        type=Path,
+        default=None,
+        help="Formal benchmark manifest to record on a train-only H-tree artifact.",
+    )
+    parser.add_argument(
+        "--provenance-split-data-path",
+        type=Path,
+        default=None,
+        help="Source data path for --provenance-split-manifest hash validation.",
+    )
 
     args = parser.parse_args()
 
@@ -1194,6 +1209,13 @@ if __name__ == "__main__":
         device=args.device,
     )
 
+    if args.provenance_split_manifest is not None and args.split_manifest is None:
+        parser.error("--provenance-split-manifest requires --split-manifest")
+    if args.provenance_split_data_path is not None and args.provenance_split_manifest is None:
+        parser.error("--provenance-split-data-path requires --provenance-split-manifest")
+    if args.provenance_split_manifest is not None and args.provenance_split_data_path is None:
+        parser.error("--provenance-split-data-path is required with --provenance-split-manifest")
+
     if args.split_manifest is not None:
         if args.split_data_path is None:
             parser.error("--split-data-path is required with --split-manifest")
@@ -1204,8 +1226,28 @@ if __name__ == "__main__":
             data_path=args.split_data_path,
             available_source_ids=pipeline.global_id_to_key.keys(),
         )
+        provenance_manifest = manifest
+        if args.provenance_split_manifest is not None:
+            raw_provenance = json.loads(
+                args.provenance_split_manifest.read_text(encoding="utf-8")
+            )
+            if not isinstance(raw_provenance, dict):
+                parser.error("provenance split manifest has invalid splits")
+            provenance_splits = raw_provenance.get("splits", {})
+            if not isinstance(provenance_splits, dict):
+                parser.error("provenance split manifest has invalid splits")
+            provenance_source_ids = {
+                int(source_id)
+                for values in provenance_splits.values()
+                for source_id in values
+            }
+            provenance_manifest = load_strict_manifest(
+                args.provenance_split_manifest,
+                data_path=args.provenance_split_data_path,
+                available_source_ids=provenance_source_ids,
+            )
         pipeline.data_provenance = build_data_provenance(
-            manifest,
+            provenance_manifest,
             thp_checkpoint=args.checkpoint,
             attention_weights=args.weights,
         )

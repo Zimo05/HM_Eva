@@ -5,8 +5,8 @@ oracle tree, so its stationary HM job must construct the upstream state before
 Memory training:
 
     D_train -> THP pretrain -> THP train encoding -> residual signatures
-             -> train-only hierarchical clustering -> Hawkes semantic laws
-             -> attention encoder -> H-tree artifact
+             -> train-only hierarchy + Hawkes structural cut selection
+             -> Hawkes semantic laws -> attention encoder -> H-tree artifact
 
 This module deliberately keeps the construction separate from the Memory
 trainer.  The returned artifact descriptor is consumed by ``runner.py`` and
@@ -23,7 +23,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .io import sha256
 from .paths import MODELS_ROOT, PROJECT_ROOT
@@ -38,6 +38,14 @@ DEFAULT_RESIDUAL_RANK = 4
 DEFAULT_SEMANTIC_BLEND = 0.0
 DEFAULT_CLUSTER_MIN = 4
 DEFAULT_CLUSTER_MAX = 8
+# The paper's feature metric gives the THP and Hawkes-dynamics blocks equal
+# squared-distance weight after per-sample block normalization.  Keeping this
+# as a named contract makes the choice visible in the upstream manifest.
+DEFAULT_FEATURE_ALPHA = 0.5
+DEFAULT_HAWKES_STRUCTURE_LAMBDA = 1.0
+# Candidate structural laws use the same cold-start budget as the final
+# semantic-law experts; adjacent cuts reuse already-fitted tree nodes.
+DEFAULT_HAWKES_SELECTION_EPOCHS = DEFAULT_HAWKES_EPOCHS
 
 
 @dataclass(frozen=True)
@@ -221,6 +229,70 @@ def _write_thp_json(
     )
 
 
+def _write_attention_train_json(
+    records: Iterable[Mapping[str, Any]],
+    output_path: Path,
+) -> dict[int, int]:
+    """Write a train-only attention view with contiguous local sequence IDs.
+
+    The canonical/THP artifacts retain benchmark source IDs.  The attention
+    implementation indexes its tensors from zero, so this view intentionally
+    uses local IDs and returns the original-to-local mapping for provenance.
+    It contains only ``D_train`` records.
+    """
+    ordered = sorted(records, key=lambda item: int(item["source_index"]))
+    source_to_local = {
+        int(record["source_index"]): local_id
+        for local_id, record in enumerate(ordered)
+    }
+    payload = {
+        str(local_id): _stream_from_record(record)
+        for local_id, record in enumerate(ordered)
+    }
+    if not payload:
+        raise ValueError(f"cannot write empty attention train JSON: {output_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return source_to_local
+
+
+def _write_attention_train_manifest(
+    output_path: Path,
+    *,
+    data_path: Path,
+    parent_manifest_path: Path,
+    parent_manifest_sha256: str,
+    local_to_source: Sequence[int],
+    seed: int,
+) -> None:
+    """Describe the train-only attention view without formal val/test rows."""
+    manifest = {
+        "format_version": 1,
+        "kind": "attention_train_only_bootstrap",
+        "data_path": str(data_path),
+        "data_sha256": sha256(data_path),
+        "parent_manifest_path": str(parent_manifest_path),
+        "parent_manifest_sha256": parent_manifest_sha256,
+        "seed": int(seed),
+        "splits": {
+            "train": list(range(len(local_to_source))),
+            "validation": [],
+            "test": [],
+        },
+        "source_id_map": {
+            "local_to_source": [int(value) for value in local_to_source],
+        },
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _load_torch():
     try:
         import torch
@@ -330,6 +402,34 @@ def _fit_hawkes(
     return model, sequences
 
 
+def _dataset_total_nll(model, dataset: Sequence[Mapping[str, Any]]) -> tuple[float, int]:
+    """Return train-only total Hawkes NLL and event count for a dataset."""
+
+    if not dataset:
+        raise ValueError("Hawkes likelihood evaluation requires a non-empty dataset")
+    torch = _load_torch()
+    device = model.raw_mu.device
+    total_nll = 0.0
+    total_events = 0
+    was_training = bool(model.training)
+    model.eval()
+    try:
+        with torch.no_grad():
+            for cpu_sequence in dataset:
+                sequence = model._move_sequence(cpu_sequence, device)
+                nll = model.sequence_NLL(sequence, model, include_tail=True)
+                if not bool(torch.isfinite(nll).item()):
+                    raise FloatingPointError(
+                        "non-finite Hawkes NLL during structural cut selection"
+                    )
+                total_nll += float(nll.detach().cpu())
+                total_events += int(sequence["times"].numel())
+    finally:
+        if was_training:
+            model.train()
+    return total_nll, total_events
+
+
 def _load_encoded(path: Path):
     torch = _load_torch()
     try:
@@ -351,16 +451,69 @@ def _load_encoded(path: Path):
     return source_ids, embeddings
 
 
-def _normalize_columns(values):
+def _normalize_block_rows(values, *, eps: float = 1e-8):
     import numpy as np
 
     values = np.asarray(values, dtype=np.float32)
     if values.ndim != 2:
         raise ValueError("clustering features must be a matrix")
-    centered = values - values.mean(axis=0, keepdims=True)
-    scale = centered.std(axis=0, keepdims=True)
-    scale[scale < 1e-6] = 1.0
-    return centered / scale
+    if values.shape[0] == 0 or values.shape[1] == 0:
+        raise ValueError("clustering feature blocks must be non-empty matrices")
+    if not np.isfinite(values).all():
+        raise FloatingPointError("clustering feature block contains NaN/Inf")
+    if eps <= 0.0:
+        raise ValueError("block normalization eps must be positive")
+    row_norm = np.linalg.norm(values, axis=1, keepdims=True)
+    return values / np.maximum(row_norm, float(eps))
+
+
+def _build_block_weighted_features(
+    thp_embeddings,
+    residual_signatures,
+    *,
+    alpha: float,
+):
+    """Build the metric used by Retweet's train-only structural scaffold.
+
+    Each block is normalized per sequence before its square-root metric weight
+    is applied.  Consequently the squared Euclidean metric has coefficients
+    ``alpha`` and ``1 - alpha`` for the THP and Hawkes-residual blocks instead
+    of letting the 128-dimensional THP block dominate by dimension alone.
+    """
+
+    import numpy as np
+
+    if not 0.0 <= float(alpha) <= 1.0:
+        raise ValueError("feature alpha must be in [0, 1]")
+    thp = np.asarray(thp_embeddings, dtype=np.float32)
+    residual = np.asarray(residual_signatures, dtype=np.float32)
+    if thp.ndim != 2 or residual.ndim != 2:
+        raise ValueError("THP and residual feature blocks must be matrices")
+    if thp.shape[0] != residual.shape[0]:
+        raise ValueError("THP and residual blocks must have the same row count")
+    thp_hat = _normalize_block_rows(thp)
+    residual_hat = _normalize_block_rows(residual)
+    features = np.concatenate(
+        [
+            np.sqrt(float(alpha)) * thp_hat,
+            np.sqrt(1.0 - float(alpha)) * residual_hat,
+        ],
+        axis=1,
+    ).astype(np.float32, copy=False)
+    return features, {
+        "formula": (
+            "[sqrt(alpha)*row_l2_normalize(z_i), "
+            "sqrt(1-alpha)*row_l2_normalize(vec(Delta_theta_i))]"
+        ),
+        "alpha": float(alpha),
+        "block_normalization": "per_sequence_l2",
+        "squared_distance_weighting": {
+            "thp": float(alpha),
+            "hawkes_residual": float(1.0 - float(alpha)),
+        },
+        "thp_dim": int(thp.shape[1]),
+        "residual_dim": int(residual.shape[1]),
+    }
 
 
 def _two_means(features, indices, *, iterations: int = 10):
@@ -414,30 +567,65 @@ def _cluster_sse(features, indices) -> float:
     return float(((values - center) ** 2).sum())
 
 
-def _hierarchical_clusters(features, source_ids):
+def _clusters_from_snapshot(snapshot, source_ids):
+    import numpy as np
+
+    source_ids = np.asarray(source_ids, dtype=np.int64)
+    ordered = sorted(
+        snapshot,
+        key=lambda cluster: int(source_ids[cluster["indices"]].min()),
+    )
+    clusters = []
+    for cluster_id, cluster in enumerate(ordered):
+        clusters.append({
+            "cluster_id": cluster_id,
+            "path": tuple(cluster["path"]),
+            "indices": np.asarray(cluster["indices"], dtype=np.int64),
+            "source_ids": sorted(
+                int(source_ids[index]) for index in cluster["indices"]
+            ),
+            "sse": float(cluster["sse"]),
+        })
+    return clusters
+
+
+def _hierarchical_clusters(
+    features,
+    source_ids,
+    *,
+    selector: Callable[..., tuple[int, Mapping[str, Any]]] | None = None,
+):
     """Build a train-only binary hierarchy and select a coarse cut.
 
-    The implementation is a scalable divisive hierarchical clustering:
-    it repeatedly bisects the highest-variance active node.  Candidate cuts
-    are scored with a BIC-style train-only
-    reconstruction/complexity criterion, so the number of initial leaves is
-    not supplied as an oracle label.
+    The hierarchy itself is a scalable divisive scaffold: it repeatedly
+    bisects the highest-variance active node.  The production caller supplies
+    a selector that scores each candidate cut with train-only Hawkes structure;
+    no validation/test row or semantic label enters this decision.
     """
 
     import numpy as np
 
+    features = np.asarray(features, dtype=np.float32)
+    source_ids = np.asarray(source_ids, dtype=np.int64)
+    if features.ndim != 2:
+        raise ValueError("hierarchical clustering features must be a matrix")
     n_samples, feature_dim = features.shape
     if n_samples < 2:
         raise ValueError("hierarchical clustering needs at least two train sequences")
+    if source_ids.shape != (n_samples,):
+        raise ValueError("hierarchical clustering source IDs do not match features")
+    if not np.isfinite(features).all():
+        raise FloatingPointError("hierarchical clustering features contain NaN/Inf")
     max_k = min(DEFAULT_CLUSTER_MAX, n_samples)
     min_k = min(DEFAULT_CLUSTER_MIN, max_k)
     if min_k < 2:
         min_k = 2
 
+    root_indices = np.arange(n_samples, dtype=np.int64)
     root = {
         "path": (),
-        "indices": np.arange(n_samples, dtype=np.int64),
-        "sse": _cluster_sse(features, np.arange(n_samples, dtype=np.int64)),
+        "indices": root_indices,
+        "sse": _cluster_sse(features, root_indices),
     }
     active = [root]
     snapshots: dict[int, list[dict[str, Any]]] = {1: list(active)}
@@ -479,36 +667,188 @@ def _hierarchical_clusters(features, source_ids):
     if not available_k:
         raise ValueError("hierarchical clustering could not produce the requested cut")
     total = max(float(sum(cluster["sse"] for cluster in snapshots[1])), 1e-12)
-    scores: dict[str, float] = {}
-    for k in available_k:
-        sse = max(float(sum(cluster["sse"] for cluster in snapshots[k])), 1e-12)
-        # Gaussian BIC up to a common additive constant.  It penalizes extra
-        # leaves using only D_train geometry and has no knowledge of labels.
-        score = (
-            n_samples * feature_dim * math.log(sse / (n_samples * feature_dim))
-            + k * feature_dim * math.log(max(n_samples, 2))
-        )
-        scores[str(k)] = float(score)
-    selected_k = min(available_k, key=lambda k: (scores[str(k)], k))
-    selected = snapshots[selected_k]
-    selected.sort(key=lambda cluster: int(source_ids[cluster["indices"]].min()))
-    clusters = []
-    for cluster_id, cluster in enumerate(selected):
-        clusters.append({
-            "cluster_id": cluster_id,
-            "path": tuple(cluster["path"]),
-            "indices": np.asarray(cluster["indices"], dtype=np.int64),
-            "source_ids": sorted(int(source_ids[index]) for index in cluster["indices"]),
-            "sse": float(cluster["sse"]),
-        })
-    return clusters, {
-        "candidate_k": available_k,
+
+    if selector is None:
+        # Keep the helper usable for small geometry-only callers, but make the
+        # absence of the structural selector explicit.  Retweet production
+        # always passes _select_hawkes_cut below.
+        selected_k = min(available_k)
+        selection_stats: Mapping[str, Any] = {
+            "criterion": "coarse_scaffold_minimum_fallback",
+            "selection_requires_hawkes": True,
+        }
+    else:
+        selected_k, selection_stats = selector(snapshots, available_k)
+        selected_k = int(selected_k)
+        if selected_k not in available_k:
+            raise ValueError(
+                f"structural selector returned unavailable candidate K={selected_k}"
+            )
+
+    clusters = _clusters_from_snapshot(snapshots[selected_k], source_ids)
+    cluster_stats = dict(selection_stats)
+    cluster_stats.update({
+        "candidate_k": [int(value) for value in available_k],
         "selected_k": int(selected_k),
-        "criterion": "train_only_bic_style_sse",
-        "scores": scores,
         "feature_dim": int(feature_dim),
         "sample_count": int(n_samples),
         "total_sse_at_k1": total,
+    })
+    return clusters, cluster_stats
+
+
+def _select_hawkes_cut(
+    snapshots,
+    available_k: Sequence[int],
+    source_ids,
+    record_by_source_id: Mapping[int, Mapping[str, Any]],
+    *,
+    global_model,
+    global_sequences,
+    torch,
+    hawkes_family,
+    type_to_index: Mapping[int, int],
+    output_dir: Path,
+    seed: int,
+    device: str,
+    epochs: int,
+    lambda_structure: float = DEFAULT_HAWKES_STRUCTURE_LAMBDA,
+) -> tuple[int, Mapping[str, Any]]:
+    """Select K with a train-only Hawkes prediction-gain objective.
+
+    ``L_Hawkes`` is the complete sequence NLL (including the tail interval),
+    so lower is better.  For a candidate cut, the prediction gain is
+    ``L_global - sum_k L_cluster_k`` and the selected score is
+    ``prediction_gain - lambda * complexity``.  Candidate semantic laws are
+    fit only on their corresponding D_train rows; the formal validation/test
+    splits are never read here.
+    """
+
+    if not available_k:
+        raise ValueError("Hawkes structural selection received no candidate cuts")
+    if lambda_structure < 0.0:
+        raise ValueError("Hawkes structural complexity weight must be non-negative")
+
+    global_nll, global_event_count = _dataset_total_nll(
+        global_model,
+        global_sequences,
+    )
+    parameter_count = sum(
+        int(parameter.numel()) for parameter in global_model.parameters()
+    )
+    sample_count = len(source_ids)
+    complexity_log = math.log(max(sample_count, 2))
+    candidate_scores: dict[str, dict[str, Any]] = {}
+    score_by_k: dict[str, float] = {}
+    # Consecutive cuts share unsplit nodes.  Fit each structural node once and
+    # reuse its train NLL across candidate K values; this preserves the
+    # criterion while avoiding a complete refit for every cut.
+    node_metrics: dict[tuple[int, ...], tuple[float, int]] = {}
+
+    for candidate_k in available_k:
+        candidate_clusters = _clusters_from_snapshot(
+            snapshots[int(candidate_k)],
+            source_ids,
+        )
+        candidate_nll = 0.0
+        candidate_event_count = 0
+        for cluster in candidate_clusters:
+            cluster_records = []
+            for source_id in cluster["source_ids"]:
+                try:
+                    cluster_records.append(record_by_source_id[int(source_id)])
+                except KeyError as error:
+                    raise ValueError(
+                        f"Hawkes structural cut references unknown source ID {source_id}"
+                    ) from error
+            node_key = tuple(int(value) for value in cluster["path"])
+            node_metric = node_metrics.get(node_key)
+            if node_metric is None:
+                node_seed = int(seed) + 100_000
+                for path_value in node_key:
+                    node_seed = node_seed * 31 + path_value + 1
+                node_seed += int(cluster["source_ids"][0])
+                cluster_model, cluster_sequences = _fit_hawkes(
+                    cluster_records,
+                    torch=torch,
+                    hawkes_family=hawkes_family,
+                    type_to_index=type_to_index,
+                    output_path=(
+                        output_dir
+                        / "nodes"
+                        / f"{_leaf_position(node_key)}.pt"
+                    ),
+                    seed=node_seed,
+                    device=device,
+                    epochs=max(1, int(epochs)),
+                    verbose=False,
+                )
+                node_metric = _dataset_total_nll(
+                    cluster_model,
+                    cluster_sequences,
+                )
+                node_metrics[node_key] = node_metric
+                del cluster_model
+            cluster_nll, cluster_events = node_metric
+            candidate_nll += cluster_nll
+            candidate_event_count += cluster_events
+
+        if candidate_event_count != global_event_count:
+            raise ValueError(
+                "Hawkes structural candidate does not cover the same D_train events"
+            )
+        prediction_gain = global_nll - candidate_nll
+        complexity = (
+            0.5
+            * float(candidate_k)
+            * float(parameter_count)
+            * complexity_log
+        )
+        score = prediction_gain - float(lambda_structure) * complexity
+        if not all(
+            math.isfinite(value)
+            for value in (candidate_nll, prediction_gain, complexity, score)
+        ):
+            raise FloatingPointError(
+                f"non-finite Hawkes structural score for K={candidate_k}"
+            )
+        score_by_k[str(int(candidate_k))] = float(score)
+        candidate_scores[str(int(candidate_k))] = {
+            "hawkes_global_nll": float(global_nll),
+            "hawkes_cluster_nll": float(candidate_nll),
+            "prediction_gain": float(prediction_gain),
+            "complexity": float(complexity),
+            "score": float(score),
+            "event_count": int(candidate_event_count),
+        }
+
+    # Maximize prediction gain minus compression cost; ties prefer the
+    # smaller scaffold because it is the more compressed explanation.
+    selected_k = max(
+        (int(value) for value in available_k),
+        key=lambda value: (score_by_k[str(value)], -value),
+    )
+    selected_detail = candidate_scores[str(selected_k)]
+    return selected_k, {
+        "criterion": "hawkes_prediction_gain_minus_complexity",
+        "objective": "maximize prediction_gain - lambda_structure * complexity",
+        "loss_definition": "L_Hawkes = complete sequence_NLL including tail",
+        "prediction_gain_definition": "L_global - sum_k L_cluster_k",
+        "direction": "maximize",
+        "selection_population": "D_train",
+        "validation_or_test_used": False,
+        "labels_used": False,
+        "lambda_structure": float(lambda_structure),
+        "parameter_count_per_cluster": int(parameter_count),
+        "complexity_definition": (
+            "0.5 * K * parameter_count_per_cluster * log(sample_count)"
+        ),
+        "selection_epochs": int(max(1, int(epochs))),
+        "unique_structural_nodes_fit": int(len(node_metrics)),
+        "selection_artifact_root": str(output_dir),
+        "scores": score_by_k,
+        "candidate_details": candidate_scores,
+        "selected_score": float(selected_detail["score"]),
     }
 
 
@@ -522,6 +862,7 @@ def _write_sequence_summary(
     clusters: Sequence[Mapping[str, Any]],
     models: Mapping[int, Any],
     output_path: Path,
+    source_id_map: Mapping[int, int] | None = None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -547,7 +888,12 @@ def _write_sequence_summary(
                 "mu": repr(mu),
                 "A": repr(excitation),
                 "decay": decay,
-                "sequences": repr(list(cluster["source_ids"])),
+                "sequences": repr([
+                    source_id_map[int(source_id)]
+                    if source_id_map is not None
+                    else int(source_id)
+                    for source_id in cluster["source_ids"]
+                ]),
             })
 
 
@@ -584,16 +930,23 @@ def _device_environment(
         "ATTENTION_SEED": str(int(seed)),
         "DATA_PATH": str(paths["all_json"]),
         "ENCODE_DATA_PATH": str(paths["train_json"]),
+        "ATTENTION_DATA_PATH": str(paths["attention_json"]),
         "OUTPUT_DIR": str(paths["thp_checkpoint_dir"]),
         "TRAIN_LOG": str(paths["thp_model_log"]),
         "CHECKPOINT": str(paths["thp_checkpoint"]),
         "ENCODED_OUTPUT": str(paths["encoded_train"]),
         "SUMMARY_CSV": str(paths["summary"]),
         "TREE_CSV": str(paths["tree_csv"]),
+        "ATTENTION_SUMMARY_CSV": str(paths["attention_summary"]),
+        "ATTENTION_TREE_CSV": str(paths["attention_tree_csv"]),
         "FINAL_OUTPUT": str(paths["h_tree"]),
         "ATTENTION_WEIGHTS": str(paths["attention_weights"]),
         "SPLIT_MANIFEST": str(paths["split_manifest"]),
         "SPLIT_DATA_PATH": str(paths["canonical"]),
+        "ATTENTION_SPLIT_MANIFEST": str(paths["attention_manifest"]),
+        "ATTENTION_SPLIT_DATA_PATH": str(paths["attention_json"]),
+        "PROVENANCE_SPLIT_MANIFEST": str(paths["split_manifest"]),
+        "PROVENANCE_SPLIT_DATA_PATH": str(paths["canonical"]),
     })
     if str(device).startswith("cuda"):
         env["DEVICE_TYPE"] = "cuda"
@@ -664,6 +1017,8 @@ def build_retweet_hm_upstream(
         "split_manifest": split_manifest_path,
         "all_json": root / "thp_train_manifested.json",
         "train_json": root / "thp_train_only.json",
+        "attention_json": root / "attention_train_only.json",
+        "attention_manifest": root / "attention_train_manifest.json",
         "thp_checkpoint_dir": root / "thp_checkpoints",
         "thp_model_log": root / "thp_model.log",
         "thp_checkpoint": root / "thp_checkpoints" / "checkpoint_best.pt",
@@ -672,12 +1027,32 @@ def build_retweet_hm_upstream(
         "residual_signatures": root / "residual_signatures.pt",
         "summary": root / "sequence_summary_train.csv",
         "tree_csv": root / "tree_node_sequences.csv",
+        "attention_summary": root / "sequence_summary_attention_train.csv",
+        "attention_tree_csv": root / "tree_node_sequences_attention.csv",
         "attention_weights": root / "attention_weights.pt",
         "h_tree": root / "h_tree_train.pt",
         "manifest": root / "hm_upstream_manifest.json",
     }
     _write_thp_json(all_records, paths["all_json"])
     _write_thp_json(train_records, paths["train_json"])
+    source_to_attention_id = _write_attention_train_json(
+        train_records,
+        paths["attention_json"],
+    )
+    local_to_source = [
+        source_id
+        for source_id, _local_id in sorted(
+            source_to_attention_id.items(), key=lambda item: item[1]
+        )
+    ]
+    _write_attention_train_manifest(
+        paths["attention_manifest"],
+        data_path=paths["attention_json"],
+        parent_manifest_path=split_manifest_path,
+        parent_manifest_sha256=sha256(split_manifest_path),
+        local_to_source=local_to_source,
+        seed=seed,
+    )
 
     requested_epochs = int(epochs) if epochs is not None else DEFAULT_THP_EPOCHS
     if smoke:
@@ -750,23 +1125,50 @@ def build_retweet_hm_upstream(
         paths["residual_signatures"],
     )
 
-    z = _normalize_columns(z_matrix)
-    residual_matrix = _normalize_columns(residuals.detach().cpu().numpy())
-    if not np.isfinite(z).all() or not np.isfinite(residual_matrix).all():
-        raise FloatingPointError(
-            "THP embeddings or Hawkes residual signatures contain NaN/Inf"
-        )
-    alpha = 0.7
-    features = np.concatenate(
-        [alpha * z, (1.0 - alpha) * residual_matrix],
-        axis=1,
-    ).astype(np.float32, copy=False)
+    alpha = DEFAULT_FEATURE_ALPHA
+    features, feature_contract = _build_block_weighted_features(
+        z_matrix,
+        residuals.detach().cpu().numpy(),
+        alpha=alpha,
+    )
     source_id_array = np.asarray(source_ids_from_encoding, dtype=np.int64)
-    clusters, cluster_stats = _hierarchical_clusters(features, source_id_array)
+
+    # Candidate cuts are evaluated with train-only Hawkes laws.  Adjacent cuts
+    # reuse already-fitted unsplit nodes; selected clusters are then fit with
+    # DEFAULT_HAWKES_EPOCHS for the downstream artifact.
+    selection_epochs = 1 if smoke else DEFAULT_HAWKES_SELECTION_EPOCHS
+    selection_root = root / "hawkes_structure_selection"
+
+    def select_hawkes_cut(snapshots, available_k):
+        return _select_hawkes_cut(
+            snapshots,
+            available_k,
+            source_id_array,
+            record_by_source_id,
+            global_model=global_model,
+            global_sequences=hawkes_sequences,
+            torch=torch,
+            hawkes_family=HawkesFamily,
+            type_to_index=type_to_index,
+            output_dir=selection_root,
+            seed=seed,
+            device=device,
+            epochs=selection_epochs,
+            lambda_structure=DEFAULT_HAWKES_STRUCTURE_LAMBDA,
+        )
+
+    clusters, cluster_stats = _hierarchical_clusters(
+        features,
+        source_id_array,
+        selector=select_hawkes_cut,
+    )
 
     cluster_models: dict[int, Any] = {}
     for cluster in clusters:
-        cluster_records = [ordered_train_records[order[source_id]] for source_id in cluster["source_ids"]]
+        cluster_records = [
+            ordered_train_records[order[source_id]]
+            for source_id in cluster["source_ids"]
+        ]
         cluster_model, _cluster_sequences = _fit_hawkes(
             cluster_records,
             torch=torch,
@@ -780,6 +1182,12 @@ def build_retweet_hm_upstream(
         )
         cluster_models[int(cluster["cluster_id"])] = cluster_model
     _write_sequence_summary(clusters, cluster_models, paths["summary"])
+    _write_sequence_summary(
+        clusters,
+        cluster_models,
+        paths["attention_summary"],
+        source_id_map=source_to_attention_id,
+    )
 
     # The final two stages consume the exact original attention implementation:
     # summary -> Process_input -> attention training -> node-only final encode.
@@ -812,19 +1220,43 @@ def build_retweet_hm_upstream(
         "split_row_counts": {
             name: len(values) for name, values in split_rows.items()
         },
+        "bootstrap_protocol": {
+            "formal_test_evaluation": "deferred_to_Evaluate.py",
+            "thp": {
+                "fit_split": "train",
+                "checkpoint_selection_split": "validation",
+                "formal_test_evaluation": False,
+            },
+            "attention": {
+                "population": "D_train",
+                "fit_split": "D_train_internal_fit",
+                "checkpoint_selection_split": "D_train_internal_dev",
+                "formal_validation_evaluation": False,
+                "formal_test_evaluation": False,
+                "early_stopping": False,
+            },
+        },
         "pipeline": [
             "THP pretrain",
             "train-only sequence encoding",
             "Hawkes residual signatures",
             "train-only hierarchical clustering",
+            "Hawkes prediction-gain minus complexity cut selection",
             "per-cluster Hawkes semantic law",
             "Attention Encoder",
             "H-tree node-only final encode",
         ],
         "cluster_selection": cluster_stats,
+        "attention_training": {
+            "epochs": int(attention_epochs),
+            "patience": 0,
+            "early_stopping": False,
+            "fixed_contract_epochs": DEFAULT_ATTENTION_EPOCHS,
+            "smoke_override": bool(smoke),
+            "split_manifest": str(paths["attention_manifest"]),
+        },
         "feature_contract": {
-            "formula": "[alpha*z_i, (1-alpha)*vec(Delta_theta_i)]",
-            "alpha": alpha,
+            **feature_contract,
             "residual_projection": "lowrank",
             "residual_rank": DEFAULT_RESIDUAL_RANK,
             "residual_stats": residual_stats,
@@ -850,12 +1282,16 @@ def build_retweet_hm_upstream(
             paths["manifest"],
             paths["all_json"],
             paths["train_json"],
+            paths["attention_json"],
+            paths["attention_manifest"],
             paths["thp_checkpoint"],
             paths["encoded_train"],
             paths["global_hawkes"],
             paths["residual_signatures"],
             paths["summary"],
             paths["tree_csv"],
+            paths["attention_summary"],
+            paths["attention_tree_csv"],
             paths["attention_weights"],
             paths["h_tree"],
         )
@@ -872,6 +1308,15 @@ def build_retweet_hm_upstream(
             "evaluation_regime": "strict_inductive",
             "population": "D_train",
             "cluster_selection": cluster_stats,
+            "bootstrap_protocol": upstream_manifest["bootstrap_protocol"],
+            "attention_training": {
+                "epochs": int(attention_epochs),
+                "patience": 0,
+                "early_stopping": False,
+                "fixed_contract_epochs": DEFAULT_ATTENTION_EPOCHS,
+                "smoke_override": bool(smoke),
+                "split_manifest": str(paths["attention_manifest"]),
+            },
             "upstream_manifest_path": str(paths["manifest"]),
         },
     )

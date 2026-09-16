@@ -855,16 +855,31 @@ class TrainingLoopMixin:
         static_cache = self.tree.frontier_routing.build_static_cache(
             detach=True
         )
+        profiler = getattr(self, "_wake_profiler", None)
         for start in range(0, len(order), chunk_size):
             chunk_indices = order[start : start + chunk_size]
             sequences = [dataset[index] for index in chunk_indices]
+            if profiler is not None:
+                profiler.begin_wavefront()
             with torch.no_grad():
+                if profiler is not None:
+                    profiler.start("prefix_encode")
                 z_flat, flat = self._encode_global_sequence_batch(
                     sequences,
                     sequence_indices=chunk_indices,
                 )
+                if profiler is not None:
+                    profiler.stop("prefix_encode")
+                    profiler.add_counts(
+                        events=int(z_flat.size(0)),
+                        sequences=len(sequences),
+                    )
+                    profiler.start("query_projection")
                 projected_flat = self.tree.router_compat.project_z(z_flat)
                 query_flat = self.tree.episodic_memory.query_net(z_flat)
+                if profiler is not None:
+                    profiler.stop("query_projection")
+                    profiler.start("frontier_route")
                 frontier_flat = self.tree.frontier_routing.route_packed(
                     z_flat,
                     update_search_state=(
@@ -876,6 +891,8 @@ class TrainingLoopMixin:
                     ),
                     projected_z=projected_flat,
                 )
+                if profiler is not None:
+                    profiler.stop("frontier_route")
             # Keep the complete hard-routing identity view packed on the
             # device. The strict Wake wrapper consumes one sequence slice at
             # a time, while its packed transaction keeps the tensor identity
@@ -900,6 +917,14 @@ class TrainingLoopMixin:
                 "frontier_rows": frontier_rows,
                 "flat": flat,
             }
+
+    def _uses_non_cl_dws_wake_path(self) -> bool:
+        """Return whether the dataset-specific Wake entry point is active."""
+
+        family = str(
+            getattr(self.training_config, "wake_dataset_family", "unknown")
+        ).strip().casefold()
+        return family == "non_cl_dws"
 
     def train(
         self,
@@ -965,6 +990,7 @@ class TrainingLoopMixin:
             )
         cache_progress.close()
         dataset = resident_dataset
+        use_non_cl_dws_wake_path = self._uses_non_cl_dws_wake_path()
         # Keep the list-of-dicts for metadata/compatibility, and use this
         # padded device-resident view for the Wake/Global tensor hot path.
         self._resident_sequence_store = ResidentSequenceStore.from_sequences(
@@ -993,6 +1019,10 @@ class TrainingLoopMixin:
                 torch.cuda.reset_peak_memory_stats(self.device)
             epoch_started = time.perf_counter()
             wake_started = epoch_started
+            self._configure_wake_profile(
+                epoch,
+                enabled=use_non_cl_dws_wake_path,
+            )
             self._resident_cache_hits = 0
             self._resident_cache_misses = 0
             self._resident_cache_miss_reasons = Counter()
@@ -1050,19 +1080,34 @@ class TrainingLoopMixin:
                 dataset,
                 order,
             ):
-                batch_results = self.train_wake_batch(
-                    sequences=wake_batch["sequences"],
-                    sequence_indices=wake_batch["sequence_indices"],
-                    z_flat=wake_batch["z_flat"],
-                    projected_flat=wake_batch["projected_flat"],
-                    query_flat=wake_batch["query_flat"],
-                    frontier_static_cache=(
-                        wake_batch["frontier_static_cache"]
-                    ),
-                    frontier_flat=wake_batch["frontier_flat"],
-                    frontier_rows=wake_batch["frontier_rows"],
-                    flat=wake_batch["flat"],
-                )
+                if use_non_cl_dws_wake_path:
+                    batch_results = self.train_wake_batch_non_cl_dws(
+                        sequences=wake_batch["sequences"],
+                        sequence_indices=wake_batch["sequence_indices"],
+                        z_flat=wake_batch["z_flat"],
+                        projected_flat=wake_batch["projected_flat"],
+                        query_flat=wake_batch["query_flat"],
+                        frontier_static_cache=(
+                            wake_batch["frontier_static_cache"]
+                        ),
+                        frontier_flat=wake_batch["frontier_flat"],
+                        frontier_rows=wake_batch["frontier_rows"],
+                        flat=wake_batch["flat"],
+                    )
+                else:
+                    batch_results = self.train_wake_batch(
+                        sequences=wake_batch["sequences"],
+                        sequence_indices=wake_batch["sequence_indices"],
+                        z_flat=wake_batch["z_flat"],
+                        projected_flat=wake_batch["projected_flat"],
+                        query_flat=wake_batch["query_flat"],
+                        frontier_static_cache=(
+                            wake_batch["frontier_static_cache"]
+                        ),
+                        frontier_flat=wake_batch["frontier_flat"],
+                        frontier_rows=wake_batch["frontier_rows"],
+                        flat=wake_batch["flat"],
+                    )
                 for result in batch_results:
                     wake_prediction += result["prediction_nll"]
                     wake_wm += result["wm_penalty"]
@@ -1174,9 +1219,20 @@ class TrainingLoopMixin:
                         refresh=False,
                     )
                     wake_progress.update(1)
+                if getattr(self, "_wake_profiler", None) is not None:
+                    self._wake_profile_end_wavefront()
             wake_progress.close()
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
+            wake_profile = self._finish_wake_profile(synchronize=False)
+            if wake_profile is not None and verbose:
+                profile_report = getattr(
+                    self,
+                    "_last_wake_profile_report",
+                    None,
+                )
+                if profile_report:
+                    print(profile_report)
             wake_seconds = time.perf_counter() - wake_started
 
             wake_loss = (

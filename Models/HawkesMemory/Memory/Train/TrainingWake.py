@@ -2,11 +2,238 @@
 
 from __future__ import annotations
 
+import time
+
 from Train.TrainingComponents import *  # noqa: F403
 from Train.TrainingComponents import _assert_finite_without_cuda_sync
 
 
+class _WakeProfiler:
+    """Low-overhead phase profiler used only by the non-CL/DWS Wake path.
+
+    CUDA timings are recorded as event pairs and resolved after the Wake
+    epoch has already synchronized once.  This keeps the normal benchmark
+    path free of per-phase ``cuda.synchronize`` calls and avoids converting
+    event-level tensors to Python just to measure a phase.
+    """
+
+    PHASES = (
+        "prefix_encode",
+        "query_projection",
+        "frontier_route",
+        "bank_pack",
+        "bank_retrieval",
+        "hawkes_prediction",
+        "controller",
+        "working_update",
+        "retrieval_credit",
+        "write_probe",
+        "memory_commit",
+        "queue_split",
+    )
+
+    def __init__(self, device: torch.device | str, max_wavefronts: int):
+        self.device = torch.device(device)
+        self.max_wavefronts = int(max_wavefronts)
+        if self.max_wavefronts <= 0:
+            raise ValueError("wake_profile_max_wavefronts must be positive")
+        self._use_cuda_events = (
+            self.device.type == "cuda" and torch.cuda.is_available()
+        )
+        self._phase_ms = {phase: 0.0 for phase in ("total", *self.PHASES)}
+        # CPU fallback stores perf-counter floats; CUDA mode stores event
+        # pairs.  Keeping both representations in one map avoids a second
+        # phase-state lookup on the hot path.
+        self._cpu_starts: Dict[str, Any] = {}
+        self._cuda_pairs: Dict[str, list[tuple[Any, Any]]] = {
+            phase: [] for phase in ("total", *self.PHASES)
+        }
+        self._active = False
+        self._finished = False
+        self._wavefronts = 0
+        self._sequences = 0
+        self._events = 0
+
+    @property
+    def active(self) -> bool:
+        return self._active and not self._finished
+
+    def begin_wavefront(self) -> bool:
+        if self._finished or self._wavefronts >= self.max_wavefronts:
+            self._active = False
+            return False
+        self._wavefronts += 1
+        self._active = True
+        self.start("total")
+        return True
+
+    def add_counts(self, *, events: int = 0, sequences: int = 0) -> None:
+        if not self.active:
+            return
+        self._events += int(events)
+        self._sequences += int(sequences)
+
+    def start(self, phase: str) -> None:
+        if not self.active or phase not in self._phase_ms:
+            return
+        if phase in self._cpu_starts:
+            # A phase is not nested with itself.  This guard prevents an
+            # exception in a caller from corrupting the next measurement.
+            return
+        if self._use_cuda_events:
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record(torch.cuda.current_stream(self.device))
+            self._cpu_starts[phase] = (start, end)  # type: ignore[assignment]
+        else:
+            self._cpu_starts[phase] = time.perf_counter()
+
+    def stop(self, phase: str) -> None:
+        if not self.active or phase not in self._phase_ms:
+            return
+        started = self._cpu_starts.pop(phase, None)
+        if started is None:
+            return
+        if self._use_cuda_events:
+            start, end = started
+            end.record(torch.cuda.current_stream(self.device))
+            self._cuda_pairs[phase].append((start, end))
+        else:
+            self._phase_ms[phase] += (
+                time.perf_counter() - float(started)
+            ) * 1000.0
+
+    def end_wavefront(self) -> None:
+        if not self.active:
+            return
+        self.stop("total")
+        self._active = False
+
+    def finish(self, *, synchronize: bool = False) -> Dict[str, Any]:
+        if self._finished:
+            return self.summary()
+        self.end_wavefront()
+        if self._use_cuda_events and synchronize:
+            torch.cuda.synchronize(self.device)
+        if self._use_cuda_events:
+            for phase, pairs in self._cuda_pairs.items():
+                self._phase_ms[phase] += sum(
+                    float(start.elapsed_time(end))
+                    for start, end in pairs
+                )
+        self._finished = True
+        return self.summary()
+
+    def summary(self) -> Dict[str, Any]:
+        total_ms = float(self._phase_ms["total"])
+        return {
+            "phase_ms": dict(self._phase_ms),
+            "wavefronts": self._wavefronts,
+            "sequences": self._sequences,
+            "events": self._events,
+            "total_ms": total_ms,
+            "ms_per_event": total_ms / max(self._events, 1),
+            "sequences_per_second": (
+                self._sequences / max(total_ms / 1000.0, 1e-12)
+            ),
+        }
+
+    def format_report(self) -> str:
+        report = self.summary()
+        phase_ms = report["phase_ms"]
+        total_ms = max(float(report["total_ms"]), 1e-12)
+        lines = [
+            "Wake profile (non_cl_dws)",
+            "phase                    total_ms      share",
+            "------------------------------------------------",
+        ]
+        for phase in self.PHASES:
+            elapsed = float(phase_ms[phase])
+            lines.append(
+                f"{phase:<24} {elapsed:>9.2f} ms  "
+                f"{100.0 * elapsed / total_ms:>6.2f}%"
+            )
+        lines.extend([
+            "------------------------------------------------",
+            f"total                    {total_ms:>9.2f} ms",
+            f"wavefronts               {report['wavefronts']:>9d}",
+            f"sequences                {report['sequences']:>9d}",
+            f"events                   {report['events']:>9d}",
+            f"ms/event                 {report['ms_per_event']:>9.4f}",
+            f"seq/s                    {report['sequences_per_second']:>9.2f}",
+        ])
+        return "\n".join(lines)
+
+
 class TrainingWakeMixin:
+    def _configure_wake_profile(
+        self,
+        epoch: int,
+        *,
+        enabled: bool,
+    ) -> None:
+        """Create a profiler only for the explicitly selected new branch."""
+        self._wake_profiler = None
+        self._last_wake_profile_report = None
+        if not enabled:
+            return
+        if not bool(getattr(self.wake_config, "wake_profile", False)):
+            return
+        profile_epoch = int(
+            getattr(self.wake_config, "wake_profile_epoch", 1)
+        )
+        if int(epoch) != profile_epoch:
+            return
+        self._wake_profiler = _WakeProfiler(
+            self.device,
+            int(getattr(self.wake_config, "wake_profile_max_wavefronts", 20)),
+        )
+
+    def _wake_profile_begin_wavefront(self) -> None:
+        profiler = getattr(self, "_wake_profiler", None)
+        if profiler is not None:
+            profiler.begin_wavefront()
+
+    def _wake_profile_add_counts(
+        self,
+        *,
+        events: int = 0,
+        sequences: int = 0,
+    ) -> None:
+        profiler = getattr(self, "_wake_profiler", None)
+        if profiler is not None:
+            profiler.add_counts(events=events, sequences=sequences)
+
+    def _wake_profile_start(self, phase: str) -> None:
+        profiler = getattr(self, "_wake_profiler", None)
+        if profiler is not None:
+            profiler.start(phase)
+
+    def _wake_profile_stop(self, phase: str) -> None:
+        profiler = getattr(self, "_wake_profiler", None)
+        if profiler is not None:
+            profiler.stop(phase)
+
+    def _wake_profile_end_wavefront(self) -> None:
+        profiler = getattr(self, "_wake_profiler", None)
+        if profiler is not None:
+            profiler.end_wavefront()
+
+    def _finish_wake_profile(
+        self,
+        *,
+        synchronize: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        profiler = getattr(self, "_wake_profiler", None)
+        if profiler is None:
+            return None
+        try:
+            summary = profiler.finish(synchronize=synchronize)
+            self._last_wake_profile_report = profiler.format_report()
+            return summary
+        finally:
+            self._wake_profiler = None
+
     def train_wake_sequence(
         self,
         cpu_sequence: Mapping[str, Tensor],
@@ -813,6 +1040,7 @@ class TrainingWakeMixin:
         *,
         microbatch: Optional[int] = None,
         age_offsets: Optional[Tensor] = None,
+        frontier_block_sparse: bool = False,
     ) -> tuple[Tensor, Tensor, Dict[str, Tensor]]:
         """Read one immutable packed mirror for a Wake transaction.
 
@@ -853,13 +1081,23 @@ class TrainingWakeMixin:
 
         memory = self.tree.episodic_memory
         node_ids = tuple(self.tree.all_node_ids)
+        profile_enabled = (
+            frontier_block_sparse
+            and getattr(self, "_wake_profiler", None) is not None
+        )
+        if profile_enabled:
+            self._wake_profile_start("bank_pack")
         snapshot = memory.prepare_packed_read_snapshot(
             node_ids,
             query_flat,
         )
+        if profile_enabled:
+            self._wake_profile_stop("bank_pack")
         node_delta_chunks: list[Tensor] = []
         episodic_delta_chunks: list[Tensor] = []
         info_chunks: Dict[str, list[Tensor]] = {}
+        if profile_enabled:
+            self._wake_profile_start("bank_retrieval")
         for start in range(0, row_count, microbatch):
             end = min(start + microbatch, row_count)
             node_delta, packed_info = memory.read_packed(
@@ -877,6 +1115,7 @@ class TrainingWakeMixin:
                 visit_chunk_size=getattr(
                     self.wake_config, "retrieval_visit_chunk_size", 64
                 ),
+                block_sparse=frontier_block_sparse,
             )
             node_delta_chunks.append(node_delta)
             episodic_delta_chunks.append(torch.einsum(
@@ -888,6 +1127,8 @@ class TrainingWakeMixin:
             ))
             for key, value in packed_info.items():
                 info_chunks.setdefault(key, []).append(value)
+        if profile_enabled:
+            self._wake_profile_stop("bank_retrieval")
 
         return (
             torch.cat(node_delta_chunks, dim=0),
@@ -1071,6 +1312,7 @@ class TrainingWakeMixin:
         precomputed_frontier_rows: Optional[
             Sequence[tuple[tuple[str, ...], int, int]]
         ] = None,
+        frontier_block_sparse: bool = False,
     ) -> Dict[str, Any]:
         """Run one sequence through the causal tensor-scan Wake backend.
 
@@ -1164,6 +1406,7 @@ class TrainingWakeMixin:
             ),
             functional_controller_state=True,
             commit_working_state=True,
+            frontier_block_sparse=frontier_block_sparse,
         )
         return result[0]
 
@@ -1188,6 +1431,68 @@ class TrainingWakeMixin:
         causal-packed tensor scan, commits its writes before the next sequence
         starts, and therefore preserves the causal bank state between rows.
         """
+        return self._run_ordered_wake_transactions(
+            sequences=sequences,
+            sequence_indices=sequence_indices,
+            z_flat=z_flat,
+            projected_flat=projected_flat,
+            query_flat=query_flat,
+            frontier_static_cache=frontier_static_cache,
+            frontier_flat=frontier_flat,
+            frontier_rows=frontier_rows,
+            flat=flat,
+            frontier_block_sparse=False,
+        )
+
+    def train_wake_batch_non_cl_dws(
+        self,
+        *,
+        sequences: Sequence[Mapping[str, Tensor]],
+        sequence_indices: Sequence[int],
+        z_flat: Tensor,
+        projected_flat: Tensor,
+        query_flat: Tensor,
+        frontier_static_cache: Any,
+        frontier_flat: Any,
+        frontier_rows: Sequence[tuple[tuple[str, ...], int, int]],
+        flat: Mapping[str, Tensor],
+    ) -> list[Dict[str, Any]]:
+        """Run the optional non-CL/DWS read-batched Wake entry point.
+
+        ``_iter_masked_wavefront_batches`` has already performed the stateless
+        Encoder/Q/Frontier prefix for the whole wavefront.  This entry point
+        deliberately keeps the shared-bank boundary ordered: each sequence
+        gets its own packed read/score transaction and commits before the next
+        sequence starts.  The implementation is shared with the established
+        entry point so selecting this branch cannot change HM semantics.
+        """
+        return self._run_ordered_wake_transactions(
+            sequences=sequences,
+            sequence_indices=sequence_indices,
+            z_flat=z_flat,
+            projected_flat=projected_flat,
+            query_flat=query_flat,
+            frontier_static_cache=frontier_static_cache,
+            frontier_flat=frontier_flat,
+            frontier_rows=frontier_rows,
+            flat=flat,
+            frontier_block_sparse=True,
+        )
+
+    def _run_ordered_wake_transactions(
+        self,
+        *,
+        sequences: Sequence[Mapping[str, Tensor]],
+        sequence_indices: Sequence[int],
+        z_flat: Tensor,
+        projected_flat: Tensor,
+        query_flat: Tensor,
+        frontier_static_cache: Any,
+        frontier_flat: Any,
+        frontier_rows: Sequence[tuple[tuple[str, ...], int, int]],
+        flat: Mapping[str, Tensor],
+        frontier_block_sparse: bool = False,
+    ) -> list[Dict[str, Any]]:
         batch_size = len(sequences)
         if batch_size == 0 or len(sequence_indices) != batch_size:
             raise ValueError("Wake wavefront batch metadata does not align")
@@ -1220,7 +1525,7 @@ class TrainingWakeMixin:
         for row, sequence in enumerate(sequences):
             start = offsets[row]
             end = start + lengths[row]
-            results.append(self.train_wake_sequence_packed(
+            result = self.train_wake_sequence_packed(
                 sequence,
                 sequence_index=sequence_indices[row],
                 precomputed_z=z_flat[start:end],
@@ -1228,7 +1533,18 @@ class TrainingWakeMixin:
                 precomputed_memory_query=query_flat[start:end],
                 frontier_static_cache=frontier_static_cache,
                 precomputed_frontier=frontier_flat.slice(start, end),
-            ))
+                frontier_block_sparse=frontier_block_sparse,
+            )
+            results.append(result)
+            # A sequence transaction commits before the next sequence starts.
+            # Explicitly drop the new branch's read mirror after a physical
+            # write; the established paths continue to rely on their existing
+            # signature-based lazy invalidation.
+            if (
+                frontier_block_sparse
+                and int(result.get("accepted_write_count", 0)) > 0
+            ):
+                self.tree.episodic_memory.invalidate_packed_mirror()
         return results
 
     def _train_wake_batch_snapshot(
@@ -1279,6 +1595,7 @@ class TrainingWakeMixin:
         age_offsets: Optional[Tensor] = None,
         functional_controller_state: bool = False,
         commit_working_state: bool = False,
+        frontier_block_sparse: bool = False,
     ) -> list[Dict[str, Any]]:
         """Run the tensor-backed causal Wake transaction implementation.
 
@@ -1288,6 +1605,10 @@ class TrainingWakeMixin:
         defaults for callers that explicitly need that older semantics.
         """
         batch_size = len(sequences)
+        profile_enabled = (
+            frontier_block_sparse
+            and getattr(self, "_wake_profiler", None) is not None
+        )
         if batch_size == 0 or len(sequence_indices) != batch_size:
             raise ValueError("Wake wavefront batch metadata does not align")
         lengths_cpu = flat.get("sequence_lengths_cpu")
@@ -1472,6 +1793,7 @@ class TrainingWakeMixin:
                 query_flat,
                 frontier_flat,
                 age_offsets=age_offsets,
+                frontier_block_sparse=frontier_block_sparse,
             )
             surprise_state = (
                 self.controller.new_surprise_state(z_flat)
@@ -1481,6 +1803,8 @@ class TrainingWakeMixin:
             # Everything below this point is independent of recurrent
             # working memory. Build it once for all flat rows so the time loop
             # only performs the causal working-memory/controller transition.
+            if profile_enabled:
+                self._wake_profile_start("hawkes_prediction")
             with torch.no_grad():
                 memory_output_flat = self.tree(
                     z_t=z_flat,
@@ -1723,6 +2047,8 @@ class TrainingWakeMixin:
                         "frontier_theta",
                     )
                 }
+            if profile_enabled:
+                self._wake_profile_stop("hawkes_prediction")
 
             for event_index, active in enumerate(active_rows_by_time):
                 if active.numel() == 0:
@@ -1767,6 +2093,8 @@ class TrainingWakeMixin:
                 controller_context_zeros = working_delta.new_zeros(
                     active.numel()
                 )
+                if profile_enabled:
+                    self._wake_profile_start("controller")
                 if surprise_state is None:
                     (
                         pre_action_theta,
@@ -1817,6 +2145,8 @@ class TrainingWakeMixin:
                         controller_context_zeros,
                         surprise_state,
                     )
+                if profile_enabled:
+                    self._wake_profile_stop("controller")
                 action_index = action_probabilities.detach().argmax(dim=-1)
                 wm_penalty = (
                     self.wake_config.lambda_wm
@@ -1834,12 +2164,16 @@ class TrainingWakeMixin:
                     "batched wake objective became non-finite",
                 )
                 gradient_norm = working_grad.detach().double().norm(dim=-1)
+                if profile_enabled:
+                    self._wake_profile_start("working_update")
                 self.tree.working_memory.update_batch_rows(
                     working_state,
                     active,
                     working_grad,
                     adaptation_probability=action_probabilities[:, 0],
                 )
+                if profile_enabled:
+                    self._wake_profile_stop("working_update")
 
                 prediction_total.index_add_(
                     0,
@@ -1929,6 +2263,8 @@ class TrainingWakeMixin:
             # wavefront instead of launching one packed contraction per time
             # position.  The age clock follows the same event-count update.
             if not self.training_config.controller_only_finetune:
+                if profile_enabled:
+                    self._wake_profile_start("retrieval_credit")
                 cycle_usage_credit = packed_memory_info_flat["alpha"].new_zeros(
                     len(cycle_usage_node_ids),
                     packed_memory_info_flat["alpha"].size(-1),
@@ -1944,6 +2280,8 @@ class TrainingWakeMixin:
                     cycle_usage_accumulator=cycle_usage_credit,
                 )
                 self.tree.episodic_memory.step_age(cursor)
+                if profile_enabled:
+                    self._wake_profile_stop("retrieval_credit")
 
             action_probability_total.index_add_(
                 0,
@@ -2182,10 +2520,14 @@ class TrainingWakeMixin:
         )
 
         if cycle_usage_credit is not None:
+            if profile_enabled:
+                self._wake_profile_start("retrieval_credit")
             self.tree.episodic_memory.apply_cycle_usage_credit(
                 cycle_usage_credit,
                 cycle_usage_node_ids,
             )
+            if profile_enabled:
+                self._wake_profile_stop("retrieval_credit")
 
         # Commit persistent writes only after the read-only wavefront
         # transaction is complete. Sequence order is deterministic here.
@@ -2207,6 +2549,8 @@ class TrainingWakeMixin:
             # Adapt utility has the same candidate packing as Write; perform
             # selection and all future-window evaluations on device.  Python
             # metadata is materialized only for the selected top-C rows.
+            if profile_enabled:
+                self._wake_profile_start("write_probe")
             selected_adapt_indices, adapt_packed = self._select_probe_buffer_batch(
                 probe_buffer,
                 topc=self.wake_config.controller_adapt_probe_topc,
@@ -2226,6 +2570,9 @@ class TrainingWakeMixin:
                     adapt_packed,
                     padded_wake,
                 )
+            if profile_enabled:
+                self._wake_profile_stop("write_probe")
+                self._wake_profile_start("memory_commit")
             write_summary = self._finalize_write_probe_batch(
                 sequences,
                 probe_buffer,
@@ -2234,6 +2581,8 @@ class TrainingWakeMixin:
                 frontier_static_cache.semantic_theta_table,
                 controller_version=controller_version,
             )
+            if profile_enabled:
+                self._wake_profile_stop("memory_commit")
             accepted_write_counts = write_summary.get(
                 "accepted_write_counts",
                 write_summary["write_counts"],

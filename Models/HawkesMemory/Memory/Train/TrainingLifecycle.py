@@ -171,6 +171,13 @@ class TrainingLifecycleMixin:
             <= 0
         ):
             raise ValueError("retrieval_visit_chunk_size must be positive")
+        if (
+            getattr(self.wake_config, "wake_profile_max_wavefronts", 20)
+            <= 0
+        ):
+            raise ValueError("wake_profile_max_wavefronts must be positive")
+        if getattr(self.wake_config, "wake_profile_epoch", 1) <= 0:
+            raise ValueError("wake_profile_epoch must be positive")
         if self.wake_config.route_balance_max_steps <= 0:
             raise ValueError("route_balance_max_steps must be positive")
         if self.wake_config.route_balance_target_kl < 0.0:

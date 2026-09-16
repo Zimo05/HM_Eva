@@ -30,6 +30,8 @@ THP_EPOCHS="${THP_EPOCHS:-100}"
 THP_DATA_PARALLEL="${THP_DATA_PARALLEL:-1}"
 THP_SEED="${THP_SEED:-42}"
 ATTENTION_BATCH_SIZE="${ATTENTION_BATCH_SIZE:-64}"
+# Fixed evaluation contract: Attention Encoder always trains for 50 epochs;
+# early stopping is disabled below with --patience 0.
 ATTENTION_EPOCHS="${ATTENTION_EPOCHS:-50}"
 ATTENTION_SEED="${ATTENTION_SEED:-42}"
 
@@ -56,6 +58,48 @@ if [[ -n "$SPLIT_MANIFEST" ]]; then
     exit 2
   fi
   STRICT_SPLIT_ARGS=(--split-manifest "$SPLIT_MANIFEST" --split-data-path "$SPLIT_DATA_PATH")
+fi
+
+# Strict HM bootstrap uses a separate, contiguous-ID view for the attention
+# stages.  Ordinary/DWS callers fall back to the historical full-data paths.
+ATTENTION_DATA_PATH="${ATTENTION_DATA_PATH:-$DATA_PATH}"
+ATTENTION_SUMMARY_CSV="${ATTENTION_SUMMARY_CSV:-$SUMMARY_CSV}"
+ATTENTION_TREE_CSV="${ATTENTION_TREE_CSV:-$TREE_CSV}"
+ATTENTION_SPLIT_MANIFEST="${ATTENTION_SPLIT_MANIFEST:-$SPLIT_MANIFEST}"
+ATTENTION_SPLIT_DATA_PATH="${ATTENTION_SPLIT_DATA_PATH:-$SPLIT_DATA_PATH}"
+PROVENANCE_SPLIT_MANIFEST="${PROVENANCE_SPLIT_MANIFEST:-}"
+PROVENANCE_SPLIT_DATA_PATH="${PROVENANCE_SPLIT_DATA_PATH:-}"
+ATTENTION_STRICT_SPLIT_ARGS=()
+if [[ -n "$ATTENTION_SPLIT_MANIFEST" ]]; then
+  if [[ -z "$ATTENTION_SPLIT_DATA_PATH" ]]; then
+    echo "ATTENTION_SPLIT_DATA_PATH is required when ATTENTION_SPLIT_MANIFEST is set." >&2
+    exit 2
+  fi
+  ATTENTION_STRICT_SPLIT_ARGS=(
+    --split-manifest "$ATTENTION_SPLIT_MANIFEST"
+    --split-data-path "$ATTENTION_SPLIT_DATA_PATH"
+  )
+fi
+
+PROVENANCE_SPLIT_ARGS=()
+if [[ -n "$PROVENANCE_SPLIT_MANIFEST" ]]; then
+  if [[ -z "$PROVENANCE_SPLIT_DATA_PATH" ]]; then
+    echo "PROVENANCE_SPLIT_DATA_PATH is required when PROVENANCE_SPLIT_MANIFEST is set." >&2
+    exit 2
+  fi
+  PROVENANCE_SPLIT_ARGS=(
+    --provenance-split-manifest "$PROVENANCE_SPLIT_MANIFEST"
+    --provenance-split-data-path "$PROVENANCE_SPLIT_DATA_PATH"
+  )
+fi
+
+STRICT_BOOTSTRAP_ARGS=()
+if [[ -n "$SPLIT_MANIFEST" ]]; then
+  STRICT_BOOTSTRAP_ARGS=(--strict-bootstrap)
+fi
+ATTENTION_BOOTSTRAP_ARGS=()
+if [[ -n "$ATTENTION_SPLIT_MANIFEST" ]]; then
+  ATTENTION_BOOTSTRAP_ARGS=(--strict-bootstrap)
 fi
 
 case "$ACTION" in
@@ -88,7 +132,8 @@ case "$ACTION" in
         -min_delta 0 \
         -log "$TRAIN_LOG" \
         -save_dir "$OUTPUT_DIR" \
-        ${STRICT_SPLIT_ARGS[@]+"${STRICT_SPLIT_ARGS[@]}"}
+        ${STRICT_SPLIT_ARGS[@]+"${STRICT_SPLIT_ARGS[@]}"} \
+        ${STRICT_BOOTSTRAP_ARGS[@]+"${STRICT_BOOTSTRAP_ARGS[@]}"}
     ;;
 
   encode)
@@ -118,12 +163,18 @@ case "$ACTION" in
     "$PYTHON_BIN" "$SCRIPT_DIR/Process_input.py" \
       "$SUMMARY_CSV" \
       "$TREE_CSV"
+    if [[ "$ATTENTION_SUMMARY_CSV" != "$SUMMARY_CSV" || \
+          "$ATTENTION_TREE_CSV" != "$TREE_CSV" ]]; then
+      "$PYTHON_BIN" "$SCRIPT_DIR/Process_input.py" \
+        "$ATTENTION_SUMMARY_CSV" \
+        "$ATTENTION_TREE_CSV"
+    fi
 
     CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$DEVICE_IDS" \
       "$PYTHON_BIN" "$SCRIPT_DIR/AttentionEncoder/Train.py" \
-        --thp_json "$DATA_PATH" \
-        --tree_csv "$TREE_CSV" \
-        --summary_csv "$SUMMARY_CSV" \
+        --thp_json "$ATTENTION_DATA_PATH" \
+        --tree_csv "$ATTENTION_TREE_CSV" \
+        --summary_csv "$ATTENTION_SUMMARY_CSV" \
         --checkpoint "$BEST_CHECKPOINT" \
         --weights_out "$ATTENTION_WEIGHTS" \
         --d_model 128 \
@@ -145,10 +196,11 @@ case "$ACTION" in
         --seed "$ATTENTION_SEED" \
         --train_ratio 0.8 \
         --dev_ratio 0.1 \
-        --patience 10 \
+        --patience 0 \
         --min_delta 0.0001 \
         --device "$DEVICE_TYPE" \
-        ${STRICT_SPLIT_ARGS[@]+"${STRICT_SPLIT_ARGS[@]}"}
+        ${ATTENTION_STRICT_SPLIT_ARGS[@]+"${ATTENTION_STRICT_SPLIT_ARGS[@]}"} \
+        ${ATTENTION_BOOTSTRAP_ARGS[@]+"${ATTENTION_BOOTSTRAP_ARGS[@]}"}
     ;;
 
   final_encode)
@@ -161,6 +213,12 @@ case "$ACTION" in
     "$PYTHON_BIN" "$SCRIPT_DIR/Process_input.py" \
       "$SUMMARY_CSV" \
       "$TREE_CSV"
+    if [[ "$ATTENTION_SUMMARY_CSV" != "$SUMMARY_CSV" || \
+          "$ATTENTION_TREE_CSV" != "$TREE_CSV" ]]; then
+      "$PYTHON_BIN" "$SCRIPT_DIR/Process_input.py" \
+        "$ATTENTION_SUMMARY_CSV" \
+        "$ATTENTION_TREE_CSV"
+    fi
 
     WEIGHTS_ARGS=()
     if [[ -f "$ATTENTION_WEIGHTS" ]]; then
@@ -172,9 +230,9 @@ case "$ACTION" in
 
     CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$DEVICE_IDS" \
       "$PYTHON_BIN" "$SCRIPT_DIR/AttentionEncoder/AttenEncoderMain_v1.py" \
-        --thp_json "$DATA_PATH" \
-        --tree_csv "$TREE_CSV" \
-        --summary_csv "$SUMMARY_CSV" \
+        --thp_json "$ATTENTION_DATA_PATH" \
+        --tree_csv "$ATTENTION_TREE_CSV" \
+        --summary_csv "$ATTENTION_SUMMARY_CSV" \
         --checkpoint "$BEST_CHECKPOINT" \
         --output "$FINAL_OUTPUT" \
         --d_model 128 \
@@ -188,7 +246,8 @@ case "$ACTION" in
         --batch_size "$ATTENTION_BATCH_SIZE" \
         --device "$DEVICE_TYPE" \
         --node_only \
-        ${STRICT_SPLIT_ARGS[@]+"${STRICT_SPLIT_ARGS[@]}"} \
+        ${ATTENTION_STRICT_SPLIT_ARGS[@]+"${ATTENTION_STRICT_SPLIT_ARGS[@]}"} \
+        ${PROVENANCE_SPLIT_ARGS[@]+"${PROVENANCE_SPLIT_ARGS[@]}"} \
         ${WEIGHTS_ARGS[@]+"${WEIGHTS_ARGS[@]}"}
     ;;
 

@@ -299,6 +299,14 @@ def stationary_command(
         eval_batch = int(getattr(args, "eval_batch_size", 64))
         if eval_batch <= 0:
             raise ValueError("eval_batch_size must be positive")
+        # Retweet's stationary HM run has a dataset-specific wavefront
+        # contract.  Keep the existing batch-size fallback for DWS and every
+        # other HM dataset; only Retweet uses the larger wake transaction.
+        wake_wavefront_batch_size = (
+            128
+            if spec.dataset == "retweet"
+            else int(getattr(args, "batch_size", None) or eval_batch)
+        )
         upstream_h_tree: Path | None = None
         train_sequence_summary: Path | None = None
         upstream_node_dim: int | None = None
@@ -439,7 +447,7 @@ def stationary_command(
                 "--route-balance-batch-size",
                 "32",
                 "--wake-wavefront-batch-size",
-                str(int(getattr(args, "batch_size", None) or eval_batch)),
+                str(wake_wavefront_batch_size),
                 # Preserve the upstream structural transaction thresholds.
                 "--prune-warmup-epochs",
                 "12",

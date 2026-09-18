@@ -11,6 +11,7 @@ import csv
 import gzip
 import json
 import logging
+import math
 import os
 import random
 import shutil
@@ -364,26 +365,116 @@ def deterministic_validation(runner, data_loader, seed):
             torch.cuda.set_rng_state_all(cuda_state)
 
 
-def write_event_predictions(path, metrics):
-    """Export EasyTPP validation predictions when supplied by the wrapper."""
-    predictions, labels = metrics.get("pred"), metrics.get("label")
-    with gzip.open(path, "wt", encoding="utf-8") as handle:
-        if not predictions or not labels:
-            return
-        pred_time, pred_type = map(np.asarray, predictions[:2])
-        true_time, true_type = map(np.asarray, labels[:2])
-        count = min(pred_time.size, pred_type.size, true_time.size, true_type.size)
-        for index in range(count):
-            handle.write(json.dumps({
-                "sequence_id": None,
-                "event_index": index,
-                "true_type": int(true_type.reshape(-1)[index]),
-                "predicted_type": int(pred_type.reshape(-1)[index]),
-                "type_probabilities": None,
-                "true_delta_time": float(true_time.reshape(-1)[index]),
-                "predicted_delta_time": float(pred_time.reshape(-1)[index]),
-                "event_nll": None,
-            }) + "\n")
+def evaluate_loader(runner, data_loader, prediction_path=None):
+    """Evaluate one split and optionally stream causal event predictions.
+
+    FullyNN needs gradients during validation because its intensity is the
+    derivative of a cumulative-hazard network.  Calling the model wrapper
+    directly keeps that behavior while preserving the batch and sequence
+    boundaries needed by the shared prediction contract.
+    """
+    total_loss = 0.0
+    total_num_events = 0
+    absolute_error = 0.0
+    squared_error = 0.0
+    time_num_events = 0
+    num_correct = 0
+    type_num_events = 0
+    sequence_cursor = 0
+
+    prediction_handle = None
+    if prediction_path is not None:
+        prediction_path.parent.mkdir(parents=True, exist_ok=True)
+        prediction_handle = gzip.open(prediction_path, "wt", encoding="utf-8")
+
+    try:
+        for batch in data_loader:
+            loss, num_events, predictions, labels, masks = (
+                runner.model_wrapper.run_batch(
+                    batch, phase=RunnerPhase.VALIDATE
+                )
+            )
+            total_loss += float(loss)
+            total_num_events += int(num_events)
+
+            pred_time, pred_type = predictions
+            label_time, label_type = labels
+            pred_time = np.asarray(pred_time)
+            pred_type = np.asarray(pred_type)
+            label_time = np.asarray(label_time)
+            label_type = np.asarray(label_type)
+
+            if len(masks) == 3:
+                event_mask, time_mask, type_mask = masks
+            else:
+                event_mask = time_mask = type_mask = masks[0]
+            event_mask = np.asarray(event_mask, dtype=bool)
+            time_mask = np.asarray(time_mask, dtype=bool)
+            type_mask = np.asarray(type_mask, dtype=bool)
+
+            time_error = pred_time[time_mask] - label_time[time_mask]
+            absolute_error += float(np.abs(time_error).sum())
+            squared_error += float(np.square(time_error).sum())
+            time_num_events += int(time_error.size)
+            num_correct += int(
+                (pred_type[type_mask] == label_type[type_mask]).sum()
+            )
+            type_num_events += int(type_mask.sum())
+
+            # The prediction arrays correspond to target events after the
+            # first observed event, so their local positions are 0-based and
+            # the canonical event_index is position + 1.
+            common_mask = event_mask & time_mask & type_mask
+            if prediction_handle is not None:
+                for batch_index, position in np.argwhere(common_mask):
+                    prediction_handle.write(json.dumps({
+                        "sequence_id": sequence_cursor + int(batch_index),
+                        "event_index": int(position) + 1,
+                        "true_type": int(label_type[batch_index, position]),
+                        "predicted_type": int(pred_type[batch_index, position]),
+                        "type_probabilities": None,
+                        "true_delta_time": float(label_time[batch_index, position]),
+                        "predicted_delta_time": float(pred_time[batch_index, position]),
+                        "event_nll": None,
+                    }) + "\n")
+            sequence_cursor += int(common_mask.shape[0])
+    finally:
+        if prediction_handle is not None:
+            prediction_handle.close()
+
+    if total_num_events <= 0 or time_num_events <= 0 or type_num_events <= 0:
+        raise RuntimeError("Evaluation found no target events")
+    return {
+        "loglike": -total_loss / total_num_events,
+        "rmse": math.sqrt(squared_error / time_num_events),
+        "mae": absolute_error / time_num_events,
+        "time_rmse": math.sqrt(squared_error / time_num_events),
+        "time_mae": absolute_error / time_num_events,
+        "acc": num_correct / type_num_events,
+        "num_events": total_num_events,
+        "rmse_num_events": time_num_events,
+    }
+
+
+def deterministic_evaluation(runner, data_loader, seed, prediction_path=None):
+    """Run ``evaluate_loader`` with fixed sampling and restored RNG state."""
+    py_state = random.getstate()
+    np_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        return evaluate_loader(runner, data_loader, prediction_path)
+    finally:
+        random.setstate(py_state)
+        np.random.set_state(np_state)
+        torch.set_rng_state(torch_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
 
 
 def train_and_test(args, paths, config_path):
@@ -477,8 +568,12 @@ def train_and_test(args, paths, config_path):
         raise RuntimeError("Training produced no validation checkpoint")
 
     runner.model_wrapper.restore(str(checkpoint_path))
-    test_metrics = deterministic_validation(runner, test_loader, args.seed + 200000)
-    write_event_predictions(paths["output"] / "predictions.jsonl.gz", test_metrics)
+    test_metrics = deterministic_evaluation(
+        runner,
+        test_loader,
+        args.seed + 200000,
+        paths["output"] / "predictions.jsonl.gz",
+    )
     runner.model_wrapper.close_summary()
     current_lr = runner.model_wrapper.opt.param_groups[0]["lr"]
     test_row = metric_row(best_epoch, "test", test_metrics, current_lr)

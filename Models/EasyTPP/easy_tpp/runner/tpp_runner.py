@@ -271,7 +271,7 @@ class TPPRunner(Runner):
                     epoch_pred, epoch_label, seq_mask=epoch_mask
                 ))
 
-        if phase == RunnerPhase.PREDICT:
+        if phase in (RunnerPhase.VALIDATE, RunnerPhase.PREDICT):
             metrics_dict.update({'pred': epoch_pred, 'label': epoch_label})
 
         return metrics_dict

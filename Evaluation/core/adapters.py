@@ -371,10 +371,22 @@ def stationary_command(
         memory = MODELS_ROOT / "HawkesMemory" / "Memory"
         checkpoint = result_dir / "checkpoint" / "model.pt"
         best = result_dir / "checkpoint" / "best.pt"
+        if spec.dataset == "stackoverflow":
+            # StackOverflow has more event types and a slower long-tail
+            # convergence profile.  Keep this override local to StackOverflow
+            # so the established DWS/Retweet/Taobao contract is unchanged.
+            hm_default_epochs = 120
+            frontier_budget = "5"
+            frontier_routing_temperature = "0.9"
+            residual_init_scale = "0.06"
+        else:
+            hm_default_epochs = 60
+            frontier_budget = "7"
+            frontier_routing_temperature = "1.10"
+            residual_init_scale = "0.08"
         command = [
             python,
-            "-m",
-            "Train.Train",
+            str(memory / "Train" / "Train.py"),
             "--data-path",
             str(data_path),
             "--split-manifest",
@@ -409,9 +421,9 @@ def stationary_command(
                 "--frontier-min-experts",
                 "2",
                 "--frontier-budget",
-                "7",
+                frontier_budget,
                 "--frontier-routing-temperature",
-                "1.10",
+                frontier_routing_temperature,
                 "--frontier-exploration",
                 "0",
                 "--frontier-confidence-weight",
@@ -488,7 +500,7 @@ def stationary_command(
                     "--sequence-summary",
                     str(train_sequence_summary),
                     "--residual-init-scale",
-                    "0.08",
+                    residual_init_scale,
                     "--residual-init-rank",
                     "4",
                     "--residual-init-grad-clip",
@@ -528,15 +540,34 @@ def stationary_command(
         if getattr(args, "rank", None) is not None:
             rank = "8" if args.rank == "D" else args.rank
             command += ["--residual-init-rank", str(rank)]
+        if args.smoke:
+            cold_start_epochs = 1
+        elif spec.dataset in {"taobao", "stackoverflow"}:
+            cold_start_epochs = 40
+        elif spec.dataset in STATIONARY_HM_DATASETS:
+            cold_start_epochs = 20
+        else:
+            cold_start_epochs = 5
         command += [
-            "--epochs", str(epochs or 60),
-            "--cold-start-epochs", str(1 if args.smoke else 5),
+            "--epochs", str(epochs or hm_default_epochs),
+            "--cold-start-epochs", str(cold_start_epochs),
             "--validation-batch-size", str(eval_batch),
         ]
         if args.smoke:
             if upstream_h_tree is None:
                 command += ["--max-sequences", "4", "--max-events-per-sequence", "16"]
             command += ["--no-training-plots"]
+        if spec.dataset in STATIONARY_HM_DATASETS:
+            # This policy is intentionally limited to stationary discovery
+            # HM runs. DWS keeps its external Hawkes contract, while
+            # continual HM uses _continual_hm_command and no projection flag.
+            command += [
+                "--stability-constrained-cold-start",
+                "--cold-start-rho-base",
+                "0.88",
+                "--residual-rho-safe",
+                "0.95",
+            ]
         env["PYTHONPATH"] = os.pathsep.join((str(MODELS_ROOT / "HawkesMemory"), str(memory), env.get("PYTHONPATH", "")))
         return command, memory, env
     raise KeyError(f"unsupported model: {spec.model}")

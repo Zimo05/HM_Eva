@@ -235,8 +235,7 @@ def _continual_hm_command(
     benchmark_manifest_path = target / "benchmark_protocol.json"
     command = [
         args.python_executable or sys.executable,
-        "-m",
-        "Train.Train",
+        str(memory / "Train" / "Train.py"),
         "--data-path",
         str(data_path),
         "--split-manifest",

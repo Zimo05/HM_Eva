@@ -1,3 +1,0 @@
-﻿regime_id,first_task,return_task,shift_type,first_pre_nll,first_post_nll,return_pre_nll,first_gain_nll,rrr,status
-A_1,0,3,exact_recurrence,,3.0387274324752642,3.325828964841434,,,not_available_missing_first_gain
-A_1,0,8,long_gap_recurrence,,3.0387274324752642,3.0168998918556085,,,not_available_missing_first_gain

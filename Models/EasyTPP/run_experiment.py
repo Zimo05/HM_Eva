@@ -65,8 +65,10 @@ SUPPORTED_DATASETS = (
     "dws_17",
     "dws_20",
 )
-DEFAULT_EPOCHS_BY_MODEL = {"S2P2": 60, "AttNHP": 60}
+DEFAULT_EPOCHS_BY_MODEL = {"S2P2": 200, "AttNHP": 60}
 DEFAULT_BATCH_SIZE = 64
+DEFAULT_BATCH_SIZE_BY_MODEL = {"S2P2": 128, "AttNHP": DEFAULT_BATCH_SIZE}
+DEFAULT_LEARNING_RATE_BY_MODEL = {"S2P2": 5e-3, "AttNHP": 1e-3}
 DEFAULT_EARLY_STOP_PATIENCE = 25
 DEFAULT_THINNING = {
     "num_sample": 1,
@@ -75,6 +77,12 @@ DEFAULT_THINNING = {
     "patience_counter": 5,
     "num_samples_boundary": 5,
     "num_step_gen": 1,
+}
+THINNING_BY_MODEL = {
+    # S2P2 prediction sampling profile from the requested configuration.
+    "S2P2": {**DEFAULT_THINNING, "num_sample": 10, "num_exp": 200},
+    # Preserve the existing sampling profile for AttNHP.
+    "AttNHP": {**DEFAULT_THINNING},
 }
 
 
@@ -376,8 +384,10 @@ def compute_training_dtime_max(records: Iterable[Mapping[str, Any]]) -> float:
 
 
 def _make_model_config(model: str, dim_process: int, dtime_max: float, gpu: int) -> _ModelConfig:
+    thinning = THINNING_BY_MODEL[model]
     if model == "S2P2":
         return _ModelConfig(
+            # B 稳健型：H=128, P=16, 4 layers.
             hidden_size=128,
             time_emb_size=16,
             num_layers=4,
@@ -386,7 +396,7 @@ def _make_model_config(model: str, dim_process: int, dtime_max: float, gpu: int)
             loss_integral_num_sample_per_step=10,
             dropout_rate=0.1,
             use_ln=False,
-            thinning=_ThinningConfig(dtime_max=dtime_max, **DEFAULT_THINNING),
+            thinning=_ThinningConfig(dtime_max=dtime_max, **thinning),
             num_event_types_pad=dim_process + 1,
             num_event_types=dim_process,
             pad_token_id=dim_process,
@@ -413,7 +423,7 @@ def _make_model_config(model: str, dim_process: int, dtime_max: float, gpu: int)
         loss_integral_num_sample_per_step=10,
         dropout_rate=0.0,
         use_ln=False,
-        thinning=_ThinningConfig(dtime_max=dtime_max, **DEFAULT_THINNING),
+        thinning=_ThinningConfig(dtime_max=dtime_max, **thinning),
         num_event_types_pad=dim_process + 1,
         num_event_types=dim_process,
         pad_token_id=dim_process,
@@ -991,7 +1001,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.epochs is None
         else args.epochs
     )
-    resolved_batch_size = DEFAULT_BATCH_SIZE if args.batch_size is None else args.batch_size
+    resolved_batch_size = (
+        DEFAULT_BATCH_SIZE_BY_MODEL[args.model]
+        if args.batch_size is None
+        else args.batch_size
+    )
+    learning_rate = DEFAULT_LEARNING_RATE_BY_MODEL[args.model]
     if resolved_epochs < 1:
         raise ValueError("--epochs must be positive")
     if resolved_batch_size < 1:
@@ -1029,7 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
     # runs do not leave subclass parameters (for example S2P2's mark
     # embedding) on CPU while the batch is on the requested GPU.
     model.to(device)
-    model.optimizer = torch.optim.Adam(model.parameters(), lr=1e-2 if args.model == "S2P2" else 1e-3)
+    model.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     train_loader = _make_loader(records["train"], dim_process, resolved_batch_size, shuffle=True)
     valid_loader = _make_loader(records["dev"], dim_process, resolved_batch_size, shuffle=False)
@@ -1075,9 +1090,9 @@ def main(argv: list[str] | None = None) -> int:
             "dropout_rate": config.dropout_rate,
             "model_specs": config.model_specs,
         },
-        "optimizer": {"name": "adam", "learning_rate": 1e-2 if args.model == "S2P2" else 1e-3},
+        "optimizer": {"name": "adam", "learning_rate": learning_rate},
         "thinning": {
-            **DEFAULT_THINNING,
+            **THINNING_BY_MODEL[args.model],
             "dtime_max": dtime_max,
         },
         "evaluation_protocol": {

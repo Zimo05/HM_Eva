@@ -666,6 +666,26 @@ def _parse_args(argv=None):
     )
     parser.add_argument("--cold-start-epochs", type=int, default=5)
     parser.add_argument(
+        "--stability-constrained-cold-start",
+        action="store_true",
+        help=(
+            "Project Hawkes excitation after every cold-start optimizer "
+            "step. Enabled only by the stationary non-DWS HM adapter."
+        ),
+    )
+    parser.add_argument(
+        "--cold-start-rho-base",
+        type=float,
+        default=0.88,
+        help="Physical Hawkes spectral-radius target during cold start.",
+    )
+    parser.add_argument(
+        "--residual-rho-safe",
+        type=float,
+        default=0.95,
+        help="Maximum leaf spectral radius after residual initialization.",
+    )
+    parser.add_argument(
         "--prototype-duplicate-threshold", type=float, default=0.98,
         help=(
             "Cold-start duplicate cosine prior; mode-local Q80 distances take "
@@ -1555,6 +1575,15 @@ def main() -> None:
         raise ValueError("--residual-init-rank must be non-negative")
     if args.residual_init_grad_clip < 0.0:
         raise ValueError("--residual-init-grad-clip must be non-negative")
+    if not 0.0 < args.cold_start_rho_base < 1.0:
+        raise ValueError("--cold-start-rho-base must be in (0, 1)")
+    if not 0.0 < args.residual_rho_safe < 1.0:
+        raise ValueError("--residual-rho-safe must be in (0, 1)")
+    if args.stability_constrained_cold_start and args.cl_task_id is not None:
+        raise ValueError(
+            "stability-constrained cold start is restricted to stationary "
+            "non-DWS HM runs"
+        )
     if args.alignment_epochs < 0:
         raise ValueError("--alignment-epochs must be non-negative")
     if args.alignment_batch_size <= 0:
@@ -2060,6 +2089,11 @@ def main() -> None:
             dataset,
             num_epochs=args.cold_start_epochs,
             checkpoint_path=str(hawkes_init_checkpoint),
+            stability_projection_rho=(
+                args.cold_start_rho_base
+                if args.stability_constrained_cold_start
+                else None
+            ),
         )
     if args.h_tree is not None:
         from AttentionEncoderAdapter import initialize_tree_from_h_tree_file
@@ -2164,6 +2198,11 @@ def main() -> None:
             init_scale=args.residual_init_scale,
             lowrank_rank=args.residual_init_rank,
             grad_clip=args.residual_init_grad_clip,
+            rho_safe=(
+                args.residual_rho_safe
+                if args.stability_constrained_cold_start
+                else None
+            ),
         )
         print(
             "[Residual Initialization] "
@@ -2177,6 +2216,42 @@ def main() -> None:
             f"membership={initialization_stats['leaf_membership_mass']} "
             f"target_mass={initialization_stats['target_leaf_mass']}"
         )
+        if "effective_scale" in initialization_stats:
+            print(
+                "[Residual Stability] "
+                f"requested_scale="
+                f"{initialization_stats['requested_scale']:.4f} "
+                f"effective_scale="
+                f"{initialization_stats['effective_scale']:.4f} "
+                f"rho_before={initialization_stats['rho_before']:.4f} "
+                f"rho_requested={initialization_stats['rho_requested']:.4f} "
+                f"rho_final={initialization_stats['rho_final']:.4f} "
+                f"rho_base={args.cold_start_rho_base:.4f} "
+                f"rho_safe={initialization_stats['rho_safe']:.4f}"
+            )
+            if not initialization_stats["stability_feasible"]:
+                if initialization_stats.get("baseline_safe", 1.0):
+                    reason = (
+                        "residual initialization did not produce a feasible "
+                        "leaf scale"
+                    )
+                else:
+                    reason = (
+                        "cold-start Hawkes target is already outside the "
+                        "feasible residual-initialization region"
+                    )
+                advice = (
+                    "stabilize the Hawkes checkpoint first"
+                    if not initialization_stats.get("baseline_safe", 1.0)
+                    else "inspect the residual prototype directions"
+                )
+                raise RuntimeError(
+                    f"[Residual Stability] {reason}: "
+                    f"rho_before={initialization_stats['rho_before']:.6f}, "
+                    f"rho_final={initialization_stats['rho_final']:.6f}, "
+                    f"rho_safe={initialization_stats['rho_safe']:.6f}. "
+                    f"{advice}."
+                )
         leaf_delta_mean = initialization_stats["leaf_delta_mean_abs"]
         mean_error = initialization_stats["weighted_mean_error"]
     else:
@@ -2201,11 +2276,23 @@ def main() -> None:
             else None
         ),
         "residual_init_scale": float(args.residual_init_scale),
+        "residual_init_effective_scale": float(
+            initialization_stats.get(
+                "effective_scale",
+                args.residual_init_scale,
+            )
+        ),
         "residual_init_rank": int(args.residual_init_rank),
         "residual_init_grad_clip": float(args.residual_init_grad_clip),
         "legacy_leaf_symmetry_scale": float(args.leaf_symmetry_scale),
         "stats": initialization_stats,
     }
+    if args.stability_constrained_cold_start:
+        tree.initialization_metadata.update({
+            "stability_constrained_cold_start": True,
+            "cold_start_rho_base": float(args.cold_start_rho_base),
+            "residual_rho_safe": float(args.residual_rho_safe),
+        })
 
     node_theta = torch.stack(
         [tree.semantic_theta(node_id) for node_id in tree.all_node_ids],

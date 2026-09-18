@@ -11,6 +11,11 @@ from typing import Dict, NamedTuple, Optional, Sequence
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+RESIDUAL_RHO_SAFE = 0.95
+RESIDUAL_SCALE_SEARCH_STEPS = 20
 
 
 class HawkesParamPack(NamedTuple):
@@ -409,6 +414,9 @@ class TreeSemanticsMixin:
         target_leaf_mass: torch.Tensor,
         *,
         init_scale: float,
+        decays: Optional[torch.Tensor] = None,
+        rho_safe: float = RESIDUAL_RHO_SAFE,
+        scale_search_steps: int = RESIDUAL_SCALE_SEARCH_STEPS,
     ) -> Dict[str, float]:
         """Initialize experts from data-related Hawkes residual directions.
 
@@ -416,9 +424,20 @@ class TreeSemanticsMixin:
         are mass-centered around the shared cold-start Hawkes parameters, while
         each internal target is the target-mass-weighted mean of its descendant
         leaves.  No node-ID-dependent random perturbation is introduced.
+
+        When ``decays`` is supplied, ``init_scale`` is treated as the requested
+        upper bound rather than an unconditional perturbation size.  The
+        largest global scale whose leaf Hawkes branching spectral radius is at
+        most ``rho_safe`` is selected by bisection.  A single global scale is
+        important here: it preserves the residual directions and the
+        mass-centering invariant instead of clipping leaves independently.
         """
         if init_scale < 0.0:
             raise ValueError("init_scale must be non-negative")
+        if not 0.0 < rho_safe < 1.0:
+            raise ValueError("rho_safe must be in (0, 1)")
+        if scale_search_steps < 0:
+            raise ValueError("scale_search_steps must be non-negative")
         leaf_count = len(self.leaf_ids)
         cold_target = cold_target.to(
             device=self._device_anchor.device,
@@ -461,9 +480,76 @@ class TreeSemanticsMixin:
             target_leaf_mass.unsqueeze(-1) * leaf_prototypes
         ).sum(dim=0)
         centered_prototypes = leaf_prototypes - prototype_center
+
+        requested_scale = float(init_scale)
+        effective_scale = requested_scale
+        stability_stats: Dict[str, float] = {}
+        if decays is not None:
+            decays = decays.to(
+                device=cold_target.device,
+                dtype=cold_target.dtype,
+            ).reshape(-1)
+            if decays.numel() != self.num_basis:
+                raise ValueError(
+                    "decays must contain "
+                    f"{self.num_basis} values"
+                )
+            if not torch.isfinite(decays).all() or bool((decays <= 0).any()):
+                raise ValueError("decays must be finite and positive")
+
+            def spectral_radius(scale: float) -> float:
+                targets = (
+                    cold_target.unsqueeze(0)
+                    + float(scale) * centered_prototypes
+                )
+                raw_w = targets[:, self.num_event_types:].reshape(
+                    leaf_count,
+                    self.num_event_types,
+                    self.num_event_types,
+                    self.num_basis,
+                )
+                positive_w = F.softplus(raw_w)
+                branching = (
+                    positive_w
+                    / decays.reshape(1, 1, 1, -1)
+                ).sum(dim=-1)
+                radii = torch.linalg.eigvals(branching).abs().real
+                return float(radii.max().cpu())
+
+            rho_before = spectral_radius(0.0)
+            rho_requested = spectral_radius(requested_scale)
+            if rho_requested > rho_safe and requested_scale > 0.0:
+                # The spectral-radius constraint is monotone for the intended
+                # small residual perturbations.  Bisection avoids the coarse
+                # quantization of repeatedly multiplying by 0.5 and returns
+                # the largest safe global scale.
+                lo = 0.0
+                hi = requested_scale
+                for _ in range(scale_search_steps):
+                    mid = 0.5 * (lo + hi)
+                    if spectral_radius(mid) <= rho_safe:
+                        lo = mid
+                    else:
+                        hi = mid
+                effective_scale = lo
+            rho_final = spectral_radius(effective_scale)
+            stability_stats = {
+                "requested_scale": requested_scale,
+                "effective_scale": effective_scale,
+                "rho_safe": float(rho_safe),
+                "rho_before": rho_before,
+                "rho_requested": rho_requested,
+                "rho_final": rho_final,
+                "baseline_safe": float(rho_before <= rho_safe),
+                "stability_feasible": float(
+                    rho_final <= rho_safe + 1e-6
+                ),
+                "scale_search_steps": float(scale_search_steps),
+            }
+
         leaf_targets = (
             cold_target.unsqueeze(0)
-            + float(init_scale) * centered_prototypes
+            + effective_scale * centered_prototypes
         )
 
         leaf_index = {
@@ -513,7 +599,11 @@ class TreeSemanticsMixin:
         ).sum(dim=0)
         realized_delta = realized_leaves - cold_target.unsqueeze(0)
         return {
-            "init_scale": float(init_scale),
+            # Keep the historical key as the scale actually applied to the
+            # semantic targets. The explicit requested/effective keys below
+            # make adaptive runs unambiguous in checkpoints and logs.
+            "init_scale": effective_scale,
+            **stability_stats,
             "prototype_norm_min": float(
                 leaf_prototypes.norm(dim=-1).min().cpu()
             ),

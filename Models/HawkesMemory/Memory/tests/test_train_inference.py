@@ -945,6 +945,40 @@ class TrainInferenceTests(unittest.TestCase):
             tuple(stats["target_leaf_mass"]),
         )
 
+    def test_residual_initialization_adapts_global_scale_to_hawkes_stability(self):
+        hawkes = HawkesFamily(2, 1, decays=torch.tensor([1.0]))
+        tree = HawkesTree(3, 4, 2, 1, init_depth=1, memory_key_dim=3)
+        cold_target = tree.initialize_semantics_from_hawkes(hawkes)
+        leaf_count = len(tree.leaf_ids)
+        prototypes = torch.zeros(leaf_count, tree.param_dim)
+        # Equal-mass opposite directions preserve the residual center, while
+        # the requested scale makes one leaf's excitation matrix unstable.
+        prototypes[0, 2:] = 100.0
+        prototypes[1, 2:] = -100.0
+        target_mass = torch.ones(leaf_count) / leaf_count
+
+        stats = tree.initialize_semantics_from_residual_prototypes(
+            cold_target,
+            prototypes,
+            target_mass,
+            init_scale=0.08,
+            decays=hawkes.decays,
+        )
+
+        self.assertLess(stats["effective_scale"], stats["requested_scale"])
+        self.assertGreater(stats["rho_requested"], stats["rho_safe"])
+        self.assertLessEqual(stats["rho_final"], stats["rho_safe"] + 1e-5)
+        leaves = torch.stack([
+            tree.semantic_theta(leaf_id)
+            for leaf_id in tree.leaf_ids
+        ])
+        self.assertTrue(torch.allclose(
+            (target_mass.unsqueeze(-1) * leaves).sum(dim=0),
+            cold_target,
+            atol=1e-5,
+            rtol=1e-5,
+        ))
+
     def test_residual_projection_is_rank_bounded_and_aggregates_soft_membership(self):
         hawkes = HawkesFamily(2, 1, decays=torch.tensor([1.0]))
         dataset = [
@@ -1454,6 +1488,20 @@ class TrainInferenceTests(unittest.TestCase):
             restored_payload["training_result"]["best_validation_nll"],
             1.23,
         )
+
+    def test_physical_hawkes_projection_scales_softplus_excitation(self):
+        hawkes = HawkesFamily(
+            2,
+            1,
+            init_W=1.0,
+            decays=torch.tensor([1.0]),
+        )
+        stats = hawkes.project_hawkes_stability(0.88)
+
+        self.assertGreater(stats["rho_pre_project"], 0.88)
+        self.assertLessEqual(stats["rho_post_project"], 0.880001)
+        self.assertLess(stats["projection_scale"], 1.0)
+        self.assertLessEqual(hawkes.branching_spectral_radius(), 0.880001)
 
     def test_end_to_end_train_checkpoint_and_wake_only_inference(self):
         torch.manual_seed(0)

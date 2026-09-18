@@ -619,6 +619,54 @@ class HawkesFamily(nn.Module):
         """Return A[d, d'] = sum_m W[d, d', m] / decay_m."""
         return (self.W() / self.decays[None, None, :]).sum(dim=-1)
 
+    @torch.no_grad()
+    def branching_spectral_radius(self) -> float:
+        """Return the Perron spectral radius of the physical Hawkes law."""
+        excitation_matrix = self.integrated_excitation_matrix()
+        radius = torch.linalg.eigvals(excitation_matrix).abs().max().real
+        return float(radius.cpu())
+
+    @torch.no_grad()
+    def project_hawkes_stability(
+        self,
+        target_rho: float,
+    ) -> Dict[str, float]:
+        """Project physical excitation onto ``rho(A) <= target_rho``.
+
+        Hawkes excitation is parameterized as ``W = softplus(raw_W)``.  The
+        projection therefore scales physical ``W`` and maps it back through
+        ``inverse softplus``; scaling ``raw_W`` directly would not scale the
+        branching matrix and would not enforce the constraint.
+        """
+        target_rho = float(target_rho)
+        if not 0.0 < target_rho < 1.0:
+            raise ValueError("target_rho must be in (0, 1)")
+
+        rho_pre = self.branching_spectral_radius()
+        projection_scale = 1.0
+        if rho_pre > target_rho:
+            projection_scale = target_rho / max(rho_pre, EPS)
+            self.raw_W.copy_(inv_softplus(
+                self.W() * projection_scale
+            ))
+
+        rho_post = self.branching_spectral_radius()
+        # Guard the strict inequality against eigensolver/rounding error.
+        if rho_post > target_rho + 1e-6:
+            correction = target_rho / max(rho_post, EPS)
+            projection_scale *= correction
+            self.raw_W.copy_(inv_softplus(
+                self.W() * correction
+            ))
+            rho_post = self.branching_spectral_radius()
+
+        return {
+            "rho_pre_project": rho_pre,
+            "rho_post_project": rho_post,
+            "projection_scale": float(projection_scale),
+            "projected": float(projection_scale < 1.0),
+        }
+
     @staticmethod
     def _move_sequence(
         sequence: Dict[str, torch.Tensor],
@@ -663,6 +711,7 @@ class HawkesFamily(nn.Module):
         stability_weight: float = 1e-3,
         excitation_l1_weight: float = 1e-5,
         tau_stab: float = 0.99,
+        stability_projection_rho: Optional[float] = None,
         grad_clip: float = 5.0,
         validation_fraction: float = 0.1,
         patience: int = 8,
@@ -688,6 +737,17 @@ class HawkesFamily(nn.Module):
             raise ValueError("validation_fraction 必须位于 [0, 1)")
         if patience <= 0:
             raise ValueError("patience 必须大于 0")
+        if stability_projection_rho is not None and not (
+            0.0 < float(stability_projection_rho) < 1.0
+        ):
+            raise ValueError(
+                "stability_projection_rho must be in (0, 1)"
+            )
+        stability_projection_rho = (
+            None
+            if stability_projection_rho is None
+            else float(stability_projection_rho)
+        )
 
         device = self.raw_mu.device
         for sequence_index, sequence in enumerate(dataset):
@@ -735,16 +795,23 @@ class HawkesFamily(nn.Module):
 
         train_history: List[float] = []
         validation_history: List[float] = []
+        projection_history: List[Dict[str, float]] = []
         best_metric = float("inf")
         best_epoch = 0
+        best_validation_spectral_radius: float | None = None
         epochs_without_improvement = 0
         best_state = None
+        projection_step_count = 0
 
         for epoch in range(1, num_epochs + 1):
             self.train()
             epoch_nll = 0.0
             epoch_events = 0
             max_gradient_norm = 0.0
+            epoch_rho_pre_project = 0.0
+            epoch_rho_post_project = 0.0
+            epoch_projection_scale = 1.0
+            epoch_projected_steps = 0
 
             epoch_order = torch.randperm(
                 len(train_data),
@@ -789,6 +856,29 @@ class HawkesFamily(nn.Module):
                 )
                 optimizer.step()
 
+                if stability_projection_rho is not None:
+                    projection = self.project_hawkes_stability(
+                        stability_projection_rho
+                    )
+                    epoch_rho_pre_project = max(
+                        epoch_rho_pre_project,
+                        projection["rho_pre_project"],
+                    )
+                    epoch_rho_post_project = max(
+                        epoch_rho_post_project,
+                        projection["rho_post_project"],
+                    )
+                    epoch_projection_scale = min(
+                        epoch_projection_scale,
+                        projection["projection_scale"],
+                    )
+                    epoch_projected_steps += int(
+                        projection["projected"]
+                    )
+                    projection_step_count += int(
+                        projection["projected"]
+                    )
+
                 if not all(
                     torch.isfinite(parameter).all()
                     for parameter in self.parameters()
@@ -804,20 +894,53 @@ class HawkesFamily(nn.Module):
                 if validation_data
                 else train_nll
             )
+            validation_spectral_radius = (
+                self.branching_spectral_radius()
+                if stability_projection_rho is not None
+                else None
+            )
             train_history.append(train_nll)
             validation_history.append(validation_nll)
 
+            if stability_projection_rho is not None:
+                projection_history.append({
+                    "epoch": float(epoch),
+                    "rho_pre_project": epoch_rho_pre_project,
+                    "rho_post_project": epoch_rho_post_project,
+                    "projection_scale": epoch_projection_scale,
+                    "projected_steps": float(epoch_projected_steps),
+                    "validation_rho": float(validation_spectral_radius),
+                })
+
             if verbose:
-                print(
+                message = (
                     f"[Hawkes Cold Start][{epoch:03d}/{num_epochs:03d}] "
                     f"train_nll/event={train_nll:.6f} "
                     f"val_nll/event={validation_nll:.6f} "
                     f"max_grad={max_gradient_norm:.4f}"
                 )
+                if stability_projection_rho is not None:
+                    message += (
+                        f" rho_pre_project={epoch_rho_pre_project:.4f}"
+                        f" rho_post_project={epoch_rho_post_project:.4f}"
+                        f" projection_scale={epoch_projection_scale:.4f}"
+                        f" projected_steps={epoch_projected_steps}"
+                        f" val_rho={validation_spectral_radius:.4f}"
+                    )
+                print(message)
 
-            if validation_nll < best_metric - min_delta:
+            validation_is_feasible = (
+                stability_projection_rho is None
+                or validation_spectral_radius
+                <= stability_projection_rho + 1e-6
+            )
+            if (
+                validation_is_feasible
+                and validation_nll < best_metric - min_delta
+            ):
                 best_metric = validation_nll
                 best_epoch = epoch
+                best_validation_spectral_radius = validation_spectral_radius
                 epochs_without_improvement = 0
                 best_state = {
                     name: value.detach().cpu().clone()
@@ -834,6 +957,11 @@ class HawkesFamily(nn.Module):
                     break
 
         if best_state is None:
+            if stability_projection_rho is not None:
+                raise RuntimeError(
+                    "冷启动训练未产生满足 Hawkes stability projection "
+                    f"rho <= {stability_projection_rho:.6f} 的 checkpoint"
+                )
             raise RuntimeError("冷启动训练未产生有效模型")
 
         self.load_state_dict(best_state)
@@ -850,12 +978,27 @@ class HawkesFamily(nn.Module):
                 .cpu()
             )
             minimum_intensity = float(self.mu().min().cpu())
+        if (
+            stability_projection_rho is not None
+            and spectral_radius > stability_projection_rho + 1e-5
+        ):
+            raise RuntimeError(
+                "selected cold-start checkpoint violates Hawkes stability "
+                f"rho <= {stability_projection_rho:.6f}: "
+                f"rho={spectral_radius:.6f}"
+            )
 
         result = {
             "best_epoch": best_epoch,
             "best_validation_nll": best_metric,
             "train_history": train_history,
             "validation_history": validation_history,
+            "projection_history": projection_history,
+            "stability_projection_rho": stability_projection_rho,
+            "best_validation_spectral_radius": (
+                best_validation_spectral_radius
+            ),
+            "projection_step_count": projection_step_count,
             "spectral_radius": spectral_radius,
             "minimum_baseline_intensity": minimum_intensity,
             "excitation_matrix": excitation_matrix.detach().cpu(),
@@ -880,6 +1023,7 @@ class HawkesFamily(nn.Module):
                 "stability_weight": stability_weight,
                 "excitation_l1_weight": excitation_l1_weight,
                 "tau_stab": tau_stab,
+                "stability_projection_rho": stability_projection_rho,
                 "grad_clip": grad_clip,
                 "validation_fraction": validation_fraction,
                 "patience": patience,
@@ -906,5 +1050,12 @@ class HawkesFamily(nn.Module):
                 f"[Hawkes Cold Start] spectral_radius={spectral_radius:.6f}, "
                 f"min_mu={minimum_intensity:.6e}"
             )
+            if stability_projection_rho is not None:
+                print(
+                    "[Hawkes Cold Start] "
+                    f"rho_base={stability_projection_rho:.4f}, "
+                    f"projection_steps={projection_step_count}, "
+                    f"best_val_rho={best_validation_spectral_radius:.6f}"
+                )
 
         return result

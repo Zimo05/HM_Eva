@@ -215,6 +215,7 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
     )
 
     assert command[command.index("--tree-init-depth") + 1] == "0"
+    assert command[command.index("--cold-start-epochs") + 1] == "5"
     assert command[command.index("--z-dim") + 1] == "50"
     assert command[command.index("--node-dim") + 1] == "128"
     assert command[command.index("--memory-key-dim") + 1] == "64"
@@ -274,6 +275,7 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
     assert command[command.index("--residual-init-rank") + 1] == "4"
     assert command[command.index("--residual-init-grad-clip") + 1] == "0"
     assert command[command.index("--leaf-symmetry-scale") + 1] == "0"
+    assert "--stability-constrained-cold-start" not in command
 
     smoke_args = Namespace(**{**vars(args), "smoke": True})
     smoke_command, _cwd, _env = stationary_command(
@@ -303,6 +305,11 @@ def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
         "taobao": "32",
         "stackoverflow": "64",
     }
+    expected_cold_start = {
+        "retweet": "20",
+        "taobao": "40",
+        "stackoverflow": "40",
+    }
     for dataset, wavefront in expected_wavefront.items():
         spec = JobSpec(dataset=dataset, model="HM")
         command, _cwd, _env = stationary_command(
@@ -322,6 +329,26 @@ def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
         )
         assert command[command.index("--wake-wavefront-batch-size") + 1] == wavefront
         assert "--residual-init-rank" in command
+        assert command[command.index("--cold-start-epochs") + 1] == expected_cold_start[dataset]
+        if dataset == "stackoverflow":
+            assert command[command.index("--epochs") + 1] == "120"
+            assert command[command.index("--frontier-budget") + 1] == "5"
+            assert command[command.index("--frontier-routing-temperature") + 1] == "0.9"
+            assert command[command.index("--residual-init-scale") + 1] == "0.06"
+        else:
+            assert command[command.index("--epochs") + 1] == "60"
+            assert command[command.index("--frontier-budget") + 1] == "7"
+            assert command[command.index("--frontier-routing-temperature") + 1] == "1.10"
+            assert command[command.index("--residual-init-scale") + 1] == "0.08"
+        assert "--stability-constrained-cold-start" in command
+        assert (
+            command[command.index("--cold-start-rho-base") + 1]
+            == "0.88"
+        )
+        assert (
+            command[command.index("--residual-rho-safe") + 1]
+            == "0.95"
+        )
 
 
 def test_hm_train_sequence_summary_filters_only_train_source_indices():

@@ -1,9 +1,0 @@
-{
-  "variant": "online_write/full",
-  "completed_sequences": 32,
-  "total_sequences": 32,
-  "elapsed_seconds": 65.75552628497826,
-  "last_source_index": 31,
-  "last_eval_set_id": "task_09_test_pre",
-  "event_predictions_captured": false
-}

@@ -337,6 +337,7 @@ def initialize_tree_from_residual_signatures(
     lowrank_rank: int,
     grad_clip: float = 0.0,
     progress: bool = True,
+    rho_safe: float | None = None,
 ) -> Dict[str, Any]:
     """Run the complete residual-signature cold-start construction."""
     membership = load_h_tree_leaf_membership(
@@ -376,11 +377,19 @@ def initialize_tree_from_residual_signatures(
         ],
         dim=0,
     )
+    semantic_kwargs: Dict[str, Any] = {
+        "init_scale": init_scale,
+    }
+    if rho_safe is not None:
+        semantic_kwargs.update({
+            "decays": hawkes.decays,
+            "rho_safe": float(rho_safe),
+        })
     semantic_stats = tree.initialize_semantics_from_residual_prototypes(
         cold_target,
         prototypes,
         target_mass,
-        init_scale=init_scale,
+        **semantic_kwargs,
     )
     # The same empirical mass that centers semantic initialization must also
     # define the fixed routing prior. Otherwise routing silently falls back to

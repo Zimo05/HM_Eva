@@ -628,6 +628,7 @@ def _hierarchical_clusters(
     source_ids,
     *,
     selector: Callable[..., tuple[int, Mapping[str, Any]]] | None = None,
+    max_clusters: int | None = None,
 ):
     """Build a train-only binary hierarchy and select a coarse cut.
 
@@ -650,7 +651,12 @@ def _hierarchical_clusters(
         raise ValueError("hierarchical clustering source IDs do not match features")
     if not np.isfinite(features).all():
         raise FloatingPointError("hierarchical clustering features contain NaN/Inf")
-    max_k = min(DEFAULT_CLUSTER_MAX, n_samples)
+    effective_max_clusters = (
+        DEFAULT_CLUSTER_MAX if max_clusters is None else int(max_clusters)
+    )
+    if effective_max_clusters < 2:
+        raise ValueError("hierarchical clustering max_clusters must be at least two")
+    max_k = min(effective_max_clusters, n_samples)
     min_k = min(DEFAULT_CLUSTER_MIN, max_k)
     if min_k < 2:
         min_k = 2
@@ -1035,6 +1041,17 @@ def build_stationary_hm_upstream(
     import numpy as np
 
     dataset = _validate_stationary_dataset(dataset)
+    if dataset in {"taobao", "stackoverflow"}:
+        # Taobao and StackOverflow benefit from longer Hawkes fitting for the
+        # real-data long-tail regime.  StackOverflow additionally gets the
+        # wider structural search below; Retweet keeps the original budget.
+        hawkes_epochs = 15
+        hawkes_selection_epochs = 15
+        cluster_max = 12 if dataset == "stackoverflow" else DEFAULT_CLUSTER_MAX
+    else:
+        hawkes_epochs = DEFAULT_HAWKES_EPOCHS
+        hawkes_selection_epochs = DEFAULT_HAWKES_SELECTION_EPOCHS
+        cluster_max = DEFAULT_CLUSTER_MAX
     canonical_path = Path(canonical_path).expanduser().resolve()
     split_manifest_path = Path(split_manifest_path).expanduser().resolve()
     root = Path(output_dir).expanduser().resolve()
@@ -1168,7 +1185,7 @@ def build_stationary_hm_upstream(
         output_path=paths["global_hawkes"],
         seed=seed,
         device=device,
-        epochs=1 if smoke else DEFAULT_HAWKES_EPOCHS,
+        epochs=1 if smoke else hawkes_epochs,
         verbose=not smoke,
     )
     residuals, residual_stats = compute_residuals(
@@ -1201,8 +1218,9 @@ def build_stationary_hm_upstream(
 
     # Candidate cuts are evaluated with train-only Hawkes laws.  Adjacent cuts
     # reuse already-fitted unsplit nodes; selected clusters are then fit with
-    # DEFAULT_HAWKES_EPOCHS for the downstream artifact.
-    selection_epochs = 1 if smoke else DEFAULT_HAWKES_SELECTION_EPOCHS
+    # The dataset branch above selects the Hawkes budget; all non-StackOverflow
+    # datasets retain DEFAULT_HAWKES_SELECTION_EPOCHS.
+    selection_epochs = 1 if smoke else hawkes_selection_epochs
     selection_root = root / "hawkes_structure_selection"
 
     def select_hawkes_cut(snapshots, available_k):
@@ -1228,7 +1246,12 @@ def build_stationary_hm_upstream(
         features,
         source_id_array,
         selector=select_hawkes_cut,
+        max_clusters=cluster_max,
     )
+    cluster_stats.update({
+        "hawkes_fit_epochs": int(hawkes_epochs),
+        "cluster_max": int(cluster_max),
+    })
 
     print(f"[HM Upstream] {dataset} Hawkes laws ...", flush=True)
     cluster_models: dict[int, Any] = {}
@@ -1245,7 +1268,7 @@ def build_stationary_hm_upstream(
             output_path=root / f"hawkes_cluster_{int(cluster['cluster_id'])}.pt",
             seed=seed + int(cluster["cluster_id"]) + 1,
             device=device,
-            epochs=1 if smoke else DEFAULT_HAWKES_EPOCHS,
+            epochs=1 if smoke else hawkes_epochs,
             verbose=False,
         )
         cluster_models[int(cluster["cluster_id"])] = cluster_model

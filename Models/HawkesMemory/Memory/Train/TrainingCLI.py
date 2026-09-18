@@ -32,6 +32,7 @@ _PERSISTENT_CONFIG_DESTS = frozenset({
     "prototype_duplicate_threshold",
     "prototype_duplicate_quantile",
     "prototype_mode_threshold",
+    "prototype_mode_quantile",
     "prototype_mode_capacity",
     "prototype_context_alias_capacity",
     "count_similarity_low",
@@ -702,6 +703,10 @@ def _parse_args(argv=None):
             "Cold-start dynamics cosine prior; mode-local Q95 distances take "
             "over after calibration."
         ),
+    )
+    parser.add_argument(
+        "--prototype-mode-quantile", type=float, default=0.95,
+        help="Quantile for the accepted-sample calibrated mode radius.",
     )
     parser.add_argument(
         "--prototype-mode-capacity", type=int, default=12,
@@ -1906,11 +1911,21 @@ def main() -> None:
             args.training_metrics_path
         )
         trainer.training_config.training_plot_path = args.training_plot_path
+        trainer.wake_config.prototype_duplicate_threshold = (
+            args.prototype_duplicate_threshold
+        )
+        trainer.wake_config.prototype_mode_threshold = args.prototype_mode_threshold
         trainer.wake_config.prototype_duplicate_quantile = (
             args.prototype_duplicate_quantile
         )
+        trainer.wake_config.prototype_mode_quantile = args.prototype_mode_quantile
+        trainer.wake_config.prototype_mode_capacity = args.prototype_mode_capacity
         trainer.tree.episodic_memory.configure_prototype_memory(
-            duplicate_quantile=trainer.wake_config.prototype_duplicate_quantile
+            duplicate_threshold=trainer.wake_config.prototype_duplicate_threshold,
+            mode_threshold=trainer.wake_config.prototype_mode_threshold,
+            duplicate_quantile=trainer.wake_config.prototype_duplicate_quantile,
+            mode_quantile=trainer.wake_config.prototype_mode_quantile,
+            mode_capacity=trainer.wake_config.prototype_mode_capacity,
         )
         trainer.wake_config.lambda_route_mi = args.route_mi_weight
         trainer.wake_config.lambda_route_posterior = (
@@ -2394,6 +2409,7 @@ def main() -> None:
             prototype_duplicate_threshold=args.prototype_duplicate_threshold,
             prototype_mode_threshold=args.prototype_mode_threshold,
             prototype_duplicate_quantile=args.prototype_duplicate_quantile,
+            prototype_mode_quantile=args.prototype_mode_quantile,
             prototype_mode_capacity=args.prototype_mode_capacity,
             prototype_context_alias_capacity=args.prototype_context_alias_capacity,
             lambda_route_mi=args.route_mi_weight,

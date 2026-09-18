@@ -344,13 +344,14 @@ def evaluate_loader(runner, data_loader, prediction_path=None):
     """Stream evaluation so long datasets do not retain all batch predictions."""
     total_loss = 0.0
     total_num_events = 0
+    absolute_error = 0.0
     squared_error = 0.0
     time_num_events = 0
     num_correct = 0
     type_num_events = 0
 
     prediction_handle = gzip.open(prediction_path, "wt", encoding="utf-8") if prediction_path else None
-    event_offset = 0
+    sequence_cursor = 0
     for batch in data_loader:
         loss, num_events, predictions, labels, masks = (
             runner.model_wrapper.run_batch(batch, phase=RunnerPhase.VALIDATE)
@@ -366,30 +367,27 @@ def evaluate_loader(runner, data_loader, prediction_path=None):
         time_mask = np.asarray(time_mask, dtype=bool)
         type_mask = np.asarray(type_mask, dtype=bool)
         time_error = np.asarray(pred_time)[time_mask] - np.asarray(label_time)[time_mask]
+        absolute_error += float(np.abs(time_error).sum())
         squared_error += float(np.square(time_error).sum())
         time_num_events += int(time_error.size)
         num_correct += int(
             (np.asarray(pred_type)[type_mask] == np.asarray(label_type)[type_mask]).sum()
         )
         type_num_events += int(type_mask.sum())
+        common = time_mask & type_mask
         if prediction_handle is not None:
-            common = time_mask & type_mask
-            flat_true_time = np.asarray(label_time)[common]
-            flat_pred_time = np.asarray(pred_time)[common]
-            flat_true_type = np.asarray(label_type)[common]
-            flat_pred_type = np.asarray(pred_type)[common]
-            for index, (true_time, predicted_time, true_type, predicted_type) in enumerate(zip(flat_true_time, flat_pred_time, flat_true_type, flat_pred_type)):
+            for batch_index, position in np.argwhere(common):
                 prediction_handle.write(json.dumps({
-                    "sequence_id": None,
-                    "event_index": event_offset + index,
-                    "true_type": int(true_type),
-                    "predicted_type": int(predicted_type),
+                    "sequence_id": sequence_cursor + int(batch_index),
+                    "event_index": int(position) + 1,
+                    "true_type": int(label_type[batch_index, position]),
+                    "predicted_type": int(pred_type[batch_index, position]),
                     "type_probabilities": None,
-                    "true_delta_time": float(true_time),
-                    "predicted_delta_time": float(predicted_time),
+                    "true_delta_time": float(label_time[batch_index, position]),
+                    "predicted_delta_time": float(pred_time[batch_index, position]),
                     "event_nll": None,
                 }) + "\n")
-            event_offset += int(common.sum())
+        sequence_cursor += int(common.shape[0])
 
     if total_num_events == 0 or time_num_events == 0 or type_num_events == 0:
         raise RuntimeError("Evaluation found no target events")
@@ -398,6 +396,9 @@ def evaluate_loader(runner, data_loader, prediction_path=None):
     return {
         "loglike": -total_loss / total_num_events,
         "rmse": math.sqrt(squared_error / time_num_events),
+        "mae": absolute_error / time_num_events,
+        "time_rmse": math.sqrt(squared_error / time_num_events),
+        "time_mae": absolute_error / time_num_events,
         "acc": num_correct / type_num_events,
         "num_events": total_num_events,
         "rmse_num_events": time_num_events,
@@ -409,6 +410,7 @@ def metric_row(epoch, split, metrics, learning_rate):
         "Epoch": epoch,
         "Split": split,
         "Log-likelihood": float(metrics["loglike"]),
+        "MAE": float(metrics["mae"]),
         "RMSE": float(metrics["rmse"]),
         "Accuracy": float(metrics["acc"]),
         "NumEvents": int(metrics["num_events"]),
@@ -418,7 +420,7 @@ def metric_row(epoch, split, metrics, learning_rate):
 
 
 METRIC_FIELDS = (
-    "Epoch", "Split", "Log-likelihood", "RMSE", "Accuracy",
+    "Epoch", "Split", "Log-likelihood", "MAE", "RMSE", "Accuracy",
     "NumEvents", "RMSE NumEvents", "LearningRate",
 )
 
@@ -473,7 +475,7 @@ def train_and_test(args, paths, config_path):
         with test_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=(
                 "Epoch", "Split", "SelectionMetric", "Log-likelihood",
-                "RMSE", "Accuracy", "NumEvents", "RMSE NumEvents",
+                "MAE", "RMSE", "Accuracy", "NumEvents", "RMSE NumEvents",
                 "LearningRate",
             ))
             writer.writeheader()
@@ -559,7 +561,7 @@ def train_and_test(args, paths, config_path):
             handle,
             fieldnames=(
                 "Epoch", "Split", "SelectionMetric", "Log-likelihood",
-                "RMSE", "Accuracy", "NumEvents", "RMSE NumEvents",
+                "MAE", "RMSE", "Accuracy", "NumEvents", "RMSE NumEvents",
                 "LearningRate",
             ),
         )
@@ -593,6 +595,7 @@ def plot_metrics(paths, rows, test_row):
     }
     panels = (
         ("Log-likelihood", "Log-likelihood", "Log-likelihood per event", "likelihood.png"),
+        ("MAE", "Time MAE", "MAE", "mae.png"),
         ("RMSE", "Time RMSE", "RMSE", "rmse.png"),
         ("Accuracy", "Event Accuracy", "Accuracy", "accuracy.png"),
     )
@@ -626,15 +629,16 @@ def plot_metrics(paths, rows, test_row):
         figure.savefig(paths["plot"] / filename, dpi=220, bbox_inches="tight")
         plt.close(figure)
 
-    figure, axes = plt.subplots(1, 3, figsize=(15, 4.6), constrained_layout=True)
+    figure, axes = plt.subplots(1, 4, figsize=(20, 4.6), constrained_layout=True)
     for axis, (metric, title, ylabel, _) in zip(axes, panels):
         draw(axis, metric, title, ylabel)
     figure.suptitle(
-        "RMTPP on {} | test at best epoch {}: LL={:.4f}, RMSE={:.4f}, "
-        "Accuracy={:.2%}".format(
+        "RMTPP on {} | test at best epoch {}: LL={:.4f}, MAE={:.4f}, "
+        "RMSE={:.4f}, Accuracy={:.2%}".format(
             paths["run_name"].upper(),
             test_row["Epoch"],
             test_row["Log-likelihood"],
+            test_row["MAE"],
             test_row["RMSE"],
             test_row["Accuracy"],
         ),
@@ -712,6 +716,16 @@ def main():
         )
         config_path = write_config(
             args, paths, adapted_dir, num_event_types
+        )
+        write_json(
+            paths["log"] / "run_config.json",
+            {
+                "model": "RMTPP",
+                "dataset": paths["run_name"],
+                "dim_process": num_event_types,
+                "prepared_data_dir": str(adapted_dir),
+                "seed": args.seed,
+            },
         )
         rows, test_row = train_and_test(args, paths, config_path)
         if not args.evaluate_only:

@@ -483,7 +483,10 @@ def _train_epoch(model: torch.nn.Module, loader, device: torch.device) -> dict[s
         "loglike": -total_loss / total_events,
         "num_events": total_events,
         "accuracy": None,
+        "mae": None,
+        "time_mae": None,
         "rmse": None,
+        "time_rmse": None,
     }
 
 
@@ -570,11 +573,17 @@ def _evaluate(
     total_loss = 0.0
     total_events = 0
     correct = 0
+    absolute_error = 0.0
     squared_error = 0.0
     prediction_count = 0
     rows: list[dict[str, Any]] = []
     sequence_cursor = 0
-    with _evaluation_rng(seed), torch.no_grad():
+    prediction_context = (
+        torch.enable_grad()
+        if model.__class__.__name__ == "FullyNN"
+        else torch.no_grad()
+    )
+    with _evaluation_rng(seed), prediction_context:
         for batch in loader:
             values = _move_batch(batch, device)
             loss, num_events = model.loglike_loss(values)
@@ -592,6 +601,7 @@ def _evaluate(
             target_types_valid = target_types[mask]
             target_dtimes_valid = target_dtimes[mask]
             correct += int((valid_types == target_types_valid).sum().cpu())
+            absolute_error += float((valid_dtimes - target_dtimes_valid).abs().sum().cpu())
             squared_error += float(((valid_dtimes - target_dtimes_valid) ** 2).sum().cpu())
             prediction_count += int(mask.sum().cpu())
             batch_size = int(mask.size(0))
@@ -627,8 +637,11 @@ def _evaluate(
         "loglike": -total_loss / total_events,
         "num_events": total_events,
         "accuracy": (correct / prediction_count) if prediction_count else None,
+        "mae": (absolute_error / prediction_count) if prediction_count else None,
         "rmse": math.sqrt(squared_error / prediction_count) if prediction_count else None,
     }
+    metrics["time_mae"] = metrics["mae"]
+    metrics["time_rmse"] = metrics["rmse"]
     return metrics, rows
 
 
@@ -711,11 +724,11 @@ def _plot_metrics(
 ) -> list[Path]:
     """Write THP-style train/validation curves and test diagnostics.
 
-    The native AttNHP and S2P2 loops already record all three scalar metrics
-    for every train and validation epoch.  Plot those rows as curves, just as
-    the native THP runner does; validation still does not run thinning
-    predictions.  The final test metrics are reported in the curve figure
-    subtitle, so no single-value bar chart is needed.
+    The native AttNHP and S2P2 loops record the scalar metrics for every train
+    and validation epoch.  Validation runs the same causal one-step
+    predictor used by the final test contract, so these curves are real
+    rather than placeholders.  The final test metrics are reported in the
+    curve figure subtitle, so no single-value bar chart is needed.
     """
 
     try:
@@ -762,6 +775,7 @@ def _plot_metrics(
     panels = (
         ("Log-likelihood", "Log-likelihood per event", "likelihood.png"),
         ("Accuracy", "Accuracy", "accuracy.png"),
+        ("MAE", "Time MAE", "mae.png"),
         ("RMSE", "Time RMSE", "rmse.png"),
     )
 
@@ -809,12 +823,15 @@ def _plot_metrics(
 
     test_loglike = finite(test_row.get("Log-likelihood"))
     test_accuracy = finite(test_row.get("Accuracy"))
+    test_mae = finite(test_row.get("MAE"))
     test_rmse = finite(test_row.get("RMSE"))
     test_details: list[str] = []
     if test_loglike is not None:
         test_details.append(f"LL={test_loglike:.4f}")
     if test_accuracy is not None:
         test_details.append(f"Accuracy={test_accuracy:.2%}")
+    if test_mae is not None:
+        test_details.append(f"MAE={test_mae:.4f}")
     if test_rmse is not None:
         test_details.append(f"RMSE={test_rmse:.4f}")
     epoch_value = int(finite(test_row.get("Epoch")) or 0)
@@ -822,7 +839,7 @@ def _plot_metrics(
     if test_details:
         subtitle += ": " + ", ".join(test_details)
 
-    figure, axes = plt.subplots(1, 3, figsize=(15.5, 4.7), constrained_layout=True)
+    figure, axes = plt.subplots(1, 4, figsize=(20.0, 4.7), constrained_layout=True)
     for axis, (metric, title, _filename) in zip(axes, panels):
         draw(axis, metric, title, title)
     figure.suptitle(
@@ -1124,7 +1141,7 @@ def main(argv: list[str] | None = None) -> int:
                 device,
                 dim_process,
                 seed=args.seed + epoch,
-                collect_predictions=False,
+                collect_predictions=True,
             )
             epoch_rows.extend(
                 [
@@ -1133,6 +1150,7 @@ def main(argv: list[str] | None = None) -> int:
                         "Split": "train",
                         "Log-likelihood": train_metrics["loglike"],
                         "Accuracy": train_metrics["accuracy"],
+                        "MAE": train_metrics["mae"],
                         "RMSE": train_metrics["rmse"],
                         "num_events": train_metrics["num_events"],
                         "SelectionMetric": "validation_loglike",
@@ -1142,6 +1160,7 @@ def main(argv: list[str] | None = None) -> int:
                         "Split": "valid",
                         "Log-likelihood": valid_metrics["loglike"],
                         "Accuracy": valid_metrics["accuracy"],
+                        "MAE": valid_metrics["mae"],
                         "RMSE": valid_metrics["rmse"],
                         "num_events": valid_metrics["num_events"],
                         "SelectionMetric": "validation_loglike",
@@ -1175,7 +1194,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_metrics_csv(
         output / "csv" / "epoch_metrics.csv",
         epoch_rows,
-        ["Epoch", "Split", "Log-likelihood", "Accuracy", "RMSE", "num_events", "SelectionMetric"],
+        ["Epoch", "Split", "Log-likelihood", "Accuracy", "MAE", "RMSE", "num_events", "SelectionMetric"],
     )
     test_metrics, predictions = _evaluate(
         model,
@@ -1190,6 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
         "Split": "test",
         "Log-likelihood": test_metrics["loglike"],
         "Accuracy": test_metrics["accuracy"],
+        "MAE": test_metrics["mae"],
         "RMSE": test_metrics["rmse"],
         "num_events": test_metrics["num_events"],
         "SelectionMetric": "validation_loglike",
@@ -1197,7 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_metrics_csv(
         output / "csv" / "test_metrics.csv",
         [test_row],
-        ["Epoch", "Split", "Log-likelihood", "Accuracy", "RMSE", "num_events", "SelectionMetric"],
+        ["Epoch", "Split", "Log-likelihood", "Accuracy", "MAE", "RMSE", "num_events", "SelectionMetric"],
     )
     _write_predictions(output / "predictions.jsonl.gz", predictions)
     plot_paths = _plot_metrics(

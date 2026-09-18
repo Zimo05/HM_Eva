@@ -247,6 +247,9 @@ class WakeObjectiveConfig:
     wake_profile: bool = False
     wake_profile_max_wavefronts: int = 20
     wake_profile_epoch: int = 1
+    # Accepted-sample calibrated mode radius quantile.  Appended for
+    # checkpoint compatibility with older WakeObjectiveConfig payloads.
+    prototype_mode_quantile: float = 0.95
 
 
 @dataclass

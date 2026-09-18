@@ -364,7 +364,12 @@ def bootstrap_ci(
     return [means[int(0.025 * (len(means) - 1))], means[int(0.975 * (len(means) - 1))]]
 
 
+def _benchmark_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [row for row in rows if int(row.get("event_index", 1)) >= 1]
+
+
 def classification_metrics(rows: Sequence[Mapping[str, Any]], num_types: int) -> dict:
+    rows = _benchmark_rows(rows)
     if not rows:
         return {}
     confusion = [[0 for _ in range(num_types)] for _ in range(num_types)]
@@ -375,8 +380,31 @@ def classification_metrics(rows: Sequence[Mapping[str, Any]], num_types: int) ->
     calibration = [[] for _ in range(10)]
     for row in rows:
         truth = int(row["true_type"])
-        probs = [float(v) for v in row["type_probabilities"]]
-        prediction = max(range(len(probs)), key=probs.__getitem__)
+        raw_probs = row.get("type_probabilities")
+        if raw_probs in (None, ""):
+            raw_probs = row.get("prefix_type_probabilities")
+        if raw_probs in (None, ""):
+            prediction = int(
+                row.get(
+                    "predicted_type",
+                    row.get("predicted_type_at_event_time", -1),
+                )
+            )
+            probs = [0.0] * num_types
+            if 0 <= prediction < num_types:
+                probs[prediction] = 1.0
+        else:
+            probs = [float(v) for v in raw_probs]
+            if len(probs) != num_types:
+                raise ValueError(
+                    "HM type-probability vector does not match num_types"
+                )
+            prediction = int(
+                row.get(
+                    "predicted_type",
+                    max(range(len(probs)), key=probs.__getitem__),
+                )
+            )
         correct += prediction == truth
         top3 += truth in sorted(range(len(probs)), key=probs.__getitem__, reverse=True)[:3]
         confusion[truth][prediction] += 1
@@ -416,6 +444,9 @@ def aggregate_metrics(
     seed: int,
     bootstrap_samples: int = 1000,
 ) -> dict:
+    rows = _benchmark_rows(rows)
+    if not rows:
+        raise ValueError("HM benchmark contains no next-event rows")
     event_nll = [float(row["nll"]) for row in rows]
     time_errors = [abs(float(row["predicted_time"]) - float(row["true_time"])) for row in rows]
     by_sequence: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
@@ -472,6 +503,7 @@ def aggregate_metrics(
     accepted = funnel_counts["write_accepted_count"]
     metrics = {
         "events": len(rows),
+        "num_events": len(rows),
         "sequences": len(by_sequence),
         "nll_per_event": nll,
         "nll_bootstrap_95ci": bootstrap_ci(
@@ -481,6 +513,8 @@ def aggregate_metrics(
         "perplexity": math.exp(min(nll, 50.0)),
         "local_time_mae": _mean(time_errors),
         "local_time_rmse": math.sqrt(_mean(error * error for error in time_errors)),
+        "time_mae": _mean(time_errors),
+        "time_rmse": math.sqrt(_mean(error * error for error in time_errors)),
         "local_time_median_ae": statistics.median(time_errors) if time_errors else None,
         "memory_hit_fraction": _mean(
             float(float(row.get("retrieval_alpha_mass", 0.0)) > 1e-6)
@@ -709,10 +743,20 @@ def run_variant(
                     "raw_action_probabilities", event["action_probabilities"]
                 )
             ]
-            probs = [
+            at_event_probs = [
                 float(v)
                 for v in event["type_probabilities_at_event_time"]
             ]
+            forecast_probs = [
+                float(v)
+                for v in event["forecast_type_probabilities"]
+            ]
+            predicted_type = int(
+                event.get(
+                    "forecast_predicted_type",
+                    max(range(len(forecast_probs)), key=forecast_probs.__getitem__),
+                )
+            )
             visited_nodes = int(event.get(
                 "visited_bank_count", len(event["frontier_node_ids"])
             ))
@@ -730,12 +774,13 @@ def run_variant(
                 "stage_label": sequence.get("stage_label"),
                 "event_index": int(event["event_index"]),
                 "true_type": int(event["true_type"]),
-                "predicted_type_at_event_time": int(event["predicted_type"]),
-                "type_probabilities": probs,
-                "prefix_type_probabilities": [
-                    float(v)
-                    for v in event["forecast_type_probabilities"]
-                ],
+                "predicted_type": predicted_type,
+                "predicted_type_at_event_time": int(
+                    event.get("predicted_type_at_event_time", event["predicted_type"])
+                ),
+                "type_probabilities": forecast_probs,
+                "type_probabilities_at_event_time": at_event_probs,
+                "prefix_type_probabilities": forecast_probs,
                 "nll": float(event["nll"]),
                 "true_time": float(event["true_time"]),
                 "predicted_time": float(event["predicted_time"]),
@@ -937,11 +982,19 @@ def run_variant_scalar(
             "correct": 0,
             "time_abs_sum": 0.0,
         })
-        group["events"] += int(scalar["events"])
+        group["events"] += int(
+            scalar.get("benchmark_events", scalar["events"])
+        )
         group["sequences"] += 1
-        group["nll_sum"] += float(scalar["nll_sum"])
-        group["correct"] += int(scalar["correct"])
-        group["time_abs_sum"] += float(scalar["time_abs_sum"])
+        group["nll_sum"] += float(
+            scalar.get("benchmark_nll_sum", scalar["nll_sum"])
+        )
+        group["correct"] += int(
+            scalar.get("benchmark_correct", scalar["correct"])
+        )
+        group["time_abs_sum"] += float(
+            scalar.get("benchmark_time_abs_sum", scalar["time_abs_sum"])
+        )
 
         completed = sequence_position + 1
         elapsed_now = time.perf_counter() - start
@@ -1106,14 +1159,32 @@ def run_variant_compact(
                 "correct": 0,
                 "time_abs_sum": 0.0,
             })
-            group["events"] += int(scalar["events"])
+            group["events"] += int(
+                scalar.get("benchmark_events", scalar["events"])
+            )
             group["sequences"] += 1
-            group["nll_sum"] += float(scalar["nll_sum"])
-            group["correct"] += int(scalar["correct"])
-            group["time_abs_sum"] += float(scalar["time_abs_sum"])
+            group["nll_sum"] += float(
+                scalar.get("benchmark_nll_sum", scalar["nll_sum"])
+            )
+            group["correct"] += int(
+                scalar.get("benchmark_correct", scalar["correct"])
+            )
+            group["time_abs_sum"] += float(
+                scalar.get("benchmark_time_abs_sum", scalar["time_abs_sum"])
+            )
 
             if capture_by_sequence[offset]:
                 for event in result.get("events", ()):
+                    forecast_probs = [
+                        float(value)
+                        for value in event["forecast_type_probabilities"]
+                    ]
+                    predicted_type = int(
+                        event.get(
+                            "forecast_predicted_type",
+                            max(range(len(forecast_probs)), key=forecast_probs.__getitem__),
+                        )
+                    )
                     event_rows.append({
                         "variant": canonical,
                         "protocol": protocol.value,
@@ -1132,18 +1203,24 @@ def run_variant_compact(
                         "stage_label": source_sequence.get("stage_label"),
                         "event_index": int(event["event_index"]),
                         "true_type": int(event["true_type"]),
+                        "predicted_type": predicted_type,
                         "predicted_type_at_event_time": int(
-                            event["predicted_type"]
+                            event.get(
+                                "predicted_type_at_event_time",
+                                event["predicted_type"],
+                            )
                         ),
                         "type_probabilities": [
+                            value for value in forecast_probs
+                        ],
+                        "type_probabilities_at_event_time": [
                             float(value)
                             for value in event[
                                 "type_probabilities_at_event_time"
                             ]
                         ],
                         "prefix_type_probabilities": [
-                            float(value)
-                            for value in event["forecast_type_probabilities"]
+                            value for value in forecast_probs
                         ],
                         "nll": float(event["nll"]),
                         "true_time": float(event["true_time"]),
@@ -1985,7 +2062,7 @@ def adaptation_curve_rows(
             "exposure_events": exposure_events,
             "nll": row.get("nll"),
             "accuracy": float(
-                int(row.get("predicted_type_at_event_time", -1))
+                int(row.get("predicted_type", row.get("predicted_type_at_event_time", -1)))
                 == int(row.get("true_type", -2))
             ),
             "time_MAE": (
@@ -2959,13 +3036,22 @@ def main() -> None:
         for row in rows:
             groups[int(row["source_index"])].append(row)
         for source_index, group in groups.items():
+            group = _benchmark_rows(group)
+            if not group:
+                continue
             sequence_rows.append({
                 "variant": variant,
                 "source_index": source_index,
                 "cluster_id": group[0].get("cluster_id"),
                 "events": len(group),
                 "nll_per_event": _mean(float(row["nll"]) for row in group),
-                "accuracy": _mean(float(max(range(expected_types), key=lambda index: row["type_probabilities"][index]) == row["true_type"]) for row in group),
+                "accuracy": _mean(
+                    float(
+                        int(row.get("predicted_type", -1))
+                        == int(row["true_type"])
+                    )
+                    for row in group
+                ),
                 "local_time_mae": _mean(abs(float(row["predicted_time"]) - float(row["true_time"])) for row in group),
             })
     write_csv(args.output_dir / "sequence_metrics.csv", sequence_rows)

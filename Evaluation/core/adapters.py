@@ -4,6 +4,7 @@ import csv
 import gzip
 import json
 import os
+import pickle
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from .hm_bootstrap import (
     expected_stationary_hm_upstream,
 )
 from .io import sha256, write_json
+from .metrics import prediction_metrics
 from .paths import DATASETS_ROOT, MODELS_ROOT, PROJECT_ROOT
 
 
@@ -384,6 +386,18 @@ def stationary_command(
             frontier_budget = "7"
             frontier_routing_temperature = "1.10"
             residual_init_scale = "0.08"
+        if spec.dataset in {"taobao", "stackoverflow"}:
+            prototype_duplicate_threshold = "0.97"
+            prototype_mode_threshold = "0.92"
+            prototype_mode_capacity = "16"
+            prototype_duplicate_quantile = "0.88"
+            prototype_mode_quantile = "0.92"
+        else:
+            prototype_duplicate_threshold = None
+            prototype_mode_threshold = None
+            prototype_mode_capacity = None
+            prototype_duplicate_quantile = None
+            prototype_mode_quantile = None
         command = [
             python,
             str(memory / "Train" / "Train.py"),
@@ -518,6 +532,21 @@ def stationary_command(
                     "--alignment-grad-clip",
                     "5.0",
                 ]
+        if prototype_duplicate_threshold is not None:
+            # Taobao/StackOverflow prototype policy.  DWS and the other
+            # datasets keep the checkpoint/TrainingCLI defaults unchanged.
+            command += [
+                "--prototype-duplicate-threshold",
+                prototype_duplicate_threshold,
+                "--prototype-mode-threshold",
+                prototype_mode_threshold,
+                "--prototype-mode-capacity",
+                prototype_mode_capacity,
+                "--prototype-duplicate-quantile",
+                prototype_duplicate_quantile,
+                "--prototype-mode-quantile",
+                prototype_mode_quantile,
+            ]
         command += [
             "--checkpoint",
             str(checkpoint),
@@ -588,6 +617,196 @@ def _find_test_csv(native: Path) -> Path:
     return candidates[-1]
 
 
+def _as_float(value: Any) -> float | None:
+    if value in (None, "", "nan", "NaN"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_probabilities(value: Any) -> list[float] | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    return [float(item) for item in value]
+
+
+def _prediction_rows(result_dir: Path, native: Path) -> list[dict[str, Any]]:
+    candidates = []
+    root_predictions = result_dir / "predictions.jsonl.gz"
+    if root_predictions.is_file():
+        candidates.append(root_predictions)
+    candidates.extend(sorted(native.rglob("predictions.jsonl.gz")))
+    for path in candidates:
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    # HM's native evaluator predates the shared JSONL contract.  Keep this
+    # fallback for direct normalization of an existing result directory.
+    hm_csv = native / "event_predictions.csv"
+    if not hm_csv.is_file():
+        return []
+    previous_time: dict[tuple[str, int], float] = {}
+    rows: list[dict[str, Any]] = []
+    with hm_csv.open("r", newline="", encoding="utf-8") as source:
+        for row in csv.DictReader(source):
+            key = (row.get("variant", ""), int(row["source_index"]))
+            true_time = float(row["true_time"])
+            true_delta = true_time - previous_time.get(key, 0.0)
+            previous_time[key] = true_time
+            rows.append({
+                "sequence_id": int(row["source_index"]),
+                "event_index": int(row["event_index"]),
+                "true_type": int(row["true_type"]),
+                "predicted_type": int(
+                    row.get("predicted_type", row.get("predicted_type_at_event_time", -1))
+                ),
+                "predicted_type_at_event_time": int(
+                    row.get("predicted_type_at_event_time", row.get("predicted_type", -1))
+                ),
+                "type_probabilities": _as_probabilities(
+                    row.get("type_probabilities")
+                ),
+                "forecast_type_probabilities": _as_probabilities(
+                    row.get("forecast_type_probabilities")
+                    or row.get("prefix_type_probabilities")
+                ),
+                "true_delta_time": true_delta,
+                "predicted_delta_time": float(row["predicted_delta"]),
+                "event_nll": float(row["nll"]),
+            })
+    return rows
+
+
+def _canonical_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    canonical: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        forecast_probabilities = _as_probabilities(
+            row.get("forecast_type_probabilities")
+            or row.get("prefix_type_probabilities")
+        )
+        probabilities = forecast_probabilities or _as_probabilities(
+            row.get("type_probabilities")
+        )
+        predicted_type = row.get("forecast_predicted_type")
+        if predicted_type in (None, ""):
+            predicted_type = row.get("predicted_type")
+        if predicted_type in (None, "") and probabilities:
+            predicted_type = max(range(len(probabilities)), key=probabilities.__getitem__)
+        if predicted_type in (None, ""):
+            predicted_type = row.get("predicted_type_at_event_time")
+        row["predicted_type"] = int(predicted_type) if predicted_type not in (None, "") else None
+        if probabilities is not None:
+            row["type_probabilities"] = probabilities
+        if row.get("event_nll") in (None, "") and row.get("nll") not in (None, ""):
+            row["event_nll"] = row["nll"]
+        canonical.append(row)
+    return canonical
+
+
+def _extract_num_types(payload: Any) -> int | None:
+    if isinstance(payload, Mapping):
+        for key in ("dim_process", "num_types", "num_event_types", "expected_types"):
+            value = _as_float(payload.get(key))
+            if value is not None and value > 0 and value.is_integer():
+                return int(value)
+        for value in payload.values():
+            found = _extract_num_types(value)
+            if found is not None:
+                return found
+    return None
+
+
+def _resolve_num_types(result_dir: Path, native: Path, rows: list[Mapping[str, Any]]) -> int | None:
+    json_candidates = [
+        native / "adapter_manifest.json",
+        native / "log" / "run_config.json",
+        native / "log" / "summary.json",
+        native / "summary.json",
+        result_dir / "manifest.json",
+    ]
+    for path in json_candidates:
+        if not path.is_file():
+            continue
+        try:
+            found = _extract_num_types(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            found = None
+        if found is not None:
+            return found
+
+    for path in (result_dir / "prepared" / "train.pkl", native / "train.pkl"):
+        if not path.is_file():
+            continue
+        try:
+            with path.open("rb") as handle:
+                found = _extract_num_types(pickle.load(handle))
+        except (OSError, EOFError, pickle.PickleError):
+            found = None
+        if found is not None:
+            return found
+
+    probability_lengths = [
+        len(probabilities)
+        for row in rows
+        for probabilities in [_as_probabilities(row.get("forecast_type_probabilities") or row.get("type_probabilities"))]
+        if probabilities
+    ]
+    if probability_lengths:
+        return max(probability_lengths)
+    labels = []
+    for row in rows:
+        for key in ("true_type", "predicted_type", "predicted_type_at_event_time"):
+            value = row.get(key)
+            if value not in (None, ""):
+                labels.append(int(value))
+    return max(labels) + 1 if labels else None
+
+
+def _merge_prediction_metrics(
+    metrics: dict[str, Any],
+    result_dir: Path,
+    native: Path,
+) -> dict[str, Any]:
+    raw_rows = _prediction_rows(result_dir, native)
+    rows = _canonical_prediction_rows(raw_rows)
+    num_types = _resolve_num_types(result_dir, native, rows)
+    fallback_nll = _as_float(metrics.get("nll_per_event"))
+    if rows:
+        native_events = metrics.get("events")
+        canonical = prediction_metrics(
+            rows,
+            num_types=num_types,
+            fallback_nll=fallback_nll,
+        )
+        metrics.update(canonical)
+        if native_events is not None:
+            metrics["native_events"] = native_events
+        metrics["events"] = canonical["num_events"]
+        if "local_time_mae" in metrics:
+            metrics["native_local_time_mae"] = metrics["local_time_mae"]
+            metrics["local_time_mae"] = canonical["time_mae"]
+        if "local_time_rmse" in metrics:
+            metrics["native_local_time_rmse"] = metrics["local_time_rmse"]
+            metrics["local_time_rmse"] = canonical["time_rmse"]
+    elif "num_events" not in metrics and "events" in metrics:
+        metrics["num_events"] = metrics["events"]
+    if num_types is not None:
+        metrics["num_types"] = num_types
+    metrics["prediction_population"] = "event_index >= 1 (causal next-event)"
+    metrics["time_prediction_protocol"] = "causal next-event one-step estimator"
+    return metrics
+
+
 def normalize_native_metrics(spec, result_dir: Path) -> dict[str, Any]:
     native = result_dir / "native"
     if spec.model == "HM":
@@ -595,48 +814,42 @@ def normalize_native_metrics(spec, result_dir: Path) -> dict[str, Any]:
         if not summary.exists():
             return {"state": "trained", "evaluation_pending": True}
         payload = json.loads(summary.read_text(encoding="utf-8"))
-        return payload.get("variants", {}).get(
+        selected = payload.get("variants", {}).get(
             "frozen/full",
             payload.get("variants", {}).get("full_frozen", payload),
         )
+        metrics = dict(selected) if isinstance(selected, Mapping) else {}
+        metrics["source"] = str(summary)
+        return _merge_prediction_metrics(metrics, result_dir, native)
     if spec.model == "TPP_LLM":
         path = native / "metrics.json"
         if not path.exists():
             raise FileNotFoundError(path)
-        return json.loads(path.read_text(encoding="utf-8"))
+        metrics = json.loads(path.read_text(encoding="utf-8"))
+        return _merge_prediction_metrics(dict(metrics), result_dir, native)
     path = _find_test_csv(native)
     with path.open("r", newline="", encoding="utf-8") as handle:
         row = next(csv.DictReader(handle))
     lowered = {key.lower().strip(): value for key, value in row.items()}
+
     def value(*names: str) -> float | None:
         for name in names:
             if name in lowered and lowered[name] not in {"", "nan", None}:
                 return float(lowered[name])
         return None
+
     loglike = value("log-likelihood", "likelihood", "log_likelihood")
-    metrics = {"nll_per_event": -loglike if loglike is not None else None, "accuracy": value("accuracy"), "time_rmse": value("rmse"), "source": str(path)}
-    predictions = next(iter(sorted(native.rglob("predictions.jsonl.gz"))), None)
-    if predictions is not None:
-        rows = []
-        with gzip.open(predictions, "rt", encoding="utf-8") as handle:
-            rows = [json.loads(line) for line in handle if line.strip()]
-        if rows:
-            labels = sorted({int(row["true_type"]) for row in rows} | {int(row["predicted_type"]) for row in rows})
-            f1s = []
-            for label in labels:
-                tp = sum(int(row["true_type"]) == label == int(row["predicted_type"]) for row in rows)
-                fp = sum(int(row["true_type"]) != label and int(row["predicted_type"]) == label for row in rows)
-                fn = sum(int(row["true_type"]) == label and int(row["predicted_type"]) != label for row in rows)
-                precision = tp / (tp + fp) if tp + fp else 0.0
-                recall = tp / (tp + fn) if tp + fn else 0.0
-                f1s.append(2 * precision * recall / (precision + recall) if precision + recall else 0.0)
-            errors = [float(row["predicted_delta_time"]) - float(row["true_delta_time"]) for row in rows]
-            metrics.update({
-                "macro_f1": sum(f1s) / len(f1s),
-                "time_mae": sum(abs(error) for error in errors) / len(errors),
-                "num_events": len(rows),
-            })
-    return metrics
+    metrics = {
+        "nll_per_event": -loglike if loglike is not None else None,
+        "accuracy": value("accuracy"),
+        "time_mae": value("mae", "time_mae"),
+        "time_rmse": value("rmse", "time_rmse"),
+        "num_events": value("num_events", "numevents", "rmse numevents"),
+        "source": str(path),
+    }
+    if metrics["num_events"] is not None:
+        metrics["num_events"] = int(metrics["num_events"])
+    return _merge_prediction_metrics(metrics, result_dir, native)
 
 
 def evaluate_hm(spec, args, result_dir: Path, env: dict[str, str]) -> None:
@@ -654,6 +867,12 @@ def evaluate_hm(spec, args, result_dir: Path, env: dict[str, str]) -> None:
     eval_batch = int(getattr(args, "eval_batch_size", 64))
     if eval_batch <= 0:
         raise ValueError("eval_batch_size must be positive")
+    if spec.dataset in {"taobao", "stackoverflow"}:
+        eval_prototype_duplicate_threshold = "0.97"
+        eval_prototype_mode_threshold = "0.92"
+    else:
+        eval_prototype_duplicate_threshold = None
+        eval_prototype_mode_threshold = None
     command = [
         python_for(args), "-m", "Evaluate",
         "--checkpoint", str(checkpoint),
@@ -666,6 +885,16 @@ def evaluate_hm(spec, args, result_dir: Path, env: dict[str, str]) -> None:
         "--eval-batch-size", str(eval_batch),
         "--resume", "--save-event-predictions",
     ]
+    if eval_prototype_duplicate_threshold is not None:
+        # Keep evaluation-time retrieval thresholds aligned with the
+        # Taobao/StackOverflow training checkpoint; DWS retains its original
+        # evaluation defaults.
+        command += [
+            "--prototype-duplicate-threshold",
+            eval_prototype_duplicate_threshold,
+            "--prototype-mode-threshold",
+            eval_prototype_mode_threshold,
+        ]
     if spec.condition in variants:
         command += ["--variants", variants[spec.condition]]
     if args.smoke:
@@ -700,12 +929,38 @@ def copy_prediction_contract(result_dir: Path) -> None:
                 true_time = float(row["true_time"])
                 true_delta = true_time - previous_time.get(key, 0.0)
                 previous_time[key] = true_time
+                probabilities = row.get("type_probabilities")
+                forecast_probabilities = (
+                    row.get("forecast_type_probabilities")
+                    or row.get("prefix_type_probabilities")
+                )
+                if forecast_probabilities:
+                    probabilities = forecast_probabilities
+                try:
+                    parsed_probabilities = json.loads(probabilities) if probabilities else None
+                except json.JSONDecodeError:
+                    parsed_probabilities = None
+                predicted_type = row.get("predicted_type")
+                if predicted_type in (None, "") and forecast_probabilities:
+                    try:
+                        values = [float(value) for value in json.loads(forecast_probabilities)]
+                        predicted_type = max(range(len(values)), key=values.__getitem__)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        predicted_type = None
+                if predicted_type in (None, ""):
+                    predicted_type = row.get("predicted_type_at_event_time")
                 output.write(json.dumps({
                     "sequence_id": int(row["source_index"]),
                     "event_index": int(row["event_index"]),
                     "true_type": int(row["true_type"]),
-                    "predicted_type": int(row["predicted_type_at_event_time"]),
-                    "type_probabilities": json.loads(row["type_probabilities"]),
+                    "predicted_type": int(predicted_type),
+                    "predicted_type_at_event_time": (
+                        int(row["predicted_type_at_event_time"])
+                        if row.get("predicted_type_at_event_time") not in (None, "")
+                        else int(predicted_type)
+                    ),
+                    "type_probabilities": parsed_probabilities,
+                    "forecast_type_probabilities": parsed_probabilities,
                     "true_delta_time": true_delta,
                     "predicted_delta_time": float(row["predicted_delta"]),
                     "event_nll": float(row["nll"]),

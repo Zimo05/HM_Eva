@@ -27,6 +27,32 @@ def test_prediction_metrics_keeps_unavailable_event_nll_null():
     assert prediction_metrics(rows)["nll_per_event"] is None
 
 
+def test_prediction_metrics_excludes_hm_initial_diagnostic_and_uses_fixed_vocabulary():
+    rows = [
+        {
+            "event_index": 0,
+            "true_type": 1,
+            "predicted_type": 1,
+            "true_delta_time": 1.0,
+            "predicted_delta_time": 1.0,
+            "event_nll": 100.0,
+        },
+        {
+            "event_index": 1,
+            "true_type": 0,
+            "predicted_type": 0,
+            "true_delta_time": 2.0,
+            "predicted_delta_time": 3.0,
+            "event_nll": 2.0,
+        },
+    ]
+    result = prediction_metrics(rows, num_types=3)
+    assert result["num_events"] == 1
+    assert result["nll_per_event"] == 2.0
+    assert result["macro_f1"] == 1.0 / 3.0
+    assert result["per_type_support"] == {0: 1, 1: 0, 2: 0}
+
+
 def test_adaptation_auc_trapezoid():
     assert adaptation_auc({0: 4.0, 4: 2.0}) == 3.0
 

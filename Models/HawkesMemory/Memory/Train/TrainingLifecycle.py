@@ -86,6 +86,7 @@ class TrainingLifecycleMixin:
             duplicate_threshold=self.wake_config.prototype_duplicate_threshold,
             mode_threshold=self.wake_config.prototype_mode_threshold,
             duplicate_quantile=self.wake_config.prototype_duplicate_quantile,
+            mode_quantile=self.wake_config.prototype_mode_quantile,
             mode_capacity=self.wake_config.prototype_mode_capacity,
             context_alias_capacity=(
                 self.wake_config.prototype_context_alias_capacity
@@ -848,11 +849,22 @@ class TrainingLifecycleMixin:
             for key, value in structure_payload.items()
             if key in structure_field_names
         }
+        wake_payload = dict(checkpoint.get("wake_config", {}))
+        wake_field_names = {
+            config_field.name for config_field in fields(WakeObjectiveConfig)
+        }
+        # Keep checkpoint restoration tolerant of metadata-only Wake fields
+        # removed from the active trainer configuration.
+        wake_payload = {
+            key: value
+            for key, value in wake_payload.items()
+            if key in wake_field_names
+        }
         trainer = cls(
             tree=tree,
             hawkes=hawkes,
             encoder=encoder,
-            wake=WakeObjectiveConfig(**checkpoint.get("wake_config", {})),
+            wake=WakeObjectiveConfig(**wake_payload),
             sleep=SleepConfig(**sleep_payload),
             structure=StructureConfig(**structure_payload),
             training=loaded_training if training is None else training,

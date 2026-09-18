@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from typing import Dict, List, Mapping, MutableMapping, Optional, Sequence
 
@@ -365,6 +366,137 @@ class HawkesFamily(nn.Module):
         contribution = (W[:, past_types, :] * exp_kernels[None, :, :]).sum(dim=(1, 2))
         lambda_t += contribution
         return lambda_t.clamp_min(EPS)
+
+    @torch.no_grad()
+    def history_statistics_at(self, history, t) -> torch.Tensor:
+        """Return exponential source statistics at a causal forecast time."""
+
+        hist_event, hist_type, _ = self.unpack_sequence(history)
+        device = hist_event.device
+        dtype = hist_event.dtype
+        decays = self.decays.to(device=device, dtype=dtype)
+        stats = torch.zeros(
+            self.num_types,
+            self.num_basis,
+            device=device,
+            dtype=dtype,
+        )
+        if hist_event.numel() == 0:
+            return stats
+        t = torch.as_tensor(t, device=device, dtype=dtype)
+        valid = hist_event < t
+        if not bool(valid.any()):
+            return stats
+        ages = t - hist_event[valid]
+        kernels = torch.exp(-ages.unsqueeze(-1) * decays.unsqueeze(0))
+        stats.index_add_(0, hist_type[valid].long(), kernels)
+        return stats
+
+    @torch.no_grad()
+    def next_mark_probabilities_from_statistics(
+        self,
+        history_stats: torch.Tensor,
+        parameters,
+        *,
+        grid_size: int = 256,
+        tail_survival: float = 1e-8,
+    ) -> torch.Tensor:
+        """Integrate the causal Hawkes next-mark distribution.
+
+        ``history_stats[d, m]`` is the sum of exponential basis values for
+        source type ``d`` at the forecast origin.  The next-mark probability
+        is not the intensity normalized at the observed event time; it is
+        ``integral(lambda_m(u) * S(u), du)`` over the waiting time ``u``.
+        This is evaluated with a dense early grid for the decaying excitation
+        and a second grid over the long baseline tail.
+        """
+
+        if history_stats.ndim not in (2, 3):
+            raise ValueError(
+                "history_stats must have shape [D, M] or [N, D, M]"
+            )
+        if grid_size < 16:
+            raise ValueError("grid_size must be at least 16")
+        if not 0.0 < tail_survival < 1.0:
+            raise ValueError("tail_survival must be in (0, 1)")
+
+        device = parameters.raw_mu.device
+        dtype = parameters.raw_mu.dtype
+        stats = history_stats.to(device=device, dtype=dtype)
+        mu = self._positive_parameter(parameters, "mu").to(device=device, dtype=dtype)
+        W = self._positive_parameter(parameters, "W").to(device=device, dtype=dtype)
+        decays = self._parameter_decays(parameters).to(device=device, dtype=dtype)
+        if history_stats.ndim == 2 and (mu.ndim != 1 or W.ndim != 3):
+            raise ValueError("parameters must contain unbatched Hawkes tensors")
+        if history_stats.ndim == 3 and (mu.ndim != 2 or W.ndim != 4):
+            raise ValueError("batched parameters must have shapes [N, D] and [N, D, D, M]")
+
+        # ``coeff[m]`` is the contribution of basis m to each output mark at
+        # u=0.  The total hazard has a closed-form integral for every basis.
+        log_tail = -math.log(tail_survival)
+        min_decay = float(decays.clamp_min(EPS).min().detach().cpu())
+        points = max(int(grid_size) // 2, 8)
+        if history_stats.ndim == 2:
+            coeff = (W * stats.unsqueeze(0)).sum(dim=1)
+            baseline_rate = mu.sum().clamp_min(EPS)
+            horizon = float((log_tail / baseline_rate).detach().cpu())
+            early_horizon = min(horizon, max(8.0 / min_decay, 1.0))
+            if early_horizon < horizon * (1.0 - 1e-7):
+                early = torch.linspace(
+                    0.0, early_horizon, points, device=device, dtype=dtype
+                )
+                tail = torch.linspace(
+                    early_horizon, horizon, points, device=device, dtype=dtype
+                )[1:]
+                grid = torch.cat((early, tail), dim=0)
+            else:
+                grid = torch.linspace(
+                    0.0, horizon, max(int(grid_size), 16), device=device, dtype=dtype
+                )
+            decay_grid = torch.exp(-grid.unsqueeze(-1) * decays.unsqueeze(0))
+            intensity = mu.unsqueeze(0) + torch.einsum(
+                "dm,gm->gd", coeff, decay_grid
+            )
+            cumulative_hazard = (
+                baseline_rate * grid
+                + (
+                    coeff.sum(dim=0).unsqueeze(0)
+                    * (1.0 - decay_grid)
+                    / decays.unsqueeze(0).clamp_min(EPS)
+                ).sum(dim=-1)
+            )
+            integrand = intensity * torch.exp(-cumulative_hazard).unsqueeze(-1)
+            probabilities = torch.trapz(integrand, grid, dim=0).clamp_min(0.0)
+        else:
+            coeff = (W * stats.unsqueeze(1)).sum(dim=2)
+            baseline_rate = mu.sum(dim=-1).clamp_min(EPS)
+            horizon = log_tail / baseline_rate
+            normalized_grid = torch.linspace(
+                0.0, 1.0, max(int(grid_size), 32), device=device, dtype=dtype
+            )
+            grid = horizon.unsqueeze(-1) * normalized_grid.unsqueeze(0)
+            decay_grid = torch.exp(
+                -grid.unsqueeze(-1) * decays.reshape(1, 1, -1)
+            )
+            intensity = mu.unsqueeze(1) + torch.einsum(
+                "ndm,ngm->ngd", coeff, decay_grid
+            )
+            cumulative_hazard = (
+                baseline_rate.unsqueeze(-1) * grid
+                + (
+                    coeff.sum(dim=1).unsqueeze(1)
+                    * (1.0 - decay_grid)
+                    / decays.reshape(1, 1, -1).clamp_min(EPS)
+                ).sum(dim=-1)
+            )
+            integrand = intensity * torch.exp(-cumulative_hazard).unsqueeze(-1)
+            widths = grid[:, 1:] - grid[:, :-1]
+            probabilities = (
+                (integrand[:, 1:] + integrand[:, :-1])
+                * widths.unsqueeze(-1)
+                * 0.5
+            ).sum(dim=1).clamp_min(0.0)
+        return probabilities / probabilities.sum(dim=-1, keepdim=True).clamp_min(EPS)
 
     def interval_integral(self, t_prev, t, history, parameters):
         """

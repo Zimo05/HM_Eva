@@ -72,8 +72,16 @@ def _row(source: int, event: Mapping[str, Any]) -> dict[str, Any]:
         "event_index": int(event["event_index"]),
         "nll": float(event["nll"]),
         "true_type": int(event["true_type"]),
-        "predicted_type_at_event_time": int(event["predicted_type"]),
+        "predicted_type": int(
+            event.get("forecast_predicted_type", event["predicted_type"])
+        ),
+        "predicted_type_at_event_time": int(
+            event.get("predicted_type_at_event_time", event["predicted_type"])
+        ),
         "type_probabilities": [
+            float(value) for value in event["forecast_type_probabilities"]
+        ],
+        "type_probabilities_at_event_time": [
             float(value) for value in event["type_probabilities_at_event_time"]
         ],
         "true_time": float(event["true_time"]),

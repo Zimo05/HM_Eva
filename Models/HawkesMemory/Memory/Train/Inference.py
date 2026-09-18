@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -25,7 +25,7 @@ from MemoryResiduals.ProbationMemory import (
     ProbationCandidate,
     WriteProbationBuffer,
 )
-from Train.Train import (
+from Train.TrainingComponents import (
     CausalPrefixEncoder,
     WakeObjectiveConfig,
     _frontier_config_from_checkpoint,
@@ -187,6 +187,7 @@ class MemoryTreeInference:
                 else self.config.prototype_mode_threshold
             ),
             duplicate_quantile=self.wake_config.prototype_duplicate_quantile,
+            mode_quantile=self.wake_config.prototype_mode_quantile,
             mode_capacity=self.wake_config.prototype_mode_capacity,
             context_alias_capacity=(
                 self.wake_config.prototype_context_alias_capacity
@@ -335,7 +336,20 @@ class MemoryTreeInference:
                 f"{incompatible.unexpected_keys}"
             )
         encoder.load_state_dict(checkpoint["encoder_state_dict"])
-        wake_config = WakeObjectiveConfig(**checkpoint.get("wake_config", {}))
+        wake_payload = dict(checkpoint.get("wake_config", {}))
+        wake_field_names = {
+            config_field.name for config_field in fields(WakeObjectiveConfig)
+        }
+        # Older checkpoints may retain profiling/experimental options that
+        # are no longer part of the runtime WakeObjectiveConfig dataclass.
+        # Ignore those metadata-only fields while preserving every supported
+        # inference setting.
+        wake_payload = {
+            key: value
+            for key, value in wake_payload.items()
+            if key in wake_field_names
+        }
+        wake_config = WakeObjectiveConfig(**wake_payload)
         inference = cls(
             tree=tree,
             hawkes=hawkes,
@@ -413,10 +427,11 @@ class MemoryTreeInference:
         """Cache prefix statistics at the causal forecast origin.
 
         ``event_NLL`` uses the strict-time history cache.  Forecasting in
-        ``run_sequence`` instead evaluates the local rate at
-        ``t[k - 1] + 1e-6``.  For the next event, every prefix event is at or
-        before ``t[k - 1]``, so the cached history at ``t[k]`` can be rescaled
-        to that forecast origin; tied events are then added explicitly.  This
+        ``run_sequence`` evaluates the local rate at ``t[k - 1] + 1e-6`` and
+        integrates the corresponding Hawkes next-mark probability from the
+        same prefix.  For the next event, every prefix event is at or before
+        ``t[k - 1]``, so the cached history at ``t[k]`` can be rescaled to
+        that forecast origin; tied events are then added explicitly.  This
         keeps the batched path algebraically identical to the scalar path
         without putting a Python event loop around ``intensity_at_event``.
         """
@@ -1104,12 +1119,19 @@ class MemoryTreeInference:
 
         batch_size = len(prepared)
         nll_by_sequence = z_flat.new_zeros(batch_size)
+        scored_nll_by_sequence = z_flat.new_zeros(batch_size)
         correct_by_sequence = torch.zeros(
             batch_size,
             dtype=torch.long,
             device=device,
         )
+        all_correct_by_sequence = torch.zeros(
+            batch_size,
+            dtype=torch.long,
+            device=device,
+        )
         time_abs_by_sequence = z_flat.new_zeros(batch_size)
+        all_time_abs_by_sequence = z_flat.new_zeros(batch_size)
         working_state = self.tree.working_memory.new_batch_state(batch_size)
         adapt_working_memory = bool(self.config.adapt_working_memory)
         need_events = bool(
@@ -1271,26 +1293,60 @@ class MemoryTreeInference:
                 ).clamp_min(1e-8)
                 forecast_rate = forecast_intensity.sum(dim=-1).clamp_min(1e-8)
                 forecast_type_probabilities = (
-                    forecast_intensity / forecast_rate.unsqueeze(-1)
+                    self.hawkes.next_mark_probabilities_from_statistics(
+                        active_forecast,
+                        HawkesParams(
+                            final_params.theta[..., : self.hawkes.num_types],
+                            final_params.theta[
+                                ..., self.hawkes.num_types :
+                            ].reshape(
+                                -1,
+                                self.hawkes.num_types,
+                                self.hawkes.num_types,
+                                self.hawkes.num_basis,
+                            ),
+                        ),
+                    )
                 )
                 predicted_delta = forecast_rate.reciprocal()
                 active_origins = forecast_origin_flat.index_select(
                     0, active_rows
                 )
                 predicted_time = active_origins + predicted_delta
-                predicted_type = current_intensity.argmax(dim=-1)
+                predicted_type_at_event_time = current_intensity.argmax(dim=-1)
+                predicted_type = forecast_type_probabilities.argmax(dim=-1)
+
+                score_mask = time_index.index_select(0, active_rows).gt(0)
+                scored_nll = final_nll.detach().masked_fill(~score_mask, 0.0)
 
                 nll_by_sequence.index_add_(
                     0,
                     sequence_rows,
                     final_nll.detach(),
                 )
+                scored_nll_by_sequence.index_add_(
+                    0,
+                    sequence_rows,
+                    scored_nll,
+                )
                 correct_by_sequence.index_add_(
+                    0,
+                    sequence_rows,
+                    (predicted_type.eq(active_types) & score_mask).long(),
+                )
+                all_correct_by_sequence.index_add_(
                     0,
                     sequence_rows,
                     predicted_type.eq(active_types).long(),
                 )
                 time_abs_by_sequence.index_add_(
+                    0,
+                    sequence_rows,
+                    (predicted_time - times_flat.index_select(0, active_rows))
+                    .abs()
+                    .masked_fill(~score_mask, 0.0),
+                )
+                all_time_abs_by_sequence.index_add_(
                     0,
                     sequence_rows,
                     (predicted_time - times_flat.index_select(0, active_rows))
@@ -1310,6 +1366,9 @@ class MemoryTreeInference:
             predicted_time_cpu = predicted_time.detach().cpu().tolist()
             active_types_cpu = active_types.detach().cpu().tolist()
             predicted_type_cpu = predicted_type.detach().cpu().tolist()
+            predicted_type_at_event_time_cpu = (
+                predicted_type_at_event_time.detach().cpu().tolist()
+            )
             action_probabilities_cpu = action_probabilities.detach().cpu()
             raw_action_probabilities_cpu = (
                 raw_action_probabilities.detach().cpu()
@@ -1342,6 +1401,12 @@ class MemoryTreeInference:
                     "event_index": event_index,
                     "nll": float(nll_cpu[local_index]),
                     "predicted_type": int(predicted_type_cpu[local_index]),
+                    "forecast_predicted_type": int(
+                        predicted_type_cpu[local_index]
+                    ),
+                    "predicted_type_at_event_time": int(
+                        predicted_type_at_event_time_cpu[local_index]
+                    ),
                     "true_type": int(active_types_cpu[local_index]),
                     "prediction_theta": pre_theta_cpu[local_index],
                     "intensity": current_intensity_cpu[local_index],
@@ -1448,6 +1513,7 @@ class MemoryTreeInference:
             else:
                 materialized_events = []
             total_nll = float(nll_by_sequence[row].detach().cpu())
+            scored_nll = float(scored_nll_by_sequence[row].detach().cpu())
             results.append({
                 "events": materialized_events,
                 "total_nll": total_nll,
@@ -1463,10 +1529,21 @@ class MemoryTreeInference:
                 "write_probe_count": 0,
                 "leaf_ids": list(self.tree.leaf_ids),
                 "scalar_metrics": {
+                    # Keep the historical low-level fields for parity tests
+                    # and controller diagnostics.  The benchmark adapter
+                    # consumes the explicit next-event fields below.
                     "events": length,
                     "nll_sum": total_nll,
-                    "correct": int(correct_by_sequence[row].detach().cpu()),
+                    "correct": int(all_correct_by_sequence[row].detach().cpu()),
                     "time_abs_sum": float(
+                        all_time_abs_by_sequence[row].detach().cpu()
+                    ),
+                    "benchmark_events": max(length - 1, 0),
+                    "benchmark_nll_sum": scored_nll,
+                    "benchmark_correct": int(
+                        correct_by_sequence[row].detach().cpu()
+                    ),
+                    "benchmark_time_abs_sum": float(
                         time_abs_by_sequence[row].detach().cpu()
                     ),
                 },
@@ -2390,10 +2467,14 @@ class MemoryTreeInference:
                     "precomputed_memory_query must have one row per event"
                 )
         self.tree.reset_working_memory()
+        forecast_history_stats = self._forecast_history_statistics(sequence)
         pending_writes: list[Dict[str, Any]] = []
         write_probe_contexts: list[Dict[str, Any]] = []
         outputs: list[Dict[str, Any]] = []
         total_nll = 0.0
+        scored_nll = 0.0
+        all_scalar_correct = 0
+        all_scalar_time_abs_sum = 0.0
         scalar_correct = 0
         scalar_time_abs_sum = 0.0
         accepted_write_count = 0
@@ -2462,9 +2543,11 @@ class MemoryTreeInference:
                 self.tree.episodic_memory.step_age()
 
             with torch.no_grad():
-                # A causal local-rate forecast made at the end of the prefix.
-                # This is distinct from ``intensity_at_cached_event`` below,
-                # which conditions mark prediction on the observed event time.
+                # A causal forecast made at the end of the prefix.  The local
+                # rate supplies the deterministic time estimate; the mark
+                # distribution below integrates the Hawkes survival law.  It
+                # is distinct from ``intensity_at_cached_event`` below,
+                # which conditions mark diagnostics on the observed event time.
                 forecast_origin = (
                     sequence["times"].new_tensor(0.0)
                     if event_index == 0
@@ -2507,7 +2590,12 @@ class MemoryTreeInference:
                     params,
                 )
                 forecast_rate = forecast_intensity.sum().clamp_min(1e-8)
-                forecast_type_probabilities = forecast_intensity / forecast_rate
+                forecast_type_probabilities = (
+                    self.hawkes.next_mark_probabilities_from_statistics(
+                        forecast_history_stats[event_index],
+                        params,
+                    )
+                )
                 predicted_delta = forecast_rate.reciprocal()
                 predicted_time = forecast_origin + predicted_delta
                 intensity = self.hawkes.intensity_at_cached_event(
@@ -2516,7 +2604,10 @@ class MemoryTreeInference:
                 type_probabilities_at_event_time = (
                     intensity / intensity.sum().clamp_min(1e-8)
                 )
-                predicted_type = int(intensity.argmax().item())
+                predicted_type_at_event_time = int(intensity.argmax().item())
+                predicted_type = int(
+                    forecast_type_probabilities.argmax().item()
+                )
                 if self.config.adapt_working_memory:
                     self.tree.working_memory.update_from_gradient(
                         working_grad,
@@ -2684,17 +2775,26 @@ class MemoryTreeInference:
             true_type = int(sequence["types"][event_index].item())
             true_time = float(sequence["times"][event_index].detach().cpu())
             total_nll += event_nll
+            if event_index >= 1:
+                scored_nll += event_nll
             if compact:
-                scalar_correct += int(predicted_type == true_type)
-                scalar_time_abs_sum += abs(
+                all_scalar_correct += int(predicted_type == true_type)
+                all_scalar_time_abs_sum += abs(
                     float(predicted_time.detach().cpu()) - true_time
                 )
+                if event_index >= 1:
+                    scalar_correct += int(predicted_type == true_type)
+                    scalar_time_abs_sum += abs(
+                        float(predicted_time.detach().cpu()) - true_time
+                    )
 
             if materialize_events:
                 outputs.append({
                     "event_index": event_index,
                     "nll": event_nll,
                     "predicted_type": predicted_type,
+                    "forecast_predicted_type": predicted_type,
+                    "predicted_type_at_event_time": predicted_type_at_event_time,
                     "true_type": true_type,
                     # ``pre_action_theta`` is the parameter state formed from
                     # the strict prefix events[:event_index].  CL law-recovery uses it
@@ -3060,8 +3160,12 @@ class MemoryTreeInference:
             result["scalar_metrics"] = {
                 "events": event_count,
                 "nll_sum": total_nll,
-                "correct": scalar_correct,
-                "time_abs_sum": scalar_time_abs_sum,
+                "correct": all_scalar_correct,
+                "time_abs_sum": all_scalar_time_abs_sum,
+                "benchmark_events": max(event_count - 1, 0),
+                "benchmark_nll_sum": scored_nll,
+                "benchmark_correct": scalar_correct,
+                "benchmark_time_abs_sum": scalar_time_abs_sum,
             }
         return result
 
@@ -3070,12 +3174,12 @@ class MemoryTreeInference:
         self,
         cpu_prefix: Mapping[str, Tensor],
     ) -> Dict[str, Any]:
-        """Return a local-rate next-event forecast from the observed prefix.
+        """Return a causal next-event forecast from the observed prefix.
 
-        The event type distribution is the normalized current Hawkes intensity.
-        The reported time uses the standard locally constant-rate expectation
-        ``1 / sum_d lambda_d``; it is deterministic and is not an exact Hawkes
-        sample. Exact simulation can be added with Ogata thinning if required.
+        The event type distribution integrates ``lambda_m(u) S(u)`` over the
+        waiting time.  The reported time still uses the standard locally
+        constant-rate expectation ``1 / sum_d lambda_d``; it is deterministic
+        and is not an exact Hawkes sample.
         """
         prefix = self._move_sequence(cpu_prefix)
         event_index = int(prefix["times"].numel())
@@ -3109,7 +3213,13 @@ class MemoryTreeInference:
             params,
         )
         total_rate = intensity.sum().clamp_min(1e-8)
-        probabilities = intensity / total_rate
+        probabilities = self.hawkes.next_mark_probabilities_from_statistics(
+            self.hawkes.history_statistics_at(
+                {"times": prefix["times"], "types": prefix["types"]},
+                evaluation_time,
+            ),
+            params,
+        )
         expected_delta = total_rate.reciprocal()
         return {
             "predicted_time": float((current_time + expected_delta).cpu()),

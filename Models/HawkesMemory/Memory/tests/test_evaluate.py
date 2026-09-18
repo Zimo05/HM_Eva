@@ -29,7 +29,7 @@ class EvaluationMetricTests(unittest.TestCase):
         rows = [
             {
                 "source_index": 0,
-                "event_index": 0,
+                "event_index": 1,
                 "true_type": 0,
                 "type_probabilities": [0.8, 0.2],
                 "nll": 1.0,
@@ -38,7 +38,7 @@ class EvaluationMetricTests(unittest.TestCase):
             },
             {
                 "source_index": 1,
-                "event_index": 0,
+                "event_index": 1,
                 "true_type": 1,
                 "type_probabilities": [0.7, 0.3],
                 "nll": 3.0,
@@ -55,7 +55,7 @@ class EvaluationMetricTests(unittest.TestCase):
 
     def test_memory_diagnostics_and_write_funnel_are_aggregated(self):
         row = {
-            "source_index": 0, "event_index": 0, "true_type": 0,
+            "source_index": 0, "event_index": 1, "true_type": 0,
             "type_probabilities": [0.8, 0.2], "nll": 1.0,
             "predicted_time": 1.0, "true_time": 1.0,
             "visited_bank_count": 2, "visited_nonempty_bank_count": 1,

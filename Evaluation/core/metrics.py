@@ -13,12 +13,69 @@ def mean(values: Iterable[float]) -> float:
     return sum(values) / len(values) if values else float("nan")
 
 
-def prediction_metrics(rows: Sequence[Mapping]) -> dict:
+def _scored_rows(rows: Sequence[Mapping]) -> list[Mapping]:
+    """Keep the common next-event population used by the benchmark.
+
+    HM also emits the first event of a sequence for its baseline-integral
+    diagnostic.  Other models do not have that row, so event index zero must
+    never enter a cross-model table.  Rows without an event index are already
+    assumed to be next-event rows (the native baseline contract).
+    """
+
+    scored: list[Mapping] = []
+    for row in rows:
+        event_index = row.get("event_index")
+        if event_index not in (None, "") and int(event_index) < 1:
+            continue
+        scored.append(row)
+    return scored
+
+
+def _predicted_type(row: Mapping) -> int:
+    value = row.get("predicted_type")
+    if value not in (None, ""):
+        return int(value)
+    value = row.get("predicted_type_at_event_time")
+    if value not in (None, ""):
+        return int(value)
+    probabilities = row.get("type_probabilities")
+    if probabilities in (None, ""):
+        probabilities = row.get("forecast_type_probabilities")
+    if probabilities in (None, ""):
+        raise KeyError("prediction row has neither predicted_type nor type_probabilities")
+    values = [float(value) for value in probabilities]
+    if not values:
+        raise ValueError("prediction row has an empty type-probability vector")
+    return max(range(len(values)), key=values.__getitem__)
+
+
+def prediction_metrics(
+    rows: Sequence[Mapping],
+    *,
+    num_types: int | None = None,
+    fallback_nll: float | None = None,
+) -> dict:
+    """Score the canonical causal next-event prediction contract.
+
+    ``event_index == 0`` is retained by HM as a diagnostic but excluded here.
+    ``num_types`` fixes the Macro-F1 vocabulary so a class absent from a test
+    split still contributes a zero F1, matching the benchmark definition.
+    Native runners that do not expose a per-event NLL may provide
+    ``fallback_nll``; classification and time metrics are still computed from
+    the prediction rows.
+    """
+
+    rows = _scored_rows(rows)
     if not rows:
-        raise ValueError("no event predictions")
+        raise ValueError("no next-event predictions")
     true = [int(row["true_type"]) for row in rows]
-    pred = [int(row["predicted_type"]) for row in rows]
-    labels = sorted(set(true) | set(pred))
+    pred = [_predicted_type(row) for row in rows]
+    if num_types is None:
+        labels = sorted(set(true) | set(pred))
+    else:
+        if int(num_types) <= 0:
+            raise ValueError("num_types must be positive")
+        labels = list(range(int(num_types)))
     f1s = []
     support = Counter(true)
     for label in labels:
@@ -28,20 +85,28 @@ def prediction_metrics(rows: Sequence[Mapping]) -> dict:
         precision = tp / (tp + fp) if tp + fp else 0.0
         recall = tp / (tp + fn) if tp + fn else 0.0
         f1s.append(2 * precision * recall / (precision + recall) if precision + recall else 0.0)
-    errors = [float(r["predicted_delta_time"]) - float(r["true_delta_time"]) for r in rows]
+    errors = [
+        float(row["predicted_delta_time"]) - float(row["true_delta_time"])
+        for row in rows
+        if row.get("predicted_delta_time") not in (None, "")
+        and row.get("true_delta_time") not in (None, "")
+    ]
     event_nlls = [
         float(row["event_nll"])
         for row in rows
         if row.get("event_nll") not in (None, "")
     ]
+    nll = mean(event_nlls) if len(event_nlls) == len(rows) else fallback_nll
     return {
-        "nll_per_event": mean(event_nlls) if event_nlls else None,
+        "nll_per_event": nll,
         "accuracy": mean(a == b for a, b in zip(true, pred)),
         "macro_f1": mean(f1s),
-        "time_mae": mean(abs(x) for x in errors),
-        "time_rmse": math.sqrt(mean(x * x for x in errors)),
+        "time_mae": mean(abs(x) for x in errors) if errors else None,
+        "time_rmse": math.sqrt(mean(x * x for x in errors)) if errors else None,
         "num_events": len(rows),
-        "per_type_support": dict(sorted(support.items())),
+        "per_type_support": {
+            label: int(support.get(label, 0)) for label in labels
+        },
         "majority_accuracy": max(support.values()) / len(true),
     }
 

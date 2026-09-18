@@ -442,13 +442,13 @@ def test_thp_defaults_match_shared_training_protocol():
         "selection_metric": args.selection_metric,
     } == {
         "epochs": 60,
-        "learning_rate": 3e-4,
-        "d_model": 128,
-        "d_rnn": 128,
-        "d_inner": 256,
-        "d_k": 32,
-        "d_v": 32,
-        "num_layers": 2,
+        "learning_rate": 2e-4,
+        "d_model": 512,
+        "d_rnn": 256,
+        "d_inner": 1024,
+        "d_k": 128,
+        "d_v": 128,
+        "num_layers": 3,
         "label_smoothing": 0.01,
         "selection_metric": "ll",
     }
@@ -456,26 +456,26 @@ def test_thp_defaults_match_shared_training_protocol():
     main_defaults = _main_argument_defaults(ROOT / "Models" / "THP" / "Main.py")
     assert main_defaults["-epoch"] == 60
     assert main_defaults["-batch_size"] == 64
-    assert main_defaults["-d_model"] == 128
-    assert main_defaults["-d_rnn"] == 128
-    assert main_defaults["-d_inner_hid"] == 256
-    assert main_defaults["-d_k"] == 32
-    assert main_defaults["-d_v"] == 32
-    assert main_defaults["-n_layers"] == 2
-    assert main_defaults["-lr"] == 3e-4
+    assert main_defaults["-d_model"] == 512
+    assert main_defaults["-d_rnn"] == 256
+    assert main_defaults["-d_inner_hid"] == 1024
+    assert main_defaults["-d_k"] == 128
+    assert main_defaults["-d_v"] == 128
+    assert main_defaults["-n_layers"] == 3
+    assert main_defaults["-lr"] == 2e-4
     assert main_defaults["-smooth"] == 0.01
     assert main_defaults["-selection_metric"] == "ll"
 
     launcher = (ROOT / "Models" / "THP" / "run.sh").read_text(
         encoding="utf-8"
     )
-    assert 'LEARNING_RATE="${LEARNING_RATE:-0.0003}"' in launcher
-    assert 'D_MODEL="${D_MODEL:-128}"' in launcher
-    assert 'D_RNN="${D_RNN:-128}"' in launcher
-    assert 'D_INNER="${D_INNER:-256}"' in launcher
-    assert 'D_K="${D_K:-32}"' in launcher
-    assert 'D_V="${D_V:-32}"' in launcher
-    assert 'NUM_LAYERS="${NUM_LAYERS:-2}"' in launcher
+    assert 'LEARNING_RATE="${LEARNING_RATE:-0.0002}"' in launcher
+    assert 'D_MODEL="${D_MODEL:-512}"' in launcher
+    assert 'D_RNN="${D_RNN:-256}"' in launcher
+    assert 'D_INNER="${D_INNER:-1024}"' in launcher
+    assert 'D_K="${D_K:-128}"' in launcher
+    assert 'D_V="${D_V:-128}"' in launcher
+    assert 'NUM_LAYERS="${NUM_LAYERS:-3}"' in launcher
     assert 'LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.01}"' in launcher
     assert 'SELECTION_METRIC="${SELECTION_METRIC:-accuracy}"' not in launcher
     assert "WEIGHT_DECAY" not in launcher

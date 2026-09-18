@@ -139,8 +139,8 @@ class Transformer(nn.Module):
 
     def __init__(
             self,
-            num_types, d_model=256, d_rnn=128, d_inner=1024,
-            n_layers=4, n_head=4, d_k=64, d_v=64, dropout=0.1):
+            num_types, d_model=512, d_rnn=256, d_inner=1024,
+            n_layers=3, n_head=4, d_k=128, d_v=128, dropout=0.1):
         super().__init__()
 
         self.encoder = Encoder(

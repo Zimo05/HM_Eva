@@ -328,6 +328,13 @@ def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
             == descriptor.sequence_summary
         )
         assert command[command.index("--wake-wavefront-batch-size") + 1] == wavefront
+        if dataset == "retweet":
+            assert (
+                command[command.index("--wake-transaction-mode") + 1]
+                == "snapshot"
+            )
+        else:
+            assert "--wake-transaction-mode" not in command
         assert "--residual-init-rank" in command
         assert command[command.index("--cold-start-epochs") + 1] == expected_cold_start[dataset]
         if dataset == "stackoverflow":

@@ -58,6 +58,7 @@ _PERSISTENT_CONFIG_DESTS = frozenset({
     "route_balance_weight",
     "route_balance_batch_size",
     "wake_wavefront_batch_size",
+    "wake_transaction_mode",
     "retrieval_microbatch",
     "retrieval_visit_chunk_size",
     "route_balance_max_steps",
@@ -185,6 +186,7 @@ def _load_checkpoint_payload(path: str | Path) -> dict:
 
 
 _WAKE_ARG_TO_CHECKPOINT = {
+    "wake_transaction_mode": "wake_transaction_mode",
     "route_mi_weight": "lambda_route_mi",
     "route_posterior_weight": "lambda_route_posterior",
     "route_distill_weight": "lambda_route_distill",
@@ -890,6 +892,16 @@ def _parse_args(argv=None):
         help=(
             "Number of sequences grouped for stateless Wake prefix "
             "preparation; stateful memory updates remain ordered."
+        ),
+    )
+    parser.add_argument(
+        "--wake-transaction-mode",
+        choices=("ordered", "snapshot"),
+        default="ordered",
+        help=(
+            "Wake bank visibility: ordered preserves the established "
+            "sequence-causal transaction; snapshot shares one immutable "
+            "bank inside a wavefront and commits proposals afterward."
         ),
     )
     parser.add_argument(
@@ -1979,6 +1991,9 @@ def main() -> None:
         trainer.wake_config.wake_wavefront_batch_size = (
             args.wake_wavefront_batch_size
         )
+        trainer.wake_config.wake_transaction_mode = (
+            args.wake_transaction_mode
+        )
         trainer.wake_config.retrieval_microbatch = (
             args.retrieval_microbatch
         )
@@ -2442,6 +2457,7 @@ def main() -> None:
             route_probe_residual_grad_clip=args.residual_init_grad_clip,
             route_balance_batch_size=args.route_balance_batch_size,
             wake_wavefront_batch_size=args.wake_wavefront_batch_size,
+            wake_transaction_mode=args.wake_transaction_mode,
             retrieval_microbatch=args.retrieval_microbatch,
             retrieval_visit_chunk_size=args.retrieval_visit_chunk_size,
             wake_profile=args.wake_profile,

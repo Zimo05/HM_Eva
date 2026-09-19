@@ -938,6 +938,13 @@ class TrainingLoopMixin:
         ).strip().casefold()
         return family == "non_cl_dws"
 
+    def _uses_snapshot_wake_transactions(self) -> bool:
+        """Return whether the explicitly selected snapshot protocol is active."""
+
+        return str(
+            getattr(self.wake_config, "wake_transaction_mode", "ordered")
+        ).strip().casefold() == "snapshot"
+
     def train(
         self,
         dataset: Sequence[Mapping[str, Tensor]],
@@ -1003,6 +1010,9 @@ class TrainingLoopMixin:
         cache_progress.close()
         dataset = resident_dataset
         use_non_cl_dws_wake_path = self._uses_non_cl_dws_wake_path()
+        use_snapshot_wake_transactions = (
+            self._uses_snapshot_wake_transactions()
+        )
         # Keep the list-of-dicts for metadata/compatibility, and use this
         # padded device-resident view for the Wake/Global tensor hot path.
         self._resident_sequence_store = ResidentSequenceStore.from_sequences(
@@ -1092,7 +1102,21 @@ class TrainingLoopMixin:
                 dataset,
                 order,
             ):
-                if use_non_cl_dws_wake_path:
+                if use_snapshot_wake_transactions:
+                    batch_results = self._train_wake_batch_snapshot(
+                        sequences=wake_batch["sequences"],
+                        sequence_indices=wake_batch["sequence_indices"],
+                        z_flat=wake_batch["z_flat"],
+                        projected_flat=wake_batch["projected_flat"],
+                        query_flat=wake_batch["query_flat"],
+                        frontier_static_cache=(
+                            wake_batch["frontier_static_cache"]
+                        ),
+                        frontier_flat=wake_batch["frontier_flat"],
+                        frontier_rows=wake_batch["frontier_rows"],
+                        flat=wake_batch["flat"],
+                    )
+                elif use_non_cl_dws_wake_path:
                     batch_results = self.train_wake_batch_non_cl_dws(
                         sequences=wake_batch["sequences"],
                         sequence_indices=wake_batch["sequence_indices"],

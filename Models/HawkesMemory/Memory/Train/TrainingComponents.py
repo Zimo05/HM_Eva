@@ -250,13 +250,6 @@ class WakeObjectiveConfig:
     # Accepted-sample calibrated mode radius quantile.  Appended for
     # checkpoint compatibility with older WakeObjectiveConfig payloads.
     prototype_mode_quantile: float = 0.95
-    # Transaction visibility policy. ``ordered`` is the established causal
-    # implementation: sequence i commits before sequence i+1 reads.  The
-    # opt-in ``snapshot`` mode lets every sequence in one wavefront read the
-    # same immutable bank and performs the existing deterministic commit pass
-    # only after the parallel computation completes.  Appended to preserve
-    # positional construction of older configs and checkpoints.
-    wake_transaction_mode: str = "ordered"
 
 
 @dataclass

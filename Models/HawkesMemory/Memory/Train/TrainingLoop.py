@@ -938,12 +938,13 @@ class TrainingLoopMixin:
         ).strip().casefold()
         return family == "non_cl_dws"
 
-    def _uses_snapshot_wake_transactions(self) -> bool:
-        """Return whether the explicitly selected snapshot protocol is active."""
+    def _uses_retweet_snapshot_wake_path(self) -> bool:
+        """Keep the snapshot transaction path exclusive to Retweet."""
 
-        return str(
-            getattr(self.wake_config, "wake_transaction_mode", "ordered")
-        ).strip().casefold() == "snapshot"
+        family = str(
+            getattr(self.training_config, "wake_dataset_family", "unknown")
+        ).strip().casefold()
+        return family == "retweet"
 
     def train(
         self,
@@ -1010,8 +1011,8 @@ class TrainingLoopMixin:
         cache_progress.close()
         dataset = resident_dataset
         use_non_cl_dws_wake_path = self._uses_non_cl_dws_wake_path()
-        use_snapshot_wake_transactions = (
-            self._uses_snapshot_wake_transactions()
+        use_retweet_snapshot_wake_path = (
+            self._uses_retweet_snapshot_wake_path()
         )
         # Keep the list-of-dicts for metadata/compatibility, and use this
         # padded device-resident view for the Wake/Global tensor hot path.
@@ -1102,7 +1103,7 @@ class TrainingLoopMixin:
                 dataset,
                 order,
             ):
-                if use_snapshot_wake_transactions:
+                if use_retweet_snapshot_wake_path:
                     batch_results = self._train_wake_batch_snapshot(
                         sequences=wake_batch["sequences"],
                         sequence_indices=wake_batch["sequence_indices"],

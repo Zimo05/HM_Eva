@@ -330,11 +330,11 @@ def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
         assert command[command.index("--wake-wavefront-batch-size") + 1] == wavefront
         if dataset == "retweet":
             assert (
-                command[command.index("--wake-transaction-mode") + 1]
-                == "snapshot"
+                command[command.index("--wake-dataset-family") + 1]
+                == "retweet"
             )
         else:
-            assert "--wake-transaction-mode" not in command
+            assert "--wake-dataset-family" not in command
         assert "--residual-init-rank" in command
         assert command[command.index("--cold-start-epochs") + 1] == expected_cold_start[dataset]
         if dataset == "stackoverflow":

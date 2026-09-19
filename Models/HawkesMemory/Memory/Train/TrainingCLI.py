@@ -58,7 +58,6 @@ _PERSISTENT_CONFIG_DESTS = frozenset({
     "route_balance_weight",
     "route_balance_batch_size",
     "wake_wavefront_batch_size",
-    "wake_transaction_mode",
     "retrieval_microbatch",
     "retrieval_visit_chunk_size",
     "route_balance_max_steps",
@@ -138,11 +137,16 @@ def _normalise_config_value(value):
 def _infer_wake_dataset_family(args) -> str:
     """Classify the dataset only for the Wake entry-point dispatch.
 
-    Continual stages carry explicit CL metadata.  Stationary DWS runs keep
-    ``DWS`` in their source/prepared path.  Everything else is deliberately
-    treated as the non-CL/DWS family, which covers Retweet, Taxi, and Taobao
-    without adding a new required CLI argument to existing commands.
+    The benchmark adapter labels Retweet explicitly so its snapshot Wake
+    execution branch cannot leak into Taobao, StackOverflow, DWS, or CL.
+    Unlabelled standalone datasets retain the established non-CL/DWS path.
     """
+
+    explicit_family = str(
+        getattr(args, "wake_dataset_family", "auto") or "auto"
+    ).strip().casefold()
+    if explicit_family != "auto":
+        return explicit_family
 
     if any(
         getattr(args, name, None) is not None
@@ -186,7 +190,6 @@ def _load_checkpoint_payload(path: str | Path) -> dict:
 
 
 _WAKE_ARG_TO_CHECKPOINT = {
-    "wake_transaction_mode": "wake_transaction_mode",
     "route_mi_weight": "lambda_route_mi",
     "route_posterior_weight": "lambda_route_posterior",
     "route_distill_weight": "lambda_route_distill",
@@ -895,14 +898,10 @@ def _parse_args(argv=None):
         ),
     )
     parser.add_argument(
-        "--wake-transaction-mode",
-        choices=("ordered", "snapshot"),
-        default="ordered",
-        help=(
-            "Wake bank visibility: ordered preserves the established "
-            "sequence-causal transaction; snapshot shares one immutable "
-            "bank inside a wavefront and commits proposals afterward."
-        ),
+        "--wake-dataset-family",
+        choices=("auto", "retweet", "non_cl_dws", "dws", "cl"),
+        default="auto",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--retrieval-microbatch",
@@ -1991,9 +1990,6 @@ def main() -> None:
         trainer.wake_config.wake_wavefront_batch_size = (
             args.wake_wavefront_batch_size
         )
-        trainer.wake_config.wake_transaction_mode = (
-            args.wake_transaction_mode
-        )
         trainer.wake_config.retrieval_microbatch = (
             args.retrieval_microbatch
         )
@@ -2457,7 +2453,6 @@ def main() -> None:
             route_probe_residual_grad_clip=args.residual_init_grad_clip,
             route_balance_batch_size=args.route_balance_batch_size,
             wake_wavefront_batch_size=args.wake_wavefront_batch_size,
-            wake_transaction_mode=args.wake_transaction_mode,
             retrieval_microbatch=args.retrieval_microbatch,
             retrieval_visit_chunk_size=args.retrieval_visit_chunk_size,
             wake_profile=args.wake_profile,

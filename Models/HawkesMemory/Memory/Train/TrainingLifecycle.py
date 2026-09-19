@@ -165,13 +165,6 @@ class TrainingLifecycleMixin:
             raise ValueError("route_balance_batch_size must be at least 2")
         if self.wake_config.wake_wavefront_batch_size <= 0:
             raise ValueError("wake_wavefront_batch_size must be positive")
-        if self.wake_config.wake_transaction_mode not in {
-            "ordered",
-            "snapshot",
-        }:
-            raise ValueError(
-                "wake_transaction_mode must be ordered or snapshot"
-            )
         if self.wake_config.retrieval_microbatch <= 0:
             raise ValueError("retrieval_microbatch must be positive")
         if (

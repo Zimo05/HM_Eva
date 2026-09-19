@@ -1116,6 +1116,11 @@ def main(argv: list[str] | None = None) -> int:
             "selection_metric": "validation log-likelihood",
             "test_evaluations_during_training": 0,
             "test_evaluated_once_after_best_checkpoint": True,
+            "time_prediction_estimator": (
+                "trapezoidal_expected_time"
+                if args.model == "S2P2"
+                else "model_specific"
+            ),
         },
     }
     _write_json(output / "log" / "run_config.json", config_payload)

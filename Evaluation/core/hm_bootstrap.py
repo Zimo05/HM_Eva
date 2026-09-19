@@ -63,6 +63,13 @@ STATIONARY_HM_WAKE_WAVEFRONT_BATCH_SIZE = {
     "stackoverflow": 64,
 }
 
+# Retweet's Attention Encoder stage is memory-light enough to use a larger
+# batch without changing the shared THP/attention defaults for other HM
+# datasets.
+STATIONARY_HM_ATTENTION_BATCH_SIZE = {
+    "retweet": 512,
+}
+
 
 @dataclass(frozen=True)
 class HMUpstreamArtifacts:
@@ -942,6 +949,7 @@ def _device_environment(
     python_executable: str,
     device: str,
     batch_size: int,
+    attention_batch_size: int,
     thp_epochs: int,
     attention_epochs: int,
     seed: int,
@@ -966,7 +974,7 @@ def _device_environment(
         "THP_EPOCHS": str(max(1, int(thp_epochs))),
         "THP_DATA_PARALLEL": "0",
         "THP_SEED": str(int(seed)),
-        "ATTENTION_BATCH_SIZE": str(max(1, int(batch_size))),
+        "ATTENTION_BATCH_SIZE": str(max(1, int(attention_batch_size))),
         "ATTENTION_EPOCHS": str(max(1, int(attention_epochs))),
         "ATTENTION_SEED": str(int(seed)),
         "DATA_PATH": str(paths["all_json"]),
@@ -1115,10 +1123,14 @@ def build_stationary_hm_upstream(
         requested_epochs = 1
     attention_epochs = 1 if smoke else DEFAULT_ATTENTION_EPOCHS
     effective_batch = int(batch_size) if batch_size is not None else DEFAULT_BATCH_SIZE
+    attention_batch = STATIONARY_HM_ATTENTION_BATCH_SIZE.get(
+        dataset, effective_batch
+    )
     env = _device_environment(
         python_executable=python_executable,
         device=device,
         batch_size=effective_batch,
+        attention_batch_size=attention_batch,
         thp_epochs=requested_epochs,
         attention_epochs=attention_epochs,
         seed=seed,

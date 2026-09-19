@@ -1,5 +1,7 @@
 """ Base model with common functionality  """
 
+import math
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -147,8 +149,14 @@ class TorchBaseModel(nn.Module):
     def compute_states_at_sample_times(self, **kwargs):
         raise NotImplementedError('This need to implemented in inherited class ! ')
 
-    def predict_one_step_at_every_event(self, batch):
+    def predict_one_step_at_every_event(self, batch, **kwargs):
         """One-step prediction for every event in the sequence.
+
+        Estimate the expected next-event time with the deterministic
+        trapezoidal quadrature used by the current upstream EasyTPP/S2P2
+        implementation.  Thinning sampling is deliberately not used here.
+        The event mark is predicted from the intensities evaluated at that
+        expected time.
 
         Args:
             time_seqs (tensor): [batch_size, seq_len].
@@ -160,45 +168,84 @@ class TorchBaseModel(nn.Module):
         """
         time_seq, time_delta_seq, event_seq, batch_non_pad_mask, _ = batch
 
-        # remove the last event, as the prediction based on the last event has no label
-        # note: the first dts is 0
-        # [batch_size, seq_len]
-        time_seq, time_delta_seq, event_seq = time_seq[:, :-1], time_delta_seq[:, :-1], event_seq[:, :-1]
+        n = self.event_sampler.num_sample
+        e = self.event_sampler.num_exp
+        if n < 2:
+            raise ValueError("trapezoidal prediction requires num_sample >= 2")
+        if e < 1:
+            raise ValueError("trapezoidal prediction requires num_exp >= 1")
 
-        # [batch_size, seq_len]
-        dtime_boundary = torch.max(time_delta_seq * self.event_sampler.dtime_max,
-                                   time_delta_seq + self.event_sampler.dtime_max)
+        # Remove the last event: its prediction has no observed next-event
+        # label.  The first inter-event time remains zero by convention.
+        time_seq, time_delta_seq, event_seq = (
+            time_seq[:, :-1],
+            time_delta_seq[:, :-1],
+            event_seq[:, :-1],
+        )
 
-        # [batch_size, seq_len, num_sample]
-        accepted_dtimes, weights = self.event_sampler.draw_next_time_one_step(time_seq,
-                                                                              time_delta_seq,
-                                                                              event_seq,
-                                                                              dtime_boundary,
-                                                                              self.compute_intensities_at_sample_times,
-                                                                              compute_last_step_only=False)  # make it explicit
+        # Variable transform t = tan(u), u in [0, pi/2).  ``num_exp`` is
+        # reused as the maximum quadrature chunk size to bound GPU memory.
+        u_chunks = torch.linspace(
+            0,
+            math.pi / 2.0,
+            n + 1,
+            device=self.device,
+        )[:-1].split(e)
 
-        # We should condition on each accepted time to sample event mark, but not conditioned on the expected event time.
-        # 1. Use all accepted_dtimes to get intensity.
-        # [batch_size, seq_len, num_sample, num_marks]
-        intensities_at_times = self.compute_intensities_at_sample_times(time_seq,
-                                                                        time_delta_seq,
-                                                                        event_seq,
-                                                                        accepted_dtimes)
+        dtimes_pred = torch.zeros_like(time_seq)
+        cumulative_hazard = torch.zeros_like(time_seq)[..., None]
+        last_u = None
+        for u in u_chunks:
+            # Adjacent chunks share one endpoint so their trapezoids cover the
+            # complete grid without a gap.
+            if last_u is not None:
+                u = torch.concat([last_u[-1:], u])
+            last_u = u
 
-        # 2. Normalize the intensity over last dim and then compute the weighted sum over the `num_sample` dimension.
-        # Each of the last dimension is a categorical distribution over all marks.
-        # [batch_size, seq_len, num_sample, num_marks]
-        intensities_normalized = intensities_at_times / intensities_at_times.sum(dim=-1, keepdim=True)
+            u = u[None, None, :].expand(*time_seq.shape, -1)
+            sample_dtimes = torch.tan(u)
+            marked_intensity = self.compute_intensities_at_sample_times(
+                time_seq,
+                time_delta_seq,
+                event_seq,
+                sample_dtimes,
+            )
+            total_intensity = marked_intensity.sum(dim=-1)
+            cumulative_hazard = cumulative_hazard + F.pad(
+                torch.cumulative_trapezoid(total_intensity, sample_dtimes),
+                (1, 0),
+                mode="constant",
+                value=0.0,
+            )
 
-        # 3. Compute weighted sum of distributions and then take argmax.
-        # [batch_size, seq_len, num_marks]
-        intensities_weighted = torch.einsum('...s,...sm->...m', weights, intensities_normalized)
+            # E[T|H] = integral t * lambda(t) * exp(-Lambda(t)) dt,
+            # transformed from t in [0, inf) to u in [0, pi/2).
+            integrand = (
+                sample_dtimes
+                * total_intensity
+                * (-cumulative_hazard).exp()
+                / torch.cos(u).square()
+            )
+            dtimes_pred = dtimes_pred + torch.trapezoid(integrand, u)
+            cumulative_hazard = cumulative_hazard[:, :, -1:]
 
-        # [batch_size, seq_len]
-        types_pred = torch.argmax(intensities_weighted, dim=-1)
+        intensities_at_times = self.compute_intensities_at_sample_times(
+            time_seq,
+            time_delta_seq,
+            event_seq,
+            dtimes_pred[..., None],
+        )
+        intensities_normalized = intensities_at_times / intensities_at_times.sum(
+            dim=-1, keepdim=True
+        )
+        mark_distribution = intensities_normalized.squeeze(dim=-2)
 
-        # [batch_size, seq_len]
-        dtimes_pred = torch.sum(accepted_dtimes * weights, dim=-1)  # compute the expected next event time
+        if kwargs.get("get_raw_mark_distribution", False):
+            types_pred = mark_distribution
+        else:
+            types_pred = torch.argmax(mark_distribution, dim=-1)
+        if kwargs.get("get_raw_pred_next_time", False):
+            dtimes_pred = dtimes_pred[..., None]
         return dtimes_pred, types_pred
 
     def predict_multi_step_since_last_event(self, batch, forward=False):

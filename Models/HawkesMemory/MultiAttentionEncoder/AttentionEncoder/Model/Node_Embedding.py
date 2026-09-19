@@ -35,6 +35,60 @@ class NodeEmbedding(nn.Module):
         pooled = torch.sum(alpha.unsqueeze(-1) * X, dim=0)  # [d_model]
         return pooled
 
+    def attention_pool_indexed(
+        self,
+        X: torch.Tensor,
+        node_index: torch.Tensor,
+        num_nodes: int,
+    ) -> torch.Tensor:
+        """Attention-pool all nodes with a flattened segmented operation.
+
+        Parameters
+        ----------
+        X : Tensor [E, d_model]
+            Sequence embeddings gathered for every valid node membership.
+        node_index : LongTensor [E]
+            Destination node for each row of ``X``.
+        num_nodes : int
+            Total number of nodes, including nodes with no memberships.
+
+        Returns
+        -------
+        Tensor [N, d_model]
+            Projected pooled embeddings.  Nodes with no selected sequences are
+            exactly zero, matching the pipeline's historical loop behavior.
+        """
+        if X.ndim != 2 or X.shape[-1] != self.d_model:
+            raise ValueError(
+                "X must have shape [num_memberships, d_model], "
+                f"got {tuple(X.shape)}"
+            )
+        if node_index.ndim != 1 or node_index.shape[0] != X.shape[0]:
+            raise ValueError(
+                "node_index must have one entry per membership, "
+                f"got {tuple(node_index.shape)} for X {tuple(X.shape)}"
+            )
+        if num_nodes < 0:
+            raise ValueError(f"num_nodes must be non-negative, got {num_nodes}")
+        if X.shape[0] == 0:
+            return X.new_zeros((num_nodes, self.d_model))
+
+        node_index = node_index.to(device=X.device, dtype=torch.long)
+        scores = self.score_mlp(X).squeeze(-1)       # [E]
+        max_score = scores.new_full((num_nodes,), -torch.inf)
+        max_score.scatter_reduce_(
+            0, node_index, scores, reduce="amax", include_self=True
+        )
+        exp_score = torch.exp(scores - max_score[node_index])
+        denominator = scores.new_zeros(num_nodes)
+        denominator.scatter_add_(0, node_index, exp_score)
+        alpha = exp_score / denominator[node_index]
+
+        pooled = X.new_zeros((num_nodes, self.d_model))
+        pooled.index_add_(0, node_index, alpha.unsqueeze(-1) * X)
+        node_emb = self.out_proj(pooled)
+        return torch.where(denominator.unsqueeze(-1) > 0, node_emb, 0.0)
+
     def mean_pool(self, X: torch.Tensor) -> torch.Tensor:
         return X.mean(dim=0)
 

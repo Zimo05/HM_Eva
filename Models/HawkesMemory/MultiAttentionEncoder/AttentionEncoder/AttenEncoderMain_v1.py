@@ -340,6 +340,14 @@ class MultiAttentionEncoderPipeline:
         self.D_tree: Optional[torch.Tensor] = None  # [S, N, d_model]
         self.route_prob: Optional[torch.Tensor] = None  # [S, N]
         self.Z_matrix: Optional[torch.Tensor] = None  # [S, d_model] stacked seq embeddings
+        # Static, flattened node-membership index used by vectorized node
+        # pooling.  It is built once and avoids both Python work per mini-batch
+        # and a potentially large dense/padded N x S representation.
+        self._node_sequence_indices: Optional[torch.LongTensor] = None
+        self._node_membership_nodes: Optional[torch.LongTensor] = None
+        self._node_sequence_counts: Optional[torch.LongTensor] = None
+        self._global_id_to_z_row: Dict[int, int] = {}
+        self._allowed_node_mask_cache: Dict[frozenset[int], torch.BoolTensor] = {}
         self.weights_metadata: Dict[str, Any] = {}
         self.data_provenance: Optional[Dict[str, Any]] = None
 
@@ -586,29 +594,18 @@ class MultiAttentionEncoderPipeline:
             ).to(self.device)
         self._set_module_mode()
 
-        # ---- u_i : attention-pool per node ----
+        # ---- u_i : vectorized attention-pool for all nodes ----
         with self._grad_ctx():
-            u_list: List[torch.Tensor] = []
-            for node_pos in self.node_ids:
-                seq_ids = self.node_sequences[node_pos]
-                val_tensors: List[torch.Tensor] = []
-                for gid in seq_ids:
-                    json_key = self.global_id_to_key.get(gid)
-                    if json_key is not None and json_key in self.seq_embeddings:
-                        emb = self.seq_embeddings[json_key]
-                        if emb.device != self.device:
-                            emb = emb.to(self.device)
-                        val_tensors.append(emb)
+            self.build_Z_matrix()
+            self._build_node_membership_index()
+            U = self._pool_node_embeddings()  # [N, d_model]
 
-                if not val_tensors:
-                    print(f"  [Warn] Node '{node_pos}': no valid sequence embeddings.")
-                    u_list.append(torch.zeros(self.d_model, device=self.device))
-                    continue
-
-                node_val = TreeNodeVal(node_id=node_pos, val=val_tensors)
-                u_list.append(self.node_embedder(node_val))  # [d_model]
-
-            U = torch.stack(u_list, dim=0)  # [N, d_model]
+            empty_nodes = (self._node_sequence_counts == 0).nonzero().flatten()
+            for node_index in empty_nodes.tolist():
+                print(
+                    f"  [Warn] Node '{self.node_ids[node_index]}': "
+                    "no valid sequence embeddings."
+                )
 
             # ---- Fuse u_i, s_i (+ parent emb), g_i ----
             self.H_tree = self.node_fusion(
@@ -823,7 +820,106 @@ class MultiAttentionEncoderPipeline:
                 emb = emb.to(self.device)
             Z_list.append(emb)
         self.Z_matrix = torch.stack(Z_list, dim=0)  # [S, d_model]
+        self._global_id_to_z_row = {
+            int(self.key_to_global_id[key]): row
+            for row, key in enumerate(sorted_keys)
+            if key in self.key_to_global_id
+        }
+        # Z order or membership inputs may have changed since the previous
+        # build, so lazily rebuild the flattened index on the next pooling call.
+        self._node_sequence_indices = None
+        self._node_membership_nodes = None
+        self._node_sequence_counts = None
+        self._allowed_node_mask_cache.clear()
         return self.Z_matrix
+
+    def _build_node_membership_index(self) -> None:
+        """Build the static flattened ``node -> Z rows`` index once.
+
+        Python is used only during this one-time topology setup.  Repeated
+        forward passes use tensor gather, masking, and batched attention on the
+        target device.
+        """
+        if self.Z_matrix is None:
+            self.build_Z_matrix()
+
+        sequence_rows: List[int] = []
+        membership_nodes: List[int] = []
+        counts: List[int] = []
+        for node_index, node_pos in enumerate(self.node_ids):
+            rows = [
+                self._global_id_to_z_row[int(gid)]
+                for gid in self.node_sequences[node_pos]
+                if int(gid) in self._global_id_to_z_row
+            ]
+            sequence_rows.extend(rows)
+            membership_nodes.extend([node_index] * len(rows))
+            counts.append(len(rows))
+
+        self._node_sequence_indices = torch.tensor(
+            sequence_rows, dtype=torch.long, device=self.device
+        )
+        self._node_membership_nodes = torch.tensor(
+            membership_nodes, dtype=torch.long, device=self.device
+        )
+        self._node_sequence_counts = torch.tensor(
+            counts, dtype=torch.long, device=self.device
+        )
+        self._allowed_node_mask_cache.clear()
+
+    def _node_pool_mask(
+        self,
+        allowed_sequence_ids: Optional[Iterable[int]],
+    ) -> torch.BoolTensor:
+        """Return a cached membership mask restricted to allowed global IDs."""
+        if self._node_sequence_indices is None:
+            self._build_node_membership_index()
+        if allowed_sequence_ids is None:
+            return torch.ones_like(self._node_sequence_indices, dtype=torch.bool)
+
+        if isinstance(allowed_sequence_ids, frozenset):
+            allowed_ids = allowed_sequence_ids
+        else:
+            allowed_ids = frozenset(int(gid) for gid in allowed_sequence_ids)
+        cached = self._allowed_node_mask_cache.get(allowed_ids)
+        if cached is not None:
+            return cached
+
+        allowed_rows = [
+            self._global_id_to_z_row[gid]
+            for gid in allowed_ids
+            if gid in self._global_id_to_z_row
+        ]
+        row_mask = torch.zeros(
+            self.Z_matrix.shape[0], dtype=torch.bool, device=self.device
+        )
+        if allowed_rows:
+            row_indices = torch.tensor(
+                allowed_rows, dtype=torch.long, device=self.device
+            )
+            row_mask[row_indices] = True
+        mask = row_mask[self._node_sequence_indices]
+        self._allowed_node_mask_cache[allowed_ids] = mask
+        return mask
+
+    def _pool_node_embeddings(
+        self,
+        allowed_sequence_ids: Optional[Iterable[int]] = None,
+    ) -> torch.Tensor:
+        """Gather and attention-pool all nodes without per-node Python loops."""
+        if self.Z_matrix is None:
+            self.build_Z_matrix()
+        if self._node_sequence_indices is None:
+            self._build_node_membership_index()
+        mask = self._node_pool_mask(allowed_sequence_ids)
+        sequence_rows = self._node_sequence_indices[mask]
+        membership_nodes = self._node_membership_nodes[mask]
+        member_embeddings = self.Z_matrix[sequence_rows]
+        return self.node_embedder.attention_pool_indexed(
+            member_embeddings,
+            membership_nodes,
+            num_nodes=len(self.node_ids),
+        )
 
     def _cached_rel_bias(self) -> torch.Tensor:
         """Compute (and cache) the structural relation bias  [H, N, N]."""
@@ -846,33 +942,7 @@ class MultiAttentionEncoderPipeline:
         ``u_i`` only sees those global sequence IDs.  Structural and Hawkes
         features are unchanged.
         """
-        if allowed_sequence_ids is None:
-            allowed_ids = None
-        elif isinstance(allowed_sequence_ids, (set, frozenset)):
-            allowed_ids = allowed_sequence_ids
-        else:
-            allowed_ids = frozenset(int(gid) for gid in allowed_sequence_ids)
-
-        u_list: List[torch.Tensor] = []
-        for node_pos in self.node_ids:
-            seq_ids = self.node_sequences[node_pos]
-            val_tensors: List[torch.Tensor] = []
-            for gid in seq_ids:
-                if allowed_ids is not None and gid not in allowed_ids:
-                    continue
-                json_key = self.global_id_to_key.get(gid)
-                if json_key is not None and json_key in self.seq_embeddings:
-                    emb = self.seq_embeddings[json_key]
-                    if emb.device != self.device:
-                        emb = emb.to(self.device)
-                    val_tensors.append(emb)
-            if not val_tensors:
-                u_list.append(torch.zeros(self.d_model, device=self.device))
-            else:
-                u_list.append(
-                    self.node_embedder(TreeNodeVal(node_id=node_pos, val=val_tensors))
-                )
-        U = torch.stack(u_list, dim=0)
+        U = self._pool_node_embeddings(allowed_sequence_ids)
         return self.node_fusion(
             u=U,
             struct_feat=self.node_features["struct"],
@@ -945,6 +1015,7 @@ class MultiAttentionEncoderPipeline:
             self._build_cross_attention()
 
         self.build_Z_matrix()
+        self._build_node_membership_index()
         self._set_module_mode()
 
     def trainable_modules(self) -> List[nn.Module]:

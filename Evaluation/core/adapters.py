@@ -508,7 +508,12 @@ def stationary_command(
                 # Retweet is the isolated rollout target for the shared-bank
                 # snapshot protocol.  Other stationary datasets, DWS, and CL
                 # keep the established ordered transaction semantics.
-                command += ["--wake-dataset-family", "retweet"]
+                command += [
+                    "--wake-dataset-family",
+                    "retweet",
+                    "--wake-transaction-mode",
+                    "snapshot",
+                ]
             if not getattr(args, "smoke", False):
                 # Alignment and residual signatures require the complete
                 # training population so every H-tree leaf has non-zero

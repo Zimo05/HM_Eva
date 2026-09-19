@@ -1769,8 +1769,15 @@ class TrainingWakeSupportMixin:
         padded: Mapping[str, Tensor],
         semantic_theta_table: Tensor,
         controller_version: Optional[int] = None,
+        *,
+        commit: bool = True,
     ) -> Dict[str, Any]:
-        """Batch v4 Write evidence and commit only the segmented top-4 rows."""
+        """Batch v4 Write evidence and commit only the segmented top-4 rows.
+
+        With ``commit=False`` this is the Compute half of the distributed
+        snapshot protocol: selection and evidence are unchanged, while the
+        materialized candidates are returned as proposals for rank 0.
+        """
         batch_size = len(sequences)
         version = (
             int(controller_version)
@@ -1779,7 +1786,10 @@ class TrainingWakeSupportMixin:
         )
 
         def finalize_write_groups() -> None:
-            if not self.training_config.controller_write_ranking:
+            if (
+                not commit
+                or not self.training_config.controller_write_ranking
+            ):
                 return
             for sequence in sequences:
                 self.controller_utility_replay.finalize_write_group(
@@ -1853,6 +1863,8 @@ class TrainingWakeSupportMixin:
                 "accepted_write_utility_sums": [0.0] * batch_size,
                 "harmful_write_counts": [0] * batch_size,
                 "pending_counts": incomplete_counts,
+                "write_proposals": [[] for _ in range(batch_size)],
+                "queue_split_evidence": [[] for _ in range(batch_size)],
             }
         evidence = self._window_write_evidence_batch(
             probe_requests,
@@ -2016,6 +2028,101 @@ class TrainingWakeSupportMixin:
             item.prediction_gain = float(
                 evidence["write_gain"][probe_index].detach().cpu()
             )
+
+        if not commit:
+            proposals_by_sequence: list[list[Dict[str, Any]]] = [
+                [] for _ in range(batch_size)
+            ]
+            evidence_by_sequence: list[list[Dict[str, Any]]] = [
+                [] for _ in range(batch_size)
+            ]
+            for probe_index, item, owner_id in zip(
+                selected_cpu, selected_items, owner_ids
+            ):
+                sequence_row = int(sequence_rows[probe_index].detach().cpu())
+                event_index = int(
+                    packed["event_indices"][probe_index].detach().cpu()
+                )
+                proposals_by_sequence[sequence_row].append({
+                    "sequence_row": sequence_row,
+                    "event_index": event_index,
+                    "owner_id": owner_id,
+                    "item": item,
+                    "write_quality": float(item.write_quality),
+                    "queue_weight": float(item.queue_weight),
+                    "prediction_gain": float(item.prediction_gain),
+                    "write_utility": float(
+                        evidence["write_utility"][probe_index].detach().cpu()
+                    ),
+                    "priority": float(
+                        evidence["priority"][probe_index].detach().cpu()
+                    ),
+                })
+
+            # Preserve the shadow candidates that would normally be placed in
+            # Sleep's structural-evidence buffer.  Compute cannot mutate that
+            # buffer on every rank; Commit receives these detached candidates
+            # and rank 0 can apply the evidence once in deterministic order.
+            for probe_index, item, owner_id in zip(
+                shadow_cpu,
+                shadow_items,
+                shadow_owner_ids,
+            ):
+                sequence_row = int(sequence_rows[probe_index].detach().cpu())
+                event_index = int(
+                    packed["event_indices"][probe_index].detach().cpu()
+                )
+                item.write_quality = float(
+                    evidence["bounded_gain"][probe_index].detach().cpu()
+                )
+                item.queue_weight = float((
+                    packed["queue_weight"][probe_index]
+                    * evidence["confidence"][probe_index]
+                ).detach().cpu())
+                item.prediction_gain = float(
+                    evidence["write_gain"][probe_index].detach().cpu()
+                )
+                evidence_by_sequence[sequence_row].append({
+                    "event_index": event_index,
+                    "owner_id": owner_id,
+                    "item": item,
+                    "priority": float(
+                        shadow_priority[probe_index].detach().cpu()
+                    ),
+                    "queue_weight": float(item.queue_weight),
+                    "write_quality": float(item.write_quality),
+                    "prediction_gain": float(item.prediction_gain),
+                    "shadow": True,
+                })
+
+            def count_rows(mask: Tensor) -> list[int]:
+                return torch.bincount(
+                    sequence_rows,
+                    weights=mask.to(packed["write_gate"].dtype),
+                    minlength=batch_size,
+                ).detach().cpu().to(torch.long).tolist()
+
+            write_probe_counts = torch.bincount(
+                sequence_rows, minlength=batch_size
+            ).detach().cpu().tolist()
+            # No bank, queue, or structural-evidence mutation is allowed in
+            # Compute.  The same proposal objects are gathered by rank 0 and
+            # admitted in (sequence_index, event_index) order during Commit.
+            return {
+                "write_counts": [0] * batch_size,
+                "accepted_write_counts": [0] * batch_size,
+                "append_counts": [0] * batch_size,
+                "refresh_counts": [0] * batch_size,
+                "write_decision_counts": count_rows(selected),
+                "write_probe_counts": [int(value) for value in write_probe_counts],
+                "write_gate_pass_counts": count_rows(gate_pass),
+                "write_utility_pass_counts": count_rows(utility_pass),
+                "accepted_write_utility_sums": [0.0] * batch_size,
+                "harmful_write_counts": [0] * batch_size,
+                "pending_counts": incomplete_counts,
+                "write_proposals": proposals_by_sequence,
+                "queue_split_evidence": evidence_by_sequence,
+            }
 
         grouped_items = {}
         for item, owner_id in zip(selected_items, owner_ids):
@@ -2341,6 +2448,7 @@ class TrainingWakeSupportMixin:
             self.controller.utility_stage_enabled
             and request.get("controller_inputs")
             and not request.get("utility_recorded", False)
+            and not request.get("_defer_commit", False)
         ):
             assimilation_gain = improvement.new_zeros(())
             if (
@@ -2499,6 +2607,7 @@ class TrainingWakeSupportMixin:
             self.controller.utility_stage_enabled
             and request.get("controller_inputs")
             and not request.get("utility_recorded", False)
+            and not request.get("_defer_commit", False)
         ):
             self._add_controller_utility(
                 sequence, request, action_index=2, utility=utility,

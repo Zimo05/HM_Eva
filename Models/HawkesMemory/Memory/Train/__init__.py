@@ -4,3 +4,19 @@ Import concrete APIs from ``Train.Train`` and ``Train.Inference``. Keeping the
 package initializer lightweight also allows both modules to run cleanly with
 ``python -m``.
 """
+
+from .DistributedRuntime import (
+    CommitLog,
+    DistributedRuntime,
+    WakeTransaction,
+    WakeTransactionBatch,
+    stable_state_hash,
+)
+
+__all__ = [
+    "CommitLog",
+    "DistributedRuntime",
+    "WakeTransaction",
+    "WakeTransactionBatch",
+    "stable_state_hash",
+]

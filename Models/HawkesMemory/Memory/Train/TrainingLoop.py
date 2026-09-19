@@ -9,6 +9,7 @@ from collections import defaultdict
 from Train.TrainingCheckpoint import atomic_torch_save
 from Train.TrainingComponents import *  # noqa: F403
 from Train.TrainingWakeSupport import ResidentSequenceStore
+from Train.DistributedRuntime import WakeTransactionBatch
 
 
 class _LazyFrontierRows:
@@ -939,12 +940,276 @@ class TrainingLoopMixin:
         return family == "non_cl_dws"
 
     def _uses_retweet_snapshot_wake_path(self) -> bool:
-        """Keep the snapshot transaction path exclusive to Retweet."""
+        """Use snapshot transactions only for Retweet when explicitly set."""
 
         family = str(
             getattr(self.training_config, "wake_dataset_family", "unknown")
         ).strip().casefold()
-        return family == "retweet"
+        mode = str(
+            getattr(self.wake_config, "wake_transaction_mode", "ordered")
+        ).strip().casefold()
+        return family == "retweet" and mode == "snapshot"
+
+    def _iter_distributed_snapshot_batches(
+        self,
+        dataset: Sequence[Mapping[str, Tensor]],
+        order: Sequence[int],
+        runtime: Any,
+    ):
+        """Yield one contiguous local shard for every global Wake wavefront."""
+
+        wavefront_size = int(self.wake_config.wake_wavefront_batch_size)
+        if wavefront_size <= 0:
+            raise ValueError("wake_wavefront_batch_size must be positive")
+        for wavefront_index, start in enumerate(
+            range(0, len(order), wavefront_size)
+        ):
+            global_batch = list(order[start : start + wavefront_size])
+            global_age_offsets = []
+            global_cursor = 0
+            for sequence_index in global_batch:
+                global_age_offsets.append(global_cursor)
+                global_cursor += int(dataset[sequence_index]["times"].numel())
+            local_start, local_end = runtime.contiguous_shard(
+                len(global_batch)
+            )
+            local_order = global_batch[local_start:local_end]
+            if not local_order:
+                yield wavefront_index, None
+                continue
+            local_batches = self._iter_masked_wavefront_batches(
+                dataset,
+                local_order,
+            )
+            try:
+                local_batch = next(local_batches)
+                local_batch["age_base_offsets"] = tuple(
+                    global_age_offsets[local_start:local_end]
+                )
+                yield wavefront_index, local_batch
+            except StopIteration as error:
+                raise RuntimeError(
+                    "distributed Wake failed to materialize a local wavefront"
+                ) from error
+
+    @staticmethod
+    def _cpuize_distributed_state(value: Any) -> Any:
+        """Make a rank-0 state payload safe for object broadcast.
+
+        Sleep is intentionally centralized on rank 0.  The payload is a
+        compact state snapshot (not a second persistent Bank implementation)
+        and is copied to CPU before ``broadcast_object`` so NCCL/Gloo do not
+        pickle rank-local CUDA storage.
+        """
+
+        if torch.is_tensor(value):
+            return value.detach().cpu()
+        if isinstance(value, Mapping):
+            return {
+                key: TrainingLoopMixin._cpuize_distributed_state(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                TrainingLoopMixin._cpuize_distributed_state(item)
+                for item in value
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                TrainingLoopMixin._cpuize_distributed_state(item)
+                for item in value
+            )
+        if isinstance(value, set):
+            return tuple(
+                TrainingLoopMixin._cpuize_distributed_state(item)
+                for item in sorted(value, key=str)
+            )
+        return value
+
+    def _build_distributed_sleep_payload(
+        self,
+        sleep_result: Optional[Mapping[str, Any]],
+        *,
+        full_state: bool = True,
+    ) -> dict[str, Any]:
+        """Build the rank-0 Sleep/topology snapshot sent to peer ranks."""
+
+        if not full_state:
+            return self._cpuize_distributed_state({
+                "controller_state_dict": self.controller.state_dict(),
+                "controller_utility_replay": (
+                    self.controller_utility_replay.state_dict()
+                ),
+                "sleep_state": dict(self.sleep_state),
+                "sleep_result": sleep_result,
+            })
+        # Sleep may have added parameters through a topology split. Normalize
+        # the rank-0 groups before serializing so peers can restore the same
+        # two stable base/router groups.
+        self._reconcile_optimizer_parameters()
+        return self._cpuize_distributed_state({
+            "tree_state_dict": self.tree.state_dict(),
+            # Keep the immutable model components in the same epoch snapshot
+            # as the dynamic tree.  Global Wake gradients are reduced on all
+            # ranks, but carrying these tensors here makes the rank-0 Sleep
+            # commit self-contained and removes any dependence on incidental
+            # floating-point/optimizer ordering on peer ranks.
+            "hawkes_state_dict": self.hawkes.state_dict(),
+            "encoder_state_dict": self.encoder.state_dict(),
+            # ``tree_state_dict`` already contains this state under the tree
+            # prefix.  The explicit field mirrors the synchronization
+            # contract and lets older/future tree serializers restore the
+            # memory bank independently when needed.
+            "memory_state_dict": self.tree.episodic_memory.state_dict(),
+            "controller_state_dict": self.controller.state_dict(),
+            "controller_utility_replay": (
+                self.controller_utility_replay.state_dict()
+            ),
+            "split_module_state_dicts": {
+                leaf_id: module.state_dict()
+                for leaf_id, module in self.split_modules.items()
+            },
+            "deep_sleep_gate_state_dict": self.deep_sleep_gate.state_dict(),
+            "deep_gate_optimizer_state_dict": (
+                self.deep_gate_optimizer.state_dict()
+            ),
+            "topology_selector_state_dict": self.topology_selector.state_dict(),
+            "topology_selector_optimizer_state_dict": (
+                self.topology_selector_optimizer.state_dict()
+            ),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "sleep_state": dict(self.sleep_state),
+            "merge_lambda_T": float(self.merge_lambda_T),
+            "merge_budget_KT": self.merge_budget_KT,
+            "encoder_routing_reliability": float(
+                self.encoder_routing_reliability
+            ),
+            "last_teacher_confidence": float(self.last_teacher_confidence),
+            "last_teacher_student_js": float(self.last_teacher_student_js),
+            "last_teacher_student_alignment": float(
+                self.last_teacher_student_alignment
+            ),
+            "topology_metadata": {
+                "all_node_ids": list(self.tree.all_node_ids),
+                "leaf_ids": list(self.tree.leaf_ids),
+                "initialization_metadata": getattr(
+                    self.tree,
+                    "initialization_metadata",
+                    {},
+                ),
+                "topology_revision": int(
+                    self.sleep_state.get("topology_revision", 0)
+                ),
+            },
+            "sleep_result": sleep_result,
+        })
+
+    def _apply_distributed_sleep_payload(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Optional[Mapping[str, Any]]:
+        """Apply rank-0's dynamic Sleep state on a peer rank."""
+
+        hawkes_state = payload.get("hawkes_state_dict")
+        if hawkes_state is not None:
+            self.hawkes.load_state_dict(hawkes_state, strict=False)
+        encoder_state = payload.get("encoder_state_dict")
+        if encoder_state is not None:
+            self.encoder.load_state_dict(encoder_state, strict=False)
+        tree_state = payload.get("tree_state_dict")
+        if tree_state is not None:
+            # TreeTopologyMixin restores dynamic H-tree modules from
+            # ``_extra_state`` before loading the remaining tensors.
+            self.tree.load_state_dict(tree_state, strict=False)
+        memory_state = payload.get("memory_state_dict")
+        if memory_state is not None:
+            # The tree snapshot is authoritative for topology creation; the
+            # explicit memory snapshot then restores the bank payload itself.
+            self.tree.episodic_memory.load_state_dict(
+                memory_state,
+                strict=False,
+            )
+        topology_metadata = payload.get("topology_metadata")
+        if isinstance(topology_metadata, Mapping):
+            initialization_metadata = topology_metadata.get(
+                "initialization_metadata"
+            )
+            if isinstance(initialization_metadata, Mapping):
+                self.tree.initialization_metadata = dict(
+                    initialization_metadata
+                )
+        controller_state = payload.get("controller_state_dict")
+        if controller_state is not None:
+            self.controller.load_state_dict(controller_state, strict=False)
+        if tree_state is not None:
+            self._sync_split_modules()
+            for leaf_id, state in payload.get(
+                "split_module_state_dicts", {}
+            ).items():
+                module = self.split_modules.get(leaf_id)
+                if module is not None:
+                    module.load_state_dict(state, strict=False)
+            deep_gate_state = payload.get("deep_sleep_gate_state_dict")
+            if deep_gate_state is not None:
+                self.deep_sleep_gate.load_state_dict(
+                    deep_gate_state,
+                    strict=False,
+                )
+            topology_selector_state = payload.get(
+                "topology_selector_state_dict"
+            )
+            if topology_selector_state is not None:
+                self.topology_selector.load_state_dict(
+                    topology_selector_state,
+                    strict=False,
+                )
+        replay_state = payload.get("controller_utility_replay")
+        if replay_state is not None:
+            self.controller_utility_replay.load_state_dict(replay_state)
+
+        optimizer_state = payload.get("optimizer_state_dict")
+        if optimizer_state is not None:
+            # Dynamic Sleep edits can add/remove tree parameters. Reconcile
+            # the groups before restoring Adam moments from rank 0.
+            self._reconcile_optimizer_parameters()
+            self.optimizer.load_state_dict(optimizer_state)
+        deep_optimizer_state = payload.get("deep_gate_optimizer_state_dict")
+        if deep_optimizer_state is not None:
+            self.deep_gate_optimizer.load_state_dict(deep_optimizer_state)
+        topology_optimizer_state = payload.get(
+            "topology_selector_optimizer_state_dict"
+        )
+        if topology_optimizer_state is not None:
+            self.topology_selector_optimizer.load_state_dict(
+                topology_optimizer_state
+            )
+
+        self.sleep_state = dict(payload.get("sleep_state", self.sleep_state))
+        self.merge_lambda_T = float(
+            payload.get("merge_lambda_T", self.merge_lambda_T)
+        )
+        self.merge_budget_KT = payload.get(
+            "merge_budget_KT", self.merge_budget_KT
+        )
+        self.encoder_routing_reliability = float(
+            payload.get(
+                "encoder_routing_reliability",
+                self.encoder_routing_reliability,
+            )
+        )
+        self.last_teacher_confidence = float(
+            payload.get("last_teacher_confidence", self.last_teacher_confidence)
+        )
+        self.last_teacher_student_js = float(
+            payload.get("last_teacher_student_js", self.last_teacher_student_js)
+        )
+        self.last_teacher_student_alignment = float(
+            payload.get(
+                "last_teacher_student_alignment",
+                self.last_teacher_student_alignment,
+            )
+        )
+        return payload.get("sleep_result")
 
     def train(
         self,
@@ -1014,6 +1279,12 @@ class TrainingLoopMixin:
         use_retweet_snapshot_wake_path = (
             self._uses_retweet_snapshot_wake_path()
         )
+        distributed_runtime = getattr(self, "distributed_runtime", None)
+        distributed_snapshot_wake = bool(
+            use_retweet_snapshot_wake_path
+            and distributed_runtime is not None
+            and distributed_runtime.is_distributed
+        )
         # Keep the list-of-dicts for metadata/compatibility, and use this
         # padded device-resident view for the Wake/Global tensor hot path.
         self._resident_sequence_store = ResidentSequenceStore.from_sequences(
@@ -1044,7 +1315,10 @@ class TrainingLoopMixin:
             wake_started = epoch_started
             self._configure_wake_profile(
                 epoch,
-                enabled=use_non_cl_dws_wake_path,
+                enabled=(
+                    use_non_cl_dws_wake_path
+                    or use_retweet_snapshot_wake_path
+                ),
             )
             self._resident_cache_hits = 0
             self._resident_cache_misses = 0
@@ -1071,6 +1345,7 @@ class TrainingLoopMixin:
             expansion_utility_total = 0.0
             frontier_node_counts: Counter[str] = Counter()
             sequence_responsibility_rows = []
+            sequence_responsibility_records = []
             memory_assignment_counts: Counter[str] = Counter()
             sequence_owner_counts: Counter[str] = Counter()
             posterior_entropy_total = 0.0
@@ -1099,11 +1374,49 @@ class TrainingLoopMixin:
                 disable=not verbose,
                 file=sys.stdout,
             )
-            for wake_batch in self._iter_masked_wavefront_batches(
-                dataset,
-                order,
-            ):
-                if use_retweet_snapshot_wake_path:
+            if distributed_snapshot_wake:
+                wake_batches = self._iter_distributed_snapshot_batches(
+                    dataset,
+                    order,
+                    distributed_runtime,
+                )
+            else:
+                wake_batches = (
+                    (index, batch)
+                    for index, batch in enumerate(
+                        self._iter_masked_wavefront_batches(dataset, order)
+                    )
+                )
+            for wavefront_index, wake_batch in wake_batches:
+                if distributed_snapshot_wake:
+                    if wake_batch is None:
+                        self._last_wake_snapshot_results = []
+                        transaction_batch = WakeTransactionBatch(
+                            transactions=(),
+                            wavefront_index=wavefront_index,
+                            source_rank=distributed_runtime.rank,
+                            snapshot_id=f"wavefront-{wavefront_index}",
+                        )
+                    else:
+                        transaction_batch = self.compute_wake_snapshot(
+                            wavefront_index=wavefront_index,
+                            sequences=wake_batch["sequences"],
+                            sequence_indices=wake_batch["sequence_indices"],
+                            z_flat=wake_batch["z_flat"],
+                            projected_flat=wake_batch["projected_flat"],
+                            query_flat=wake_batch["query_flat"],
+                            frontier_static_cache=(
+                                wake_batch["frontier_static_cache"]
+                            ),
+                            frontier_flat=wake_batch["frontier_flat"],
+                            frontier_rows=wake_batch["frontier_rows"],
+                            flat=wake_batch["flat"],
+                            age_base_offsets=wake_batch["age_base_offsets"],
+                        )
+                    batch_results = self.commit_wake_transactions(
+                        transaction_batch
+                    )
+                elif use_retweet_snapshot_wake_path:
                     batch_results = self._train_wake_batch_snapshot(
                         sequences=wake_batch["sequences"],
                         sequence_indices=wake_batch["sequence_indices"],
@@ -1208,6 +1521,14 @@ class TrainingLoopMixin:
                     sequence_responsibility_rows.append(
                         result["sequence_responsibility"]
                     )
+                    if distributed_snapshot_wake:
+                        sequence_responsibility_records.append((
+                            int(result.get(
+                                "sequence_index",
+                                len(sequence_responsibility_records),
+                            )),
+                            result["sequence_responsibility"].detach().cpu(),
+                        ))
                     memory_assignment_counts.update(
                         result["memory_assignment_counts"]
                     )
@@ -1272,15 +1593,63 @@ class TrainingLoopMixin:
                     print(profile_report)
             wake_seconds = time.perf_counter() - wake_started
 
+            # Wake Compute is rank-local, but Sleep consumes one global
+            # responsibility matrix. Gather only those compact rows here;
+            # the persistent Bank itself remains synchronized by CommitLog.
+            distributed_responsibilities = None
+            if distributed_snapshot_wake:
+                gathered_responsibilities = distributed_runtime.gather_object(
+                    tuple(sequence_responsibility_records),
+                    dst=0,
+                )
+                if distributed_runtime.is_rank0:
+                    records = [
+                        record
+                        for rank_records in (gathered_responsibilities or ())
+                        for record in (rank_records or ())
+                    ]
+                    records.sort(key=lambda item: int(item[0]))
+                    if not records:
+                        raise RuntimeError(
+                            "distributed Wake produced no responsibility rows"
+                        )
+                    distributed_responsibilities = torch.stack([
+                        value
+                        for _, value in records
+                    ], dim=0)
+                    # Rank 0 owns the global Sleep input. Keep the existing
+                    # result-row contract for epoch diagnostics as well.
+                    sequence_responsibility_rows = [
+                        value.to(self.device) for _, value in records
+                    ]
+                global_responsibility_payload = distributed_runtime.broadcast_object(
+                    (
+                        distributed_responsibilities
+                        if distributed_runtime.is_rank0
+                        else None
+                    ),
+                    src=0,
+                )
+                if global_responsibility_payload is None:
+                    raise RuntimeError(
+                        "rank 0 failed to broadcast Wake responsibilities"
+                    )
+                distributed_responsibilities = global_responsibility_payload.to(
+                    self.device
+                )
+
             wake_loss = (
                 wake_prediction
                 + wake_wm
                 + self.wake_config.lambda_write * write_decisions
             ) / max(event_count, 1)
-            responsibility_matrix = torch.stack(
-                sequence_responsibility_rows,
-                dim=0,
-            )
+            if distributed_responsibilities is not None:
+                responsibility_matrix = distributed_responsibilities
+            else:
+                responsibility_matrix = torch.stack(
+                    sequence_responsibility_rows,
+                    dim=0,
+                )
             # Leaf tensors are retained only for Sleep mass bookkeeping and
             # contain posterior credit for actually evaluated leaf experts.
             # Routing diagnostics/ownership live on actual frontier nodes.
@@ -1333,6 +1702,12 @@ class TrainingLoopMixin:
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
             global_seconds = time.perf_counter() - global_started
+            if distributed_snapshot_wake:
+                # Global gradients/optimizer steps are complete on every
+                # rank before rank 0 mutates the H-tree or persistent Bank.
+                # Keep this barrier immediately after the distributed Global
+                # phase so Sleep has one deterministic owner.
+                distributed_runtime.barrier()
             router_calibration = global_update
             sleep_result = None
             accepted_writes_since_sleep = (
@@ -1350,15 +1725,29 @@ class TrainingLoopMixin:
                 epoch > self.structure_config.prune_warmup_epochs
             )
             sleep_started = time.perf_counter()
-            if (
+            sleep_due = bool(
                 not self.training_config.controller_only_finetune
-                and
-                epoch % self.training_config.sleep_every == 0
-                and sequence_responsibility_rows
+                and epoch % self.training_config.sleep_every == 0
+                and (
+                    distributed_responsibilities is not None
+                    if distributed_snapshot_wake
+                    else bool(sequence_responsibility_rows)
+                )
+            )
+            if (
+                sleep_due
+                and (
+                    not distributed_snapshot_wake
+                    or distributed_runtime.is_rank0
+                )
             ):
-                responsibilities = torch.stack(
-                    sequence_responsibility_rows,
-                    dim=0,
+                responsibilities = (
+                    distributed_responsibilities
+                    if distributed_snapshot_wake
+                    else torch.stack(
+                        sequence_responsibility_rows,
+                        dim=0,
+                    )
                 )
                 sleep_kwargs = {
                     "allow_topology_prune": topology_prune_enabled,
@@ -1406,6 +1795,29 @@ class TrainingLoopMixin:
                         split_row["label_mask"][3] = True
                         split_row["propensity"][3] = 1.0
                         self.controller_utility_replay.add(split_row, 3)
+
+            if distributed_snapshot_wake:
+                # Sleep and topology are rank-0-only.  Every rank enters this
+                # broadcast, including epochs without Sleep, so all mutable
+                # state (H-tree, Bank, controller replay, and Adam moments)
+                # has one owner and peers resume from the same snapshot.
+                sync_payload = (
+                    self._build_distributed_sleep_payload(
+                        sleep_result,
+                        full_state=sleep_due,
+                    )
+                    if distributed_runtime.is_rank0
+                    else None
+                )
+                sync_payload = distributed_runtime.broadcast_object(
+                    sync_payload,
+                    src=0,
+                )
+                if not distributed_runtime.is_rank0:
+                    sleep_result = self._apply_distributed_sleep_payload(
+                        sync_payload or {}
+                    )
+                distributed_runtime.barrier()
             utility_rows = self.controller_utility_replay.rows()
             utilities_by_action = []
             for action_index in range(4):
@@ -1791,7 +2203,13 @@ class TrainingLoopMixin:
                             self.controller_calibration = calibrated_calibration
                 epoch_result["validation"] = validation
                 epoch_result["best_validation_epoch"] = self.best_validation["epoch"]
-                if self.training_config.validation_history_path:
+                if (
+                    self.training_config.validation_history_path
+                    and (
+                        not distributed_snapshot_wake
+                        or distributed_runtime.is_rank0
+                    )
+                ):
                     path = Path(self.training_config.validation_history_path)
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(json.dumps({
@@ -1803,7 +2221,13 @@ class TrainingLoopMixin:
                         "best": self.best_validation,
                         "epochs": self.validation_history,
                     }, indent=2), encoding="utf-8")
-                if self.training_config.controller_diagnostics_path:
+                if (
+                    self.training_config.controller_diagnostics_path
+                    and (
+                        not distributed_snapshot_wake
+                        or distributed_runtime.is_rank0
+                    )
+                ):
                     path = Path(self.training_config.controller_diagnostics_path)
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(json.dumps({
@@ -1974,7 +2398,13 @@ class TrainingLoopMixin:
                     f"cuda_peak={cuda_peak_memory_mb:.0f}MiB "
                     f"sleep_actions={sleep_actions}"
                 )
+        distributed_rank0 = bool(
+            not distributed_snapshot_wake
+            or distributed_runtime.is_rank0
+        )
         if (
+            distributed_rank0
+            and
             self.training_config.controller_write_ranking
             and self.training_config.best_checkpoint_path
             and not any(row.get("constraint_passed", False) for row in self.validation_history)
@@ -1995,7 +2425,7 @@ class TrainingLoopMixin:
                 "selection_reason": "no ranking checkpoint improved realized rollout",
             }
             atomic_torch_save(fallback, best_path)
-        if self.training_config.plot_after_training and self.history:
+        if distributed_rank0 and self.training_config.plot_after_training and self.history:
             try:
                 from Train.PlotTraining import save_training_diagnostics
 

@@ -529,12 +529,18 @@ class MaskedWavefrontWakeTests(unittest.TestCase):
             self._cached(trainer, [0.2, 0.5], [1, 0]),
         ]
         calls = []
+        observed_age_offsets = []
+        observed_block_sparse = []
         memory = trainer.tree.episodic_memory
         original_read_packed = memory.read_packed
 
         def counted_read_packed(*args, **kwargs):
             query = kwargs["query"] if "query" in kwargs else args[0]
             calls.append(query.size(0))
+            observed_age_offsets.append(
+                kwargs["age_offsets"].detach().cpu().tolist()
+            )
+            observed_block_sparse.append(kwargs["block_sparse"])
             return original_read_packed(*args, **kwargs)
 
         memory.read_packed = counted_read_packed
@@ -560,10 +566,59 @@ class MaskedWavefrontWakeTests(unittest.TestCase):
             memory.read_packed = original_read_packed
 
         self.assertEqual(calls, [2, 2, 1])
+        self.assertEqual(observed_age_offsets, [[0, 1], [2, 3], [4]])
+        self.assertEqual(observed_block_sparse, [True, True, True])
         self.assertEqual(
             [result["event_count"] for result in results],
             [3, 2],
         )
+
+    def test_snapshot_dense_and_block_sparse_retrieval_match(self):
+        trainer = self._trainer(seed=424)
+        sequences = [
+            self._cached(trainer, [0.1, 0.4, 0.9], [0, 1, 0]),
+            self._cached(trainer, [0.2, 0.5], [1, 0]),
+        ]
+        prepared = next(
+            trainer._iter_masked_wavefront_batches(
+                sequences,
+                list(range(len(sequences))),
+            )
+        )
+        trainer._train_wake_batch_snapshot(
+            sequences=prepared["sequences"],
+            sequence_indices=prepared["sequence_indices"],
+            z_flat=prepared["z_flat"],
+            projected_flat=prepared["projected_flat"],
+            query_flat=prepared["query_flat"],
+            frontier_static_cache=prepared["frontier_static_cache"],
+            frontier_flat=prepared["frontier_flat"],
+            frontier_rows=prepared["frontier_rows"],
+            flat=prepared["flat"],
+        )
+        lengths = [int(value) for value in prepared["lengths"]]
+        age_offsets = torch.arange(
+            sum(lengths),
+            device=trainer.device,
+            dtype=torch.long,
+        )
+        dense = trainer._read_episodic_flat_batch(
+            prepared["query_flat"],
+            prepared["frontier_flat"],
+            age_offsets=age_offsets,
+            frontier_block_sparse=False,
+        )
+        sparse = trainer._read_episodic_flat_batch(
+            prepared["query_flat"],
+            prepared["frontier_flat"],
+            age_offsets=age_offsets,
+            frontier_block_sparse=True,
+        )
+        for dense_value, sparse_value in zip(dense[:2], sparse[:2]):
+            torch.testing.assert_close(dense_value, sparse_value)
+        self.assertEqual(dense[2].keys(), sparse[2].keys())
+        for key in dense[2]:
+            torch.testing.assert_close(dense[2][key], sparse[2][key])
 
     def test_batched_wake_matches_serial_memory_semantics_for_small_batches(self):
         specs = (

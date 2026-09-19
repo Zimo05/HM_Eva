@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import copy
 import time
+from collections.abc import MutableMapping
 
 from Train.TrainingComponents import *  # noqa: F403
 from Train.TrainingComponents import _assert_finite_without_cuda_sync
+from Train.DistributedRuntime import (
+    CommitLog,
+    DistributedRuntime,
+    WakeTransaction,
+    WakeTransactionBatch,
+    stable_state_hash,
+)
 
 
 class _WakeProfiler:
-    """Low-overhead phase profiler used only by the non-CL/DWS Wake path.
+    """Low-overhead profiler for the selected batched Wake entry point.
 
     CUDA timings are recorded as event pairs and resolved after the Wake
     epoch has already synchronized once.  This keeps the normal benchmark
@@ -143,7 +152,7 @@ class _WakeProfiler:
         phase_ms = report["phase_ms"]
         total_ms = max(float(report["total_ms"]), 1e-12)
         lines = [
-            "Wake profile (non_cl_dws)",
+            "Wake profile (selected batched path)",
             "phase                    total_ms      share",
             "------------------------------------------------",
         ]
@@ -1547,6 +1556,562 @@ class TrainingWakeMixin:
                 self.tree.episodic_memory.invalidate_packed_mirror()
         return results
 
+    @staticmethod
+    def _cpuize_transaction_value(value: Any) -> Any:
+        """Move gathered transaction tensors to CPU without losing dataclasses."""
+
+        if torch.is_tensor(value):
+            return value.detach().cpu()
+        if isinstance(value, Mapping):
+            return {
+                key: TrainingWakeMixin._cpuize_transaction_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                TrainingWakeMixin._cpuize_transaction_value(item)
+                for item in value
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                TrainingWakeMixin._cpuize_transaction_value(item)
+                for item in value
+            )
+        if hasattr(value, "__dict__"):
+            clone = copy.copy(value)
+            for key, item in vars(value).items():
+                setattr(
+                    clone,
+                    key,
+                    TrainingWakeMixin._cpuize_transaction_value(item),
+                )
+            return clone
+        return value
+
+    @staticmethod
+    def _move_transaction_value(value: Any, device: torch.device) -> Any:
+        """Move a replayed proposal back to the rank-local device."""
+
+        if torch.is_tensor(value):
+            return value.to(device=device, non_blocking=True)
+        if isinstance(value, Mapping):
+            return {
+                key: TrainingWakeMixin._move_transaction_value(item, device)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                TrainingWakeMixin._move_transaction_value(item, device)
+                for item in value
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                TrainingWakeMixin._move_transaction_value(item, device)
+                for item in value
+            )
+        if hasattr(value, "__dict__"):
+            clone = copy.copy(value)
+            for key, item in vars(value).items():
+                setattr(
+                    clone,
+                    key,
+                    TrainingWakeMixin._move_transaction_value(item, device),
+                )
+            return clone
+        return value
+
+    def _snapshot_transaction_batch(
+        self,
+        results: Sequence[Mapping[str, Any]],
+        sequence_indices: Sequence[int],
+        *,
+        wavefront_index: int,
+    ) -> WakeTransactionBatch:
+        """Convert Compute rows into a deterministic, gatherable transaction buffer."""
+
+        records: list[WakeTransaction] = []
+        for result, sequence_index in zip(results, sequence_indices):
+            proposals = list(result.get("write_proposals", ()))
+            usage = result.get("usage_credits", {})
+            metrics = {
+                key: value
+                for key, value in result.items()
+                if key in {
+                    "prediction_nll",
+                    "wm_penalty",
+                    "write_penalty",
+                    "event_count",
+                    "write_decision_count",
+                }
+                and isinstance(value, (int, float))
+            }
+            responsibility = result.get("sequence_responsibility")
+            if torch.is_tensor(responsibility):
+                responsibility = responsibility.detach().cpu()
+            actions = tuple(result.get("actions", ()))
+            common = {
+                "prediction_metrics": metrics,
+                "responsibility": responsibility,
+                "controller_actions": actions,
+            }
+            controller_stat_delta = self._cpuize_transaction_value(
+                result.get("controller_stat_delta", {})
+            )
+            queue_split_evidence = self._cpuize_transaction_value(
+                result.get("queue_split_evidence", ())
+            )
+            if isinstance(queue_split_evidence, list):
+                queue_split_evidence = tuple(queue_split_evidence)
+            usage_payload = self._cpuize_transaction_value(usage)
+            age_advance = int(result.get("age_advance", 0))
+            if proposals:
+                for proposal_index, proposal in enumerate(proposals):
+                    event_index = int(proposal.get("event_index", 0))
+                    if isinstance(proposal, MutableMapping):
+                        proposal["sequence_index"] = int(sequence_index)
+                    proposal_payload = dict(
+                        self._cpuize_transaction_value(proposal)
+                    )
+                    proposal_payload["sequence_index"] = int(sequence_index)
+                    records.append(
+                        WakeTransaction(
+                            sequence_index=int(sequence_index),
+                            event_index=event_index,
+                            write_proposals=(
+                                proposal_payload,
+                            ),
+                            usage_credits=(
+                                usage_payload
+                                if proposal_index == 0
+                                else {}
+                            ),
+                            queue_split_evidence=(
+                                queue_split_evidence
+                                if proposal_index == 0
+                                else ()
+                            ),
+                            controller_stat_delta=(
+                                controller_stat_delta
+                                if proposal_index == 0
+                                else {}
+                            ),
+                            age_advance=(
+                                age_advance
+                                if proposal_index == 0
+                                else 0
+                            ),
+                            **common,
+                        )
+                    )
+            else:
+                # Keep an event record even when no write was selected.  It
+                # carries metrics, usage, and age advancement to Commit.
+                records.append(
+                    WakeTransaction(
+                        sequence_index=int(sequence_index),
+                        event_index=0,
+                        usage_credits=usage_payload,
+                        age_advance=age_advance,
+                        queue_split_evidence=queue_split_evidence,
+                        controller_stat_delta=controller_stat_delta,
+                        **common,
+                    )
+                )
+        return WakeTransactionBatch(
+            transactions=tuple(records),
+            wavefront_index=int(wavefront_index),
+            source_rank=int(
+                getattr(getattr(self, "distributed_runtime", None), "rank", 0)
+            ),
+            snapshot_id=f"wavefront-{int(wavefront_index)}",
+        )
+
+    def compute_wake_snapshot(
+        self,
+        *,
+        wavefront_index: int = 0,
+        **kwargs: Any,
+    ) -> WakeTransactionBatch:
+        """Compute Retweet Wake against one immutable snapshot.
+
+        This method is the explicit Compute boundary used by multi-GPU Wake;
+        it never commits the persistent bank.  The result rows remain available
+        to the training loop through ``_last_wake_snapshot_results`` until the
+        matching :meth:`commit_wake_transactions` call.
+        """
+
+        results = self._train_wake_batch_snapshot(
+            **kwargs,
+            defer_commit=True,
+        )
+        sequence_indices = tuple(int(index) for index in kwargs.get(
+            "sequence_indices", ()
+        ))
+        for result, sequence_index in zip(results, sequence_indices):
+            # Keep the global identity beside the local diagnostic row.  The
+            # training loop uses it when rank-local responsibilities are
+            # consolidated for the epoch-level Sleep phase.
+            result["sequence_index"] = sequence_index
+        self._last_wake_snapshot_results = list(results)
+        return self._snapshot_transaction_batch(
+            results,
+            sequence_indices,
+            wavefront_index=wavefront_index,
+        )
+
+    @staticmethod
+    def _transaction_token(transaction: WakeTransaction) -> tuple[int, int]:
+        return int(transaction.sequence_index), int(transaction.event_index)
+
+    def _memory_state_hash(self) -> str:
+        """Hash the mutable memory/topology state for optional parity checks."""
+
+        memory = self.tree.episodic_memory
+        payload: dict[str, Any] = {
+            "age_clock": int(getattr(memory, "_age_clock", 0)),
+            "banks": {},
+        }
+        for node_id in sorted(memory.banks):
+            bank = memory.banks[node_id]
+            payload["banks"][node_id] = {
+                "keys": bank.keys[: len(bank)].detach().cpu(),
+                "deltas": bank.deltas[: len(bank)].detach().cpu(),
+                "usage": bank.usage[: len(bank)].detach().cpu(),
+                "age": bank.age[: len(bank)].detach().cpu(),
+                "capacity": int(len(bank)),
+            }
+        return stable_state_hash(payload)
+
+    @torch.no_grad()
+    def _apply_controller_stat_deltas(
+        self,
+        deltas: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Apply deferred surprise observations in deterministic order.
+
+        Snapshot Compute uses a functional Controller EMA so no rank mutates
+        persistent statistics while reading the same bank.  Commit replays
+        the detached per-sequence surprise values in transaction order; this
+        keeps the EMA and observation count owned by rank 0 and makes the
+        exact update available to peer ranks through ``CommitLog``.
+        """
+
+        mean = self.controller.surprise_mean
+        variance = self.controller.surprise_variance
+        observations = self.controller.surprise_observations
+        decay = float(self.controller.surprise_ema_decay)
+        rows: list[tuple[int, torch.Tensor]] = []
+        for delta in deltas:
+            values = delta.get("surprise_values")
+            if values is None:
+                continue
+            values = torch.as_tensor(values).reshape(-1)
+            rows.append((int(delta.get("sequence_index", 0)), values))
+        # The packed Controller updates its EMA once per event position using
+        # all active sequences in that wavefront. Reconstruct the same
+        # sufficient statistics after rank 0 gathers the sequence rows.
+        rows.sort(key=lambda item: item[0])
+        for event_index in range(
+            max((int(values.numel()) for _, values in rows), default=0)
+        ):
+            active = [
+                values[event_index]
+                for _, values in rows
+                if event_index < values.numel()
+            ]
+            if not active:
+                continue
+            values = torch.stack(active).to(
+                device=mean.device,
+                dtype=mean.dtype,
+            )
+            batch_decay = decay ** values.numel()
+            difference = values - mean
+            mean.mul_(batch_decay).add_(
+                values.mean(),
+                alpha=1.0 - batch_decay,
+            )
+            variance.mul_(batch_decay).add_(
+                difference.square().mean(),
+                alpha=1.0 - batch_decay,
+            )
+            observations.add_(values.numel())
+
+    def _apply_transaction_proposals(
+        self,
+        transactions: Sequence[WakeTransaction],
+        *,
+        replay: bool,
+    ) -> CommitLog:
+        """Apply rank-0's ordered proposal delta or replay it on a peer."""
+
+        proposals: list[tuple[WakeTransaction, Mapping[str, Any]]] = []
+        usage_payloads: list[Mapping[str, Any]] = []
+        age_advance = 0
+        for transaction in transactions:
+            age_advance += int(transaction.age_advance)
+            if transaction.usage_credits:
+                usage_payloads.append(transaction.usage_credits)
+            for proposal in transaction.write_proposals:
+                if isinstance(proposal, Mapping):
+                    proposals.append((transaction, proposal))
+        proposals.sort(
+            key=lambda pair: (
+                int(pair[0].sequence_index),
+                int(pair[0].event_index),
+            )
+        )
+        # The ordered scalar path advances the logical clock before admitting
+        # the final wavefront proposals.  Preserve that age semantics when the
+        # proposals were computed on a shared snapshot.
+        if age_advance:
+            self.tree.episodic_memory.step_age(age_advance)
+
+        grouped: dict[str, list[tuple[WakeTransaction, Mapping[str, Any]]]] = {}
+        for transaction, proposal in proposals:
+            owner_id = str(proposal.get("owner_id", "root"))
+            grouped.setdefault(owner_id, []).append((transaction, proposal))
+
+        accepted_appends: list[dict[str, Any]] = []
+        accepted_refreshes: list[dict[str, Any]] = []
+        for owner_id in sorted(grouped):
+            rows = grouped[owner_id]
+            items = []
+            for _, proposal in rows:
+                item = proposal.get("item")
+                if item is None:
+                    continue
+                items.append(self._move_transaction_value(item, self.device))
+            if not items:
+                continue
+            reference = items[0].key
+            admission = self.tree.episodic_memory.add_memory_batch(
+                node_id=owner_id,
+                keys=torch.stack([
+                    item.key.reshape(-1).to(
+                        device=reference.device,
+                        dtype=reference.dtype,
+                    )
+                    for item in items
+                ]),
+                delta_theta=torch.stack([
+                    item.delta_theta.reshape(-1).to(device=reference.device)
+                    for item in items
+                ]),
+                windows=[item.window for item in items],
+                write_quality=torch.as_tensor(
+                    [float(item.write_quality) for item in items],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                queue_weight=torch.as_tensor(
+                    [float(item.queue_weight) for item in items],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                prediction_gain=torch.as_tensor(
+                    [float(item.prediction_gain) for item in items],
+                    device=reference.device,
+                    dtype=reference.dtype,
+                ),
+                semantic_theta=self.tree.semantic_theta(owner_id).detach(),
+                decays=self.hawkes.decays.detach(),
+            )
+            for (_, proposal), item, result in zip(rows, items, admission):
+                action = str(result["action"])
+                if action in {"append", "refresh"}:
+                    record = {
+                        "token": (
+                            int(proposal.get("sequence_index", 0)),
+                            int(proposal.get("event_index", 0)),
+                        ),
+                        "owner_id": owner_id,
+                        "proposal": self._cpuize_transaction_value(proposal),
+                        "action": action,
+                    }
+                    if action == "append":
+                        accepted_appends.append(record)
+                    else:
+                        accepted_refreshes.append(record)
+                    self.controller.split_queues[owner_id] += float(
+                        item.queue_weight
+                    )
+
+        total_usage: dict[str, Any] = {}
+        for payload in usage_payloads:
+            if not isinstance(payload, Mapping):
+                continue
+            node_ids = tuple(payload.get("node_ids", ()))
+            node_credit = payload.get("node_credit")
+            if node_credit is None:
+                continue
+            node_credit = torch.as_tensor(node_credit).detach().cpu()
+            prior = total_usage.get("node_credit")
+            total_usage["node_ids"] = node_ids
+            total_usage["node_credit"] = (
+                node_credit if prior is None else prior + node_credit
+            )
+        if total_usage.get("node_credit") is not None:
+            memory = self.tree.episodic_memory
+            memory.apply_cycle_usage_credit(
+                total_usage["node_credit"].to(self.device),
+                total_usage["node_ids"],
+            )
+        self._apply_controller_stat_deltas([
+            {
+                "sequence_index": int(transaction.sequence_index),
+                **transaction.controller_stat_delta,
+            }
+            for transaction in transactions
+            if transaction.controller_stat_delta
+        ])
+        if accepted_appends or accepted_refreshes or total_usage.get("node_credit") is not None:
+            self.tree.episodic_memory.invalidate_packed_mirror()
+        return CommitLog(
+            accepted_appends=tuple(accepted_appends),
+            accepted_refreshes=tuple(accepted_refreshes),
+            usage_increments=total_usage,
+            age_advance=age_advance,
+            controller_stat_delta=tuple(
+                {
+                    "sequence_index": int(transaction.sequence_index),
+                    "event_index": int(transaction.event_index),
+                    **self._cpuize_transaction_value(
+                        transaction.controller_stat_delta
+                    ),
+                }
+                for transaction in transactions
+                if transaction.controller_stat_delta
+            ),
+            structural_evidence=tuple(
+                transaction.queue_split_evidence
+                for transaction in transactions
+                if transaction.queue_split_evidence
+            ),
+            state_hash=self._memory_state_hash(),
+        )
+
+    def _replay_commit_log(self, commit_log: CommitLog) -> None:
+        """Replay the same accepted physical deltas on a non-zero rank."""
+
+        transactions: list[WakeTransaction] = []
+        # The CommitLog stores append and refresh records in separate compact
+        # arrays, but replay must restore their original event order.  Sorting
+        # the combined records also keeps same-owner append/refresh admission
+        # identical to rank 0 when the bank has finite capacity.
+        accepted = sorted(
+            list(commit_log.accepted_appends)
+            + list(commit_log.accepted_refreshes),
+            key=lambda entry: tuple(entry.get("token", (0, 0))),
+        )
+        for entry in accepted:
+            proposal = dict(entry.get("proposal", {}))
+            transactions.append(
+                WakeTransaction(
+                    sequence_index=int(entry.get("token", (0, 0))[0]),
+                    event_index=int(entry.get("token", (0, 0))[1]),
+                    write_proposals=(proposal,),
+                )
+            )
+        controller_deltas = sorted(
+            list(commit_log.controller_stat_delta or ()),
+            key=lambda entry: (
+                int(entry.get("sequence_index", 0)),
+                int(entry.get("event_index", 0)),
+            ),
+        )
+        for entry in controller_deltas:
+            delta = dict(entry)
+            delta.pop("sequence_index", None)
+            delta.pop("event_index", None)
+            transactions.append(
+                WakeTransaction(
+                    sequence_index=int(entry.get("sequence_index", 0)),
+                    event_index=int(entry.get("event_index", 0)),
+                    controller_stat_delta=delta,
+                )
+            )
+        if commit_log.usage_increments or commit_log.age_advance:
+            transactions.append(
+                WakeTransaction(
+                    sequence_index=-1,
+                    event_index=-1,
+                    usage_credits=commit_log.usage_increments,
+                    age_advance=int(commit_log.age_advance),
+                )
+            )
+        self._apply_transaction_proposals(transactions, replay=True)
+
+    def commit_wake_transactions(
+        self,
+        transaction_batch: WakeTransactionBatch,
+    ) -> list[Dict[str, Any]]:
+        """Gather, sort, commit on rank 0, and replay the compact CommitLog."""
+
+        runtime = getattr(self, "distributed_runtime", None)
+        if runtime is None:
+            runtime = DistributedRuntime()
+        gathered = runtime.gather_object(
+            self._cpuize_transaction_value(transaction_batch),
+            dst=0,
+        )
+        commit_log: CommitLog | None = None
+        if runtime.is_rank0:
+            all_transactions: list[WakeTransaction] = []
+            for payload in gathered or ():
+                if isinstance(payload, WakeTransactionBatch):
+                    batch = payload
+                else:
+                    batch = WakeTransactionBatch.from_payload(payload)
+                all_transactions.extend(batch.transactions)
+            all_transactions.sort(key=self._transaction_token)
+            commit_log = self._apply_transaction_proposals(
+                all_transactions,
+                replay=False,
+            )
+        commit_log = runtime.broadcast_object(commit_log, src=0)
+        if not isinstance(commit_log, CommitLog):
+            commit_log = CommitLog.from_payload(commit_log or {})
+        if not runtime.is_rank0:
+            self._replay_commit_log(commit_log)
+        if runtime.debug_hash:
+            local_hash = self._memory_state_hash()
+            if commit_log.state_hash and local_hash != commit_log.state_hash:
+                raise RuntimeError(
+                    "distributed Wake memory state hash mismatch: "
+                    f"expected {commit_log.state_hash}, got {local_hash}"
+                )
+
+        results = list(getattr(self, "_last_wake_snapshot_results", ()))
+        accepted_by_token = {
+            tuple(entry.get("token", ()))
+            for entry in commit_log.accepted_appends
+            + commit_log.accepted_refreshes
+        }
+        appends_by_token = {
+            tuple(entry.get("token", ()))
+            for entry in commit_log.accepted_appends
+        }
+        refreshes_by_token = {
+            tuple(entry.get("token", ()))
+            for entry in commit_log.accepted_refreshes
+        }
+        for result in results:
+            local_proposals = result.get("write_proposals", ())
+            tokens = {
+                (
+                    int(proposal.get("sequence_index", -1)),
+                    int(proposal.get("event_index", -1)),
+                )
+                for proposal in local_proposals
+                if isinstance(proposal, Mapping)
+            }
+            result["append_count"] = len(tokens & appends_by_token)
+            result["refresh_count"] = len(tokens & refreshes_by_token)
+            result["accepted_write_count"] = len(tokens & accepted_by_token)
+            result["write_count"] = result["accepted_write_count"]
+        return results
+
     def _train_wake_batch_snapshot(
         self,
         *,
@@ -1559,13 +2124,45 @@ class TrainingWakeMixin:
         frontier_flat: Any,
         frontier_rows: Sequence[tuple[tuple[str, ...], int, int]],
         flat: Mapping[str, Tensor],
+        age_base_offsets: Optional[Sequence[int]] = None,
+        defer_commit: bool = False,
     ) -> list[Dict[str, Any]]:
-        """Compatibility entry point for the old snapshot Wake protocol.
+        """Run the Retweet shared-snapshot Wake transaction.
 
-        Production Wake uses :meth:`train_wake_sequence_packed`; this method
-        remains available for reference tests and experiments that need the
-        original shared-snapshot semantics.
+        Prefix tensors are prepared for the whole wavefront, while the
+        immutable bank read preserves the original flattened
+        sequence-major event ages.  Block-sparse retrieval is enabled here;
+        the ordered transaction path remains unchanged.
         """
+        lengths_cpu = flat.get("sequence_lengths_cpu")
+        if lengths_cpu is None:
+            lengths_cpu = flat["sequence_lengths"].detach().cpu().tolist()
+        lengths = [int(value) for value in lengths_cpu]
+        if len(lengths) != len(sequences) or any(
+            length <= 0 for length in lengths
+        ):
+            raise ValueError("Wake snapshot requires non-empty sequences")
+
+        offsets: list[int] = []
+        cursor = 0
+        for length in lengths:
+            offsets.append(cursor)
+            cursor += length
+        if cursor != z_flat.size(0):
+            raise ValueError("Wake snapshot age offsets do not align")
+        if age_base_offsets is None:
+            age_base_offsets = offsets
+        if len(age_base_offsets) != len(lengths):
+            raise ValueError("Wake snapshot age bases do not align")
+        age_offsets = torch.cat([
+            torch.arange(
+                length,
+                device=self.device,
+                dtype=torch.long,
+            ) + int(offset)
+            for offset, length in zip(age_base_offsets, lengths)
+        ])
+
         return self._train_wake_sequence_packed_impl(
             sequences=sequences,
             sequence_indices=sequence_indices,
@@ -1576,6 +2173,10 @@ class TrainingWakeMixin:
             frontier_flat=frontier_flat,
             frontier_rows=frontier_rows,
             flat=flat,
+            age_offsets=age_offsets,
+            frontier_block_sparse=True,
+            functional_controller_state=defer_commit,
+            defer_commit=defer_commit,
         )
 
     def _train_wake_sequence_packed_impl(
@@ -1596,13 +2197,16 @@ class TrainingWakeMixin:
         functional_controller_state: bool = False,
         commit_working_state: bool = False,
         frontier_block_sparse: bool = False,
+        defer_commit: bool = False,
     ) -> list[Dict[str, Any]]:
         """Run the tensor-backed causal Wake transaction implementation.
 
         The public packed sequence path supplies per-event age offsets and a
-        functional Controller EMA. The compatibility wrapper below invokes
-        this same implementation with the original minibatch-snapshot
-        defaults for callers that explicitly need that older semantics.
+        functional Controller EMA. The Retweet snapshot wrapper supplies the
+        same ordered age offsets and block-sparse retrieval while retaining
+        its shared-snapshot Controller semantics.  ``defer_commit`` is only
+        used by the distributed Retweet snapshot path; it leaves persistent
+        bank state untouched until rank 0 replays the ordered proposals.
         """
         batch_size = len(sequences)
         profile_enabled = (
@@ -1746,6 +2350,7 @@ class TrainingWakeMixin:
             dtype=torch.bool,
         )
         gradient_norm_flat = z_flat.new_zeros(cursor, dtype=torch.float64)
+        controller_surprise_flat = z_flat.new_zeros(cursor)
 
         pending_writes: list[list[Dict[str, Any]]] = [
             [] for _ in range(batch_size)
@@ -2118,6 +2723,7 @@ class TrainingWakeMixin:
                             flat_rows,
                         ),
                         controller_context_zeros,
+                        update_statistics=not defer_commit,
                     )
                 else:
                     (
@@ -2148,6 +2754,11 @@ class TrainingWakeMixin:
                 if profile_enabled:
                     self._wake_profile_stop("controller")
                 action_index = action_probabilities.detach().argmax(dim=-1)
+                controller_surprise_flat.index_copy_(
+                    0,
+                    flat_rows,
+                    pre_action_nll.detach(),
+                )
                 wm_penalty = (
                     self.wake_config.lambda_wm
                     * working_delta.square().sum(dim=-1)
@@ -2279,7 +2890,8 @@ class TrainingWakeMixin:
                     node_ids=cycle_usage_node_ids,
                     cycle_usage_accumulator=cycle_usage_credit,
                 )
-                self.tree.episodic_memory.step_age(cursor)
+                if not defer_commit:
+                    self.tree.episodic_memory.step_age(cursor)
                 if profile_enabled:
                     self._wake_profile_stop("retrieval_credit")
 
@@ -2310,7 +2922,7 @@ class TrainingWakeMixin:
                 ),
             )
 
-            if surprise_state is not None:
+            if surprise_state is not None and not defer_commit:
                 self.controller.commit_surprise_state(surprise_state)
             if commit_working_state:
                 if batch_size != 1:
@@ -2519,7 +3131,10 @@ class TrainingWakeMixin:
             expansion_utility_count_tensor.detach().cpu().tolist()
         )
 
-        if cycle_usage_credit is not None:
+        deferred_usage_credit: Optional[Tensor] = None
+        if cycle_usage_credit is not None and defer_commit:
+            deferred_usage_credit = cycle_usage_credit.detach().cpu()
+        if cycle_usage_credit is not None and not defer_commit:
             if profile_enabled:
                 self._wake_profile_start("retrieval_credit")
             self.tree.episodic_memory.apply_cycle_usage_credit(
@@ -2541,6 +3156,12 @@ class TrainingWakeMixin:
         accepted_write_utility_sums = [0.0 for _ in range(batch_size)]
         harmful_write_counts = [0 for _ in range(batch_size)]
         pending_counts = [0 for _ in range(batch_size)]
+        deferred_write_proposals: list[list[Dict[str, Any]]] = [
+            [] for _ in range(batch_size)
+        ]
+        deferred_queue_split_evidence: list[list[Dict[str, Any]]] = [
+            [] for _ in range(batch_size)
+        ]
         if batched_write_path:
             if padded_wake is None:
                 raise RuntimeError("batched Wake cache was not prepared")
@@ -2563,7 +3184,10 @@ class TrainingWakeMixin:
                 selected_adapt_indices,
                 exploration_key="adapt",
             )
-            if selected_adapt_indices.numel():
+            # Compute must be read-only with respect to the persistent
+            # Controller replay/statistics state.  Rank 0 owns Commit, so a
+            # deferred wavefront only carries the selected rows as metadata.
+            if selected_adapt_indices.numel() and not defer_commit:
                 self._record_adapt_utility_batch(
                     sequences,
                     selected_adapt,
@@ -2580,6 +3204,7 @@ class TrainingWakeMixin:
                 padded_wake,
                 frontier_static_cache.semantic_theta_table,
                 controller_version=controller_version,
+                commit=not defer_commit,
             )
             if profile_enabled:
                 self._wake_profile_stop("memory_commit")
@@ -2610,12 +3235,21 @@ class TrainingWakeMixin:
             ]
             harmful_write_counts = write_summary["harmful_write_counts"]
             pending_counts = write_summary["pending_counts"]
+            deferred_write_proposals = write_summary.get(
+                "write_proposals", deferred_write_proposals
+            )
+            deferred_queue_split_evidence = write_summary.get(
+                "queue_split_evidence", deferred_queue_split_evidence
+            )
         else:
             # Controller-only/v6 still has version-specific delayed sampling
-            # semantics. Keep that path isolated until its sampler is batched.
+            # semantics.  Retweet snapshot Compute can still carry the
+            # materialized v6 candidates as proposals; only rank-0 Commit is
+            # allowed to call the admission helper below.
             for row, sequence in enumerate(sequences):
-                for request in self._select_adapt_probes(adapt_probes[row]):
-                    self._record_adapt_utility(sequence, request)
+                if not defer_commit:
+                    for request in self._select_adapt_probes(adapt_probes[row]):
+                        self._record_adapt_utility(sequence, request)
                 eligible = [
                     request
                     for request in pending_writes[row]
@@ -2630,6 +3264,12 @@ class TrainingWakeMixin:
                 write_probe_counts[row] = len(eligible)
                 if eligible:
                     for request in eligible:
+                        if defer_commit:
+                            # v6 evidence normally records its delayed Write
+                            # label immediately.  Mark deferred requests so
+                            # Compute remains read-only; Commit only needs the
+                            # materialized candidate item and scalar metadata.
+                            request["_defer_commit"] = True
                         request["window_evidence"] = (
                             self._window_write_evidence(sequence, request)
                         )
@@ -2691,7 +3331,80 @@ class TrainingWakeMixin:
                 else:
                     selected = []
                 persistent_selected = []
-                if not self.training_config.controller_only_finetune:
+                if defer_commit:
+                    # v6 evidence already contains the fully materialized
+                    # candidate item. Preserve the same event ordering and
+                    # shadow evidence shape as the batched path without
+                    # touching the mutable bank or split queue.
+                    selected_ids = {id(request) for request in selected}
+                    for request in selected:
+                        evidence_row = request["window_evidence"]
+                        item = evidence_row["candidate_item"]
+                        item.write_quality = float(
+                            request["write_gate"].detach().cpu()
+                        )
+                        item.queue_weight = float(
+                            request["queue_weight"].detach().cpu()
+                        )
+                        item.prediction_gain = float(
+                            evidence_row["write_gain"].detach().cpu()
+                        )
+                        deferred_write_proposals[row].append({
+                            "sequence_row": row,
+                            "event_index": int(request["event_index"]),
+                            "owner_id": str(evidence_row["owner_id"]),
+                            "item": item,
+                            "write_quality": float(item.write_quality),
+                            "queue_weight": float(item.queue_weight),
+                            "prediction_gain": float(item.prediction_gain),
+                            "write_utility": float(
+                                evidence_row["write_utility"].detach().cpu()
+                            ),
+                            "priority": float(
+                                evidence_row["priority"].detach().cpu()
+                            ),
+                        })
+                    shadow_candidates = []
+                    for request in probed:
+                        if id(request) in selected_ids:
+                            continue
+                        evidence_row = request["window_evidence"]
+                        priority = (
+                            request["queue_weight"]
+                            * evidence_row["confidence"]
+                            * evidence_row["bounded_gain"]
+                        )
+                        if float(priority.detach().cpu()) <= 0.0:
+                            continue
+                        shadow_candidates.append((priority, request))
+                    shadow_candidates.sort(
+                        key=lambda pair: float(pair[0].detach().cpu()),
+                        reverse=True,
+                    )
+                    for priority, request in shadow_candidates[:4]:
+                        evidence_row = request["window_evidence"]
+                        item = evidence_row["candidate_item"]
+                        item.write_quality = float(
+                            evidence_row["bounded_gain"].detach().cpu()
+                        )
+                        item.queue_weight = float((
+                            request["queue_weight"]
+                            * evidence_row["confidence"]
+                        ).detach().cpu())
+                        item.prediction_gain = float(
+                            evidence_row["write_gain"].detach().cpu()
+                        )
+                        deferred_queue_split_evidence[row].append({
+                            "event_index": int(request["event_index"]),
+                            "owner_id": str(evidence_row["owner_id"]),
+                            "item": item,
+                            "priority": float(priority.detach().cpu()),
+                            "queue_weight": float(item.queue_weight),
+                            "write_quality": float(item.write_quality),
+                            "prediction_gain": float(item.prediction_gain),
+                            "shadow": True,
+                        })
+                elif not self.training_config.controller_only_finetune:
                     admission_actions = self._commit_write_requests_batch(
                         sequence,
                         selected,
@@ -2758,7 +3471,10 @@ class TrainingWakeMixin:
                         shadow_records,
                         accepted_tokens=accepted_tokens,
                     )
-                if self.training_config.controller_write_ranking:
+                if (
+                    self.training_config.controller_write_ranking
+                    and not defer_commit
+                ):
                     self.controller_utility_replay.finalize_write_group(
                         int(
                             torch.as_tensor(
@@ -2835,6 +3551,12 @@ class TrainingWakeMixin:
         gate_activation_total_cpu = gate_activation_total.detach().cpu().tolist()
 
         prototype_count, evidence_mass = self._persistent_memory_stats()
+        deferred_usage_payload: Mapping[str, Any] = {}
+        if deferred_usage_credit is not None:
+            deferred_usage_payload = {
+                "node_ids": tuple(cycle_usage_node_ids),
+                "node_credit": deferred_usage_credit,
+            }
         results = []
         for row, values in enumerate(metric_matrix):
             (
@@ -2854,6 +3576,13 @@ class TrainingWakeMixin:
                 responsibility_sum[row] / lengths[row]
             )
             assignments = assignment_counts[row]
+            controller_stat_delta: Mapping[str, Any] = {}
+            if defer_commit:
+                controller_stat_delta = {
+                    "surprise_values": controller_surprise_flat[
+                        offsets[row] : offsets[row] + lengths[row]
+                    ].detach().cpu()
+                }
             results.append({
                 "prediction_nll": prediction_value,
                 "wm_penalty": wm_value,
@@ -2950,5 +3679,16 @@ class TrainingWakeMixin:
                 ),
                 "pending_write_count": pending_counts[row],
                 "max_gradient_norm": max_grad_value,
+                # Distributed snapshot metadata.  The regular ordered path
+                # leaves these empty and therefore retains its exact result
+                # contract.
+                "write_proposals": deferred_write_proposals[row],
+                "refresh_proposals": [],
+                "queue_split_evidence": deferred_queue_split_evidence[row],
+                "usage_credits": (
+                    deferred_usage_payload if row == 0 else {}
+                ),
+                "age_advance": lengths[row] if defer_commit else 0,
+                "controller_stat_delta": controller_stat_delta,
             })
         return results

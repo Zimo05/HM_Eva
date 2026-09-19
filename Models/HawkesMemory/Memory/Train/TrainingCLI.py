@@ -12,6 +12,7 @@ from Train.TrainingComponents import *  # noqa: F403
 
 
 from Train.TrainingTrainer import MemoryTreeTrainer
+from Train.DistributedRuntime import DistributedRuntime
 from DataSplit import file_sha256, load_split_manifest, select_sequences
 
 
@@ -58,6 +59,7 @@ _PERSISTENT_CONFIG_DESTS = frozenset({
     "route_balance_weight",
     "route_balance_batch_size",
     "wake_wavefront_batch_size",
+    "wake_transaction_mode",
     "retrieval_microbatch",
     "retrieval_visit_chunk_size",
     "route_balance_max_steps",
@@ -139,6 +141,8 @@ def _infer_wake_dataset_family(args) -> str:
 
     The benchmark adapter labels Retweet explicitly so its snapshot Wake
     execution branch cannot leak into Taobao, StackOverflow, DWS, or CL.
+    The execution protocol itself is persisted separately in
+    ``wake_transaction_mode``.
     Unlabelled standalone datasets retain the established non-CL/DWS path.
     """
 
@@ -159,6 +163,10 @@ def _infer_wake_dataset_family(args) -> str:
     path_parts = {part.casefold() for part in data_path.parts}
     if "continual" in path_parts or "cl-core" in path_text:
         return "cl"
+    if "retweet" in path_parts or data_path.name.casefold().startswith(
+        "retweet"
+    ):
+        return "retweet"
     if "dws" in path_parts or data_path.name.casefold().startswith(
         "hawkes_dataset_"
     ):
@@ -196,6 +204,7 @@ _WAKE_ARG_TO_CHECKPOINT = {
     "route_mix_weight": "lambda_route_mix",
     "route_probe_weight": "lambda_route_probe",
     "route_balance_weight": "lambda_route_balance",
+    "wake_transaction_mode": "wake_transaction_mode",
 }
 _FRONTIER_ARG_TO_CHECKPOINT = {
     "frontier_budget": "frontier_budget",
@@ -904,6 +913,15 @@ def _parse_args(argv=None):
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--wake-transaction-mode",
+        choices=("ordered", "snapshot"),
+        default="ordered",
+        help=(
+            "Wake transaction protocol. Retweet adapters opt into the "
+            "snapshot protocol; ordered is the default."
+        ),
+    )
+    parser.add_argument(
         "--retrieval-microbatch",
         type=int,
         default=1024,
@@ -924,7 +942,10 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--wake-profile",
         action="store_true",
-        help="Profile only the non-CL/DWS Wake branch.",
+        help=(
+            "Profile the selected non-CL/DWS or Retweet snapshot Wake "
+            "branch."
+        ),
     )
     parser.add_argument(
         "--wake-profile-max-wavefronts",
@@ -1333,6 +1354,20 @@ def _parse_args(argv=None):
         ),
     )
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--distributed-backend",
+        choices=("nccl", "gloo"),
+        default=None,
+        help=(
+            "torch.distributed backend for torchrun. Defaults to NCCL on "
+            "CUDA and Gloo on CPU; single-process runs do not initialize it."
+        ),
+    )
+    parser.add_argument(
+        "--distributed-debug-hash",
+        action="store_true",
+        help="Check rank-local Retweet memory-bank hashes after Commit.",
+    )
     argv_list = list(sys.argv[1:] if argv is None else argv)
     parser_defaults = {
         action.dest: action.default
@@ -1700,6 +1735,11 @@ def main() -> None:
         raise ValueError("--merge-dual-initial must be non-negative")
     if args.sleep_every <= 0:
         raise ValueError("--sleep-every must be positive")
+    distributed_runtime = DistributedRuntime.from_environment(
+        device=args.device,
+        backend=args.distributed_backend,
+        debug_hash=args.distributed_debug_hash,
+    )
     torch.manual_seed(args.seed)
     tree_init_depth = (
         args.tree_init_depth
@@ -1714,7 +1754,7 @@ def main() -> None:
         node_dim=args.node_dim,
         memory_key_dim=args.memory_key_dim,
         tree_init_depth=tree_init_depth,
-        device=args.device,
+        device=distributed_runtime.device,
     )
     all_sequences = constructor.load_sequences()
     dataset = all_sequences
@@ -1786,7 +1826,9 @@ def main() -> None:
         trainer = MemoryTreeTrainer.from_checkpoint(
             args.controller_base_checkpoint,
             device=constructor.device,
+            distributed_runtime=distributed_runtime,
         )
+        trainer.wake_config.wake_transaction_mode = args.wake_transaction_mode
         trainer.training_config.epochs = args.epochs
         trainer.training_config.optimizer_impl = args.optimizer_impl
         trainer.training_config.checkpoint_path = args.checkpoint
@@ -1871,6 +1913,7 @@ def main() -> None:
         trainer = MemoryTreeTrainer.from_checkpoint(
             args.resume,
             device=constructor.device,
+            distributed_runtime=distributed_runtime,
         )
         _start_cl_stage(trainer, args, resume_payload)
         trainer.tree.configure_frontier_routing(
@@ -1931,6 +1974,7 @@ def main() -> None:
         )
         trainer.wake_config.prototype_mode_quantile = args.prototype_mode_quantile
         trainer.wake_config.prototype_mode_capacity = args.prototype_mode_capacity
+        trainer.wake_config.wake_transaction_mode = args.wake_transaction_mode
         trainer.tree.episodic_memory.configure_prototype_memory(
             duplicate_threshold=trainer.wake_config.prototype_duplicate_threshold,
             mode_threshold=trainer.wake_config.prototype_mode_threshold,
@@ -2458,6 +2502,7 @@ def main() -> None:
             wake_profile=args.wake_profile,
             wake_profile_max_wavefronts=args.wake_profile_max_wavefronts,
             wake_profile_epoch=args.wake_profile_epoch,
+            wake_transaction_mode=args.wake_transaction_mode,
             route_balance_max_steps=args.route_balance_max_steps,
             route_balance_target_kl=args.route_balance_target_kl,
             count_similarity_low=args.count_similarity_low,
@@ -2522,6 +2567,7 @@ def main() -> None:
             wake_dataset_family=_infer_wake_dataset_family(args),
         ),
         device=constructor.device,
+        distributed_runtime=distributed_runtime,
     )
     _apply_cl_metadata(trainer, args)
     if (

@@ -985,13 +985,49 @@ class TrainingObjectivesMixin:
             raise ValueError("global training epoch must be positive")
 
         order = torch.randperm(len(dataset), generator=generator).tolist()
+        distributed_runtime = getattr(self, "distributed_runtime", None)
+        distributed_retweet_snapshot = bool(
+            distributed_runtime is not None
+            and distributed_runtime.is_distributed
+            and str(
+                getattr(self.training_config, "wake_dataset_family", "")
+            ).strip().casefold()
+            == "retweet"
+            and str(
+                getattr(self.wake_config, "wake_transaction_mode", "ordered")
+            ).strip().casefold()
+            == "snapshot"
+        )
+        if distributed_retweet_snapshot:
+            # Global samples are assigned contiguously to keep every rank's
+            # local objective a disjoint contribution to the all-reduce.
+            start, end = distributed_runtime.contiguous_shard(len(order))
+            order = order[start:end]
         batch_size = self.wake_config.route_balance_batch_size
-        batches = [
-            order[start : start + batch_size]
-            for start in range(0, len(order), batch_size)
-        ]
-        if len(batches) > 1 and len(batches[-1]) == 1:
-            batches[-2].extend(batches.pop())
+        if distributed_retweet_snapshot:
+            # Every rank must enter the same number of collective calls.  A
+            # final short shard therefore contributes an explicit empty local
+            # batch; its zero gradients participate in the same SUM reduction
+            # as the non-empty ranks without duplicating any sequence.
+            max_local_sequences = (
+                len(dataset) + distributed_runtime.world_size - 1
+            ) // distributed_runtime.world_size
+            batch_count = max(
+                1,
+                (max_local_sequences + batch_size - 1) // batch_size,
+            )
+            batches = [
+                order[start : start + batch_size]
+                for start in range(0, len(order), batch_size)
+            ]
+            batches.extend([[] for _ in range(batch_count - len(batches))])
+        else:
+            batches = [
+                order[start : start + batch_size]
+                for start in range(0, len(order), batch_size)
+            ]
+            if len(batches) > 1 and len(batches[-1]) == 1:
+                batches[-2].extend(batches.pop())
 
         total_loss = 0.0
         total_prediction = 0.0
@@ -1028,7 +1064,7 @@ class TrainingObjectivesMixin:
         self.encoder.train()
 
         global_progress = tqdm(
-            total=len(dataset),
+            total=len(order),
             desc=f"[Epoch {effective_epoch:03d}] Global",
             unit="seq-pass",
             ascii=True,
@@ -1068,6 +1104,57 @@ class TrainingObjectivesMixin:
                 for sequence in moved_sequences
             )
             if batch_event_count <= 0:
+                if distributed_retweet_snapshot:
+                    # Match the sufficient-statistic collective issued by
+                    # non-empty ranks for this optimizer step.
+                    parameter_values = list(
+                        self._named_optimized_parameters().values()
+                    )
+                    statistic_dtype = next(
+                        (
+                            parameter.dtype
+                            for parameter in parameter_values
+                            if parameter.is_floating_point()
+                        ),
+                        torch.float32,
+                    )
+                    empty_denominators = torch.zeros(
+                        3,
+                        device=self.device,
+                        dtype=statistic_dtype,
+                    )
+                    distributed_runtime.all_reduce(empty_denominators)
+                    optimized_parameters = self._named_optimized_parameters()
+                    if distributed_retweet_snapshot:
+                        optimized_parameters = dict(
+                            sorted(optimized_parameters.items())
+                        )
+                    trainable_parameters = [
+                        parameter
+                        for parameter in optimized_parameters.values()
+                        if parameter.requires_grad
+                    ]
+                    if trainable_parameters:
+                        zero_objective = sum(
+                            (
+                                parameter.reshape(-1).sum()
+                                * parameter.new_zeros(())
+                            )
+                            for parameter in trainable_parameters
+                        )
+                        zero_objective.backward()
+                    distributed_runtime.all_reduce_gradients(
+                        optimized_parameters.values(),
+                        average=False,
+                    )
+                    gradient_norm = clip_grad_norm_finite(
+                        optimized_parameters,
+                        self.training_config.grad_clip,
+                        context="empty distributed global batch",
+                    )
+                    max_gradient_norm = max(max_gradient_norm, gradient_norm)
+                    self.optimizer.step()
+                    optimizer_steps += 1
                 continue
             sequence_count = len(moved_sequences)
             global_progress.set_postfix(
@@ -1394,18 +1481,77 @@ class TrainingObjectivesMixin:
                 routed_z,
                 flat,
             )
-            objective = (
-                batch_prediction
-                + self.wake_config.lambda_route_distill
-                * local["distill"]
-                - self.wake_config.lambda_route_mi
-                * local["mutual_information"]
-                + self.wake_config.lambda_route_balance
-                * local["balance_kl"]
-                + self.wake_config.lambda_route_probe
-                * regional["loss"]
-                + controller_loss
+            distributed_runtime = getattr(self, "distributed_runtime", None)
+            distributed_global = bool(
+                distributed_runtime is not None
+                and distributed_runtime.is_distributed
+                and str(
+                    getattr(self.training_config, "wake_dataset_family", "")
+                ).strip().casefold()
+                == "retweet"
+                and str(
+                    getattr(
+                        self.wake_config,
+                        "wake_transaction_mode",
+                        "ordered",
+                    )
+                ).strip().casefold()
+                == "snapshot"
             )
+            if distributed_global:
+                # Each rank contributes sufficient statistics, not a locally
+                # normalized objective.  All denominators are detached counts;
+                # only the rank-local numerators retain autograd history.
+                global_denominators = torch.stack([
+                    batch_prediction_sum.new_tensor(float(batch_event_count)),
+                    batch_prediction_sum.new_tensor(float(sequence_count)),
+                    regional["regions"].to(batch_prediction_sum),
+                ])
+                distributed_runtime.all_reduce(global_denominators)
+                event_denominator = global_denominators[0].clamp_min(1.0)
+                sequence_denominator = global_denominators[1].clamp_min(1.0)
+                region_denominator = global_denominators[2].clamp_min(1.0)
+                sequence_weight = (
+                    batch_prediction_sum.new_tensor(float(sequence_count))
+                    / sequence_denominator
+                )
+                event_weight = (
+                    batch_prediction_sum.new_tensor(float(batch_event_count))
+                    / event_denominator
+                )
+                region_weight = (
+                    regional["regions"].to(batch_prediction_sum)
+                    / region_denominator
+                )
+                objective = (
+                    batch_prediction_sum / event_denominator
+                    + self.wake_config.lambda_route_distill
+                    * local["distill"]
+                    * sequence_weight
+                    - self.wake_config.lambda_route_mi
+                    * local["mutual_information"]
+                    * sequence_weight
+                    + self.wake_config.lambda_route_balance
+                    * local["balance_kl"]
+                    * sequence_weight
+                    + self.wake_config.lambda_route_probe
+                    * regional["loss"]
+                    * region_weight
+                    + controller_loss * event_weight
+                )
+            else:
+                objective = (
+                    batch_prediction
+                    + self.wake_config.lambda_route_distill
+                    * local["distill"]
+                    - self.wake_config.lambda_route_mi
+                    * local["mutual_information"]
+                    + self.wake_config.lambda_route_balance
+                    * local["balance_kl"]
+                    + self.wake_config.lambda_route_probe
+                    * regional["loss"]
+                    + controller_loss
+                )
             _assert_finite_without_cuda_sync(
                 objective,
                 "global frontier objective became non-finite",
@@ -1457,8 +1603,20 @@ class TrainingObjectivesMixin:
                 float(controller_status[-1]),
             )
             global_progress.update(sequence_count)
+            optimized_parameters = self._named_optimized_parameters()
+            if distributed_global:
+                optimized_parameters = dict(
+                    sorted(optimized_parameters.items())
+                )
+            if distributed_global:
+                # Wake's persistent state is synchronized by CommitLog; only
+                # differentiable Global parameters use gradient all-reduce.
+                distributed_runtime.all_reduce_gradients(
+                    optimized_parameters.values(),
+                    average=False,
+                )
             gradient_norm = clip_grad_norm_finite(
-                self._named_optimized_parameters(),
+                optimized_parameters,
                 self.training_config.grad_clip,
                 context="cross-sequence global update",
             )

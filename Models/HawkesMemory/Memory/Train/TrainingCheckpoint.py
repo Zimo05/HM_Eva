@@ -411,5 +411,15 @@ class TrainingCheckpointMixin:
     def save_checkpoint(self, path: str | Path, *, epoch: int) -> Path:
         """Atomically serialize one complete checkpoint payload."""
         output_path = Path(path)
+        distributed_runtime = getattr(self, "distributed_runtime", None)
+        if (
+            distributed_runtime is not None
+            and distributed_runtime.is_distributed
+            and not distributed_runtime.is_rank0
+        ):
+            # Retweet snapshot Wake has one rank-0 owner for persistent state
+            # and filesystem artifacts.  Peer ranks still return the resolved
+            # target so callers retain the ordinary API contract.
+            return output_path.expanduser().resolve()
         checkpoint = self.build_checkpoint_payload(output_path, epoch=epoch)
         return atomic_torch_save(checkpoint, output_path)

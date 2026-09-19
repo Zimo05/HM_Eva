@@ -241,8 +241,8 @@ class WakeObjectiveConfig:
     # Appended to preserve positional construction of older configs.
     # Accepted-sample calibrated duplicate radius quantile.
     prototype_duplicate_quantile: float = 0.85
-    # Optional instrumentation for the dataset-specific non-CL/DWS Wake
-    # branch.  These are deliberately appended so older positional configs
+    # Optional instrumentation for the dataset-specific batched Wake
+    # branches. These are deliberately appended so older positional configs
     # and checkpoints remain loadable.
     wake_profile: bool = False
     wake_profile_max_wavefronts: int = 20
@@ -250,6 +250,10 @@ class WakeObjectiveConfig:
     # Accepted-sample calibrated mode radius quantile.  Appended for
     # checkpoint compatibility with older WakeObjectiveConfig payloads.
     prototype_mode_quantile: float = 0.95
+    # Execution protocol is independent from dataset identity.  Keep this
+    # field at the end so older positional WakeObjectiveConfig constructions
+    # and checkpoints remain compatible.
+    wake_transaction_mode: str = "ordered"
 
 
 @dataclass

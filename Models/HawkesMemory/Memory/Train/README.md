@@ -154,9 +154,12 @@ per-event age offsets during the tensor scan, and commits its writes before
 the next sequence starts. Episodic retrieval, Controller decisions,
 working-memory updates, age/usage credit, and physical writes are therefore
 causal: sequence `i + 1` observes the bank after sequence `i` has committed
-its writes. The old bank-entry-snapshot entry point is retained only as the
-private `_train_wake_batch_snapshot` compatibility/reference path for
-experiments that explicitly define minibatch-synchronous memory semantics.
+its writes. Retweet can explicitly select the shared snapshot protocol with
+`wake_transaction_mode="snapshot"`; that path keeps flattened ordered age
+offsets and block-sparse retrieval while committing writes after the wavefront.
+The private `_train_wake_batch_snapshot` entry point remains available for
+reference tests and experiments that explicitly define minibatch-synchronous
+memory semantics.
 
 `retrieval_visit_chunk_size` independently bounds the active
 `(event, visited-node)` rows handled by one packed episodic retrieval kernel.
@@ -483,6 +486,42 @@ python -m Train.Train \
 Format-version 3 checkpoints restore dynamic topology and memory contents,
 optimizer state/groups by stable parameter name, dormant split-module state,
 split queues, history, completed epoch, and RNG state.
+
+### Retweet multi-GPU Wake
+
+Retweet can opt into the snapshot protocol without changing the ordered
+protocol used by other datasets:
+
+```bash
+torchrun --nproc_per_node=4 -m Train.Train \
+  --data-path data/retweet/... \
+  --wake-dataset-family retweet \
+  --wake-transaction-mode snapshot \
+  --distributed-backend nccl
+```
+
+`DistributedRuntime` assigns contiguous sequence shards to each rank.  Every
+rank computes against the same wavefront snapshot; rank 0 sorts the resulting
+`WakeTransactionBatch` records and applies one deterministic CommitLog.  Peers
+replay only accepted appends/refreshes, usage credits, and age advancement;
+structural-evidence payloads remain attached to the CommitLog for Sleep.
+Local shards retain their global flattened age offsets, so snapshot reads keep
+the ordered memory-age semantics within each wavefront.
+Responsibilities are gathered once per epoch.  After the distributed Global
+gradient/optimizer phase, all ranks enter a barrier; only rank 0 runs Sleep
+and topology edits.  It then broadcasts one CPU state snapshot containing the
+dynamic H-tree/Bank, Hawkes/Encoder/controller state, Sleep/topology metadata,
+and optimizer moments.  Peer ranks restore that snapshot and reconcile dynamic
+parameter groups before the next epoch.  Checkpoints and diagnostics are
+likewise written by rank 0.
+The trainer is not wrapped in DDP because its
+memory bank and H-tree are mutable.  `--distributed-debug-hash` enables a
+SHA-256 parity check after each Commit.
+
+The Global phase uses per-component sufficient statistics (`S_{r,k}, N_{r,k}`)
+for event/sequence normalization, then SUM-all-reduces each differentiable
+parameter gradient before the optimizer step.  Ordered or non-Retweet runs do
+not enter this snapshot branch.
 
 ## Inference
 

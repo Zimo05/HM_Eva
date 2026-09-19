@@ -8,6 +8,7 @@ from Train.TrainingComponents import (
     _frontier_config_from_checkpoint,
     _topology_prune_settings,
 )
+from Train.DistributedRuntime import DistributedRuntime
 
 
 class TrainingLifecycleMixin:
@@ -65,11 +66,16 @@ class TrainingLifecycleMixin:
         structure: Optional[StructureConfig] = None,
         training: Optional[TrainingConfig] = None,
         device: Optional[torch.device | str] = None,
+        distributed_runtime: Optional[DistributedRuntime] = None,
     ) -> None:
         self.wake_config = WakeObjectiveConfig() if wake is None else wake
         self.sleep_config = SleepConfig() if sleep is None else sleep
         self.structure_config = StructureConfig() if structure is None else structure
         self.training_config = TrainingConfig() if training is None else training
+        # The trainer is deliberately not wrapped in DDP.  A runtime is an
+        # explicit synchronization service used only by the Retweet snapshot
+        # protocol and global gradient phase.
+        self.distributed_runtime = distributed_runtime
         legacy_cooldown_tau = self.sleep_config.deep_cooldown_tau
         if legacy_cooldown_tau is not None:
             self.sleep_config.deep_availability_tau = float(
@@ -165,6 +171,13 @@ class TrainingLifecycleMixin:
             raise ValueError("route_balance_batch_size must be at least 2")
         if self.wake_config.wake_wavefront_batch_size <= 0:
             raise ValueError("wake_wavefront_batch_size must be positive")
+        if self.wake_config.wake_transaction_mode not in {
+            "ordered",
+            "snapshot",
+        }:
+            raise ValueError(
+                "wake_transaction_mode must be ordered or snapshot"
+            )
         if self.wake_config.retrieval_microbatch <= 0:
             raise ValueError("retrieval_microbatch must be positive")
         if (
@@ -546,6 +559,16 @@ class TrainingLifecycleMixin:
         scorer on ``router_lr_scale`` and new node parameters on the base rate.
         """
         named = self._named_optimized_parameters()
+        distributed_runtime = getattr(self, "distributed_runtime", None)
+        if (
+            distributed_runtime is not None
+            and distributed_runtime.is_distributed
+        ):
+            # ParameterDict preserves insertion order locally, while a
+            # topology restore may materialize dynamic node IDs in a
+            # different order on another rank. Stable names keep optimizer
+            # moments aligned when rank 0 broadcasts a Sleep snapshot.
+            named = dict(sorted(named.items()))
         if self.training_config.controller_only_finetune:
             named = {
                 name: parameter
@@ -732,6 +755,7 @@ class TrainingLifecycleMixin:
         device: Optional[torch.device | str] = None,
         encoder: Optional[nn.Module] = None,
         training: Optional[TrainingConfig] = None,
+        distributed_runtime: Optional[DistributedRuntime] = None,
     ) -> "MemoryTreeTrainer":
         """Restore a complete trainer for additional wake/sleep epochs."""
         if device is None:
@@ -869,6 +893,7 @@ class TrainingLifecycleMixin:
             structure=StructureConfig(**structure_payload),
             training=loaded_training if training is None else training,
             device=device,
+            distributed_runtime=distributed_runtime,
         )
         deep_gate_state = checkpoint.get("deep_sleep_gate_state_dict")
         deep_gate_was_migrated = False

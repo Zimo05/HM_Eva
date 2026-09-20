@@ -15,6 +15,7 @@ from Train.DistributedRuntime import (
     WakeTransactionBatch,
     stable_state_hash,
 )
+from MemoryResiduals.MemoryBank import EventWindow, MemoryItem
 
 
 class _WakeProfiler:
@@ -1243,6 +1244,7 @@ class TrainingWakeMixin:
         retrieval_residual_norm: Tensor,
         pending_write_ratio: Tensor,
         surprise_state: tuple[Tensor, Tensor, Tensor],
+        distributed_runtime: Any = None,
     ) -> tuple[
         Tensor,
         Tensor,
@@ -1265,23 +1267,45 @@ class TrainingWakeMixin:
             step_flat,
             pre_action_theta.detach(),
         )
-        controller_output, next_surprise_state = (
-            self.controller.action_distribution_batch_functional(
-                pre_action_nll,
+        if (
+            distributed_runtime is not None
+            and distributed_runtime.is_distributed
+        ):
+            normalized_surprise, next_surprise_state = (
+                self._normalize_surprise_distributed(
+                    pre_action_nll,
+                    surprise_state,
+                    distributed_runtime,
+                )
+            )
+            controller_output = self.controller._action_distribution_batch_from_normalized(
+                normalized_surprise,
                 novelty,
                 similarity_count,
-                surprise_state=surprise_state,
                 owner_confidence=owner_confidence,
                 retrieval_similarity=max_similarity,
                 retrieval_residual_norm=retrieval_residual_norm,
-                # Keep packed action selection bit-for-bit aligned with the
-                # scalar ``_decide_action`` path.  Working-memory norm is
-                # still used for the recurrent update, but not as a new
-                # Controller feature.
                 working_memory_norm=pre_action_nll.new_zeros(pre_action_nll.shape),
                 pending_write_ratio=pending_write_ratio,
             )
-        )
+        else:
+            controller_output, next_surprise_state = (
+                self.controller.action_distribution_batch_functional(
+                    pre_action_nll,
+                    novelty,
+                    similarity_count,
+                    surprise_state=surprise_state,
+                    owner_confidence=owner_confidence,
+                    retrieval_similarity=max_similarity,
+                    retrieval_residual_norm=retrieval_residual_norm,
+                    # Keep packed action selection bit-for-bit aligned with the
+                    # scalar ``_decide_action`` path.  Working-memory norm is
+                    # still used for the recurrent update, but not as a new
+                    # Controller feature.
+                    working_memory_norm=pre_action_nll.new_zeros(pre_action_nll.shape),
+                    pending_write_ratio=pending_write_ratio,
+                )
+            )
         action_probabilities = controller_output["probabilities"]
         raw_action_probabilities = controller_output.get(
             "raw_probabilities",
@@ -1595,6 +1619,57 @@ class TrainingWakeMixin:
         if torch.is_tensor(value):
             return value.to(device=device, non_blocking=True)
         if isinstance(value, Mapping):
+            # ``CommitLog.from_payload`` turns dataclass MemoryItems into
+            # ordinary mappings.  Rehydrate that public shape so a replayed
+            # log remains executable even when an object collective is
+            # represented as a plain payload in a test/checkpoint.
+            if {"key", "delta_theta", "window"}.issubset(value):
+                window = value.get("window")
+                if isinstance(window, Mapping):
+                    window = EventWindow(
+                        times=TrainingWakeMixin._move_transaction_value(
+                            window.get("times"), device
+                        ),
+                        types=TrainingWakeMixin._move_transaction_value(
+                            window.get("types"), device
+                        ),
+                        node_id=str(window.get("node_id", "root")),
+                        start_idx=int(window.get("start_idx", 0)),
+                        end_idx=int(window.get("end_idx", 0)),
+                        has_full_history=bool(
+                            window.get("has_full_history", False)
+                        ),
+                        T=TrainingWakeMixin._move_transaction_value(
+                            window.get("T"), device
+                        ),
+                        event_time_features=TrainingWakeMixin._move_transaction_value(
+                            window.get("event_time_features"), device
+                        ),
+                        hawkes_history_stats=TrainingWakeMixin._move_transaction_value(
+                            window.get("hawkes_history_stats"), device
+                        ),
+                        hawkes_interval_stats=TrainingWakeMixin._move_transaction_value(
+                            window.get("hawkes_interval_stats"), device
+                        ),
+                        hawkes_cache_signature=window.get(
+                            "hawkes_cache_signature"
+                        ),
+                    )
+                return MemoryItem(
+                    key=TrainingWakeMixin._move_transaction_value(
+                        value.get("key"), device
+                    ),
+                    delta_theta=TrainingWakeMixin._move_transaction_value(
+                        value.get("delta_theta"), device
+                    ),
+                    window=window,
+                    usage=float(value.get("usage", 0.0)),
+                    age=int(value.get("age", 0)),
+                    write_quality=float(value.get("write_quality", 1.0)),
+                    queue_weight=float(value.get("queue_weight", 0.0)),
+                    support=float(value.get("support", 1.0)),
+                    prediction_gain=float(value.get("prediction_gain", 0.0)),
+                )
             return {
                 key: TrainingWakeMixin._move_transaction_value(item, device)
                 for key, item in value.items()
@@ -1726,6 +1801,82 @@ class TrainingWakeMixin:
             snapshot_id=f"wavefront-{int(wavefront_index)}",
         )
 
+    def _normalize_surprise_distributed(
+        self,
+        surprise: Tensor,
+        state: tuple[Tensor, Tensor, Tensor],
+        runtime: Any,
+    ) -> tuple[Tensor, tuple[Tensor, Tensor, Tensor]]:
+        """Use one global sufficient-statistic EMA update for one depth.
+
+        Each rank contributes only ``(count, sum, squared deviation)`` for its
+        active rows.  The detached pre-action NLL is normalized against the
+        same state snapshot on every rank; the next state is therefore
+        identical without gathering event rows or mutating Controller buffers
+        during Compute.
+        """
+
+        mean, variance, observations = state
+        state_mean = mean.detach().to(device=surprise.device)
+        state_variance = variance.detach().to(device=surprise.device)
+        state_observations = observations.detach().to(
+            device=surprise.device, dtype=torch.long
+        )
+        normalized = (surprise - state_mean.to(surprise)) / torch.sqrt(
+            state_variance.to(surprise) + self.controller.controller_eps
+        )
+        values = surprise.detach().to(state_mean)
+        stats = torch.stack((
+            values.new_tensor(float(values.numel())),
+            values.sum(),
+            (values - state_mean).square().sum(),
+        ))
+        runtime.all_reduce(stats)
+        count = stats[0].clamp_min(0.0)
+        has_values = bool(count.detach().cpu() > 0)
+        if not has_values:
+            return normalized, (state_mean, state_variance, state_observations)
+        global_mean = stats[1] / count
+        decay = values.new_tensor(float(self.controller.surprise_ema_decay))
+        batch_decay = torch.pow(decay, count)
+        next_mean = state_mean * batch_decay + global_mean * (1.0 - batch_decay)
+        next_variance = (
+            state_variance * batch_decay
+            + (stats[2] / count) * (1.0 - batch_decay)
+        )
+        next_observations = state_observations + count.to(torch.long)
+        return normalized, (next_mean, next_variance, next_observations)
+
+    @torch.no_grad()
+    def _sync_empty_distributed_surprise_depth(
+        self,
+        state: tuple[Tensor, Tensor, Tensor],
+        runtime: Any,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Advance the global Controller EMA when this rank has no row."""
+
+        reference = state[0]
+        empty = reference.new_empty(0)
+        _, next_state = self._normalize_surprise_distributed(
+            empty, state, runtime
+        )
+        return next_state
+
+    @torch.no_grad()
+    def synchronize_distributed_controller_depths(
+        self,
+        depth_count: int,
+    ) -> None:
+        """Enter Controller EMA collectives for an empty local wavefront."""
+
+        runtime = getattr(self, "distributed_runtime", None)
+        if runtime is None or not runtime.is_distributed:
+            return
+        reference = self.controller.surprise_mean.to(self.device)
+        state = self.controller.new_surprise_state(reference.reshape(1))
+        for _ in range(max(int(depth_count), 0)):
+            state = self._sync_empty_distributed_surprise_depth(state, runtime)
+
     def compute_wake_snapshot(
         self,
         *,
@@ -1767,20 +1918,65 @@ class TrainingWakeMixin:
         """Hash the mutable memory/topology state for optional parity checks."""
 
         memory = self.tree.episodic_memory
+        # ``get_extra_state`` is deliberately used here instead of hashing
+        # only the visible prototype tensors.  Admission is causal and its
+        # hidden pending-candidate/radius/confirmation state is part of the
+        # persistent Bank semantics; omitting it lets peers appear equal while
+        # making different decisions on the next write.
         payload: dict[str, Any] = {
             "age_clock": int(getattr(memory, "_age_clock", 0)),
-            "banks": {},
+            "banks": memory.get_extra_state(),
         }
-        for node_id in sorted(memory.banks):
-            bank = memory.banks[node_id]
-            payload["banks"][node_id] = {
-                "keys": bank.keys[: len(bank)].detach().cpu(),
-                "deltas": bank.deltas[: len(bank)].detach().cpu(),
-                "usage": bank.usage[: len(bank)].detach().cpu(),
-                "age": bank.age[: len(bank)].detach().cpu(),
-                "capacity": int(len(bank)),
-            }
         return stable_state_hash(payload)
+
+    @torch.no_grad()
+    def _apply_committed_structural_evidence(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Retain distributed shadow evidence without letting it diverge.
+
+        Snapshot Compute cannot mutate Sleep state on each rank.  CommitLog is
+        the single owner of these records, so rank 0 applies them and peers
+        replay the exact same compact summaries.  Ordered Wake keeps its
+        historical discard boundary in ``_update_structural_evidence_buffer``.
+        """
+
+        if not records:
+            return
+        buffer = self.sleep_state.setdefault(
+            "structural_evidence_buffer", {}
+        )
+        if not isinstance(buffer, Mapping):
+            buffer = {}
+        next_buffer = {
+            str(owner): list(values)
+            for owner, values in buffer.items()
+            if isinstance(values, (tuple, list))
+        }
+        mass = 0.0
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            owner_id = str(record.get("owner_id", "root"))
+            compact = {
+                key: self._cpuize_transaction_value(value)
+                for key, value in record.items()
+                if key != "item"
+            }
+            next_buffer.setdefault(owner_id, []).append(compact)
+            mass += max(
+                float(compact.get("priority", 0.0)),
+                float(compact.get("write_quality", 0.0)),
+                0.0,
+            )
+        self.sleep_state["structural_evidence_buffer"] = next_buffer
+        self.sleep_state["structural_mass_since_sleep"] = float(
+            self.sleep_state.get("structural_mass_since_sleep", 0.0)
+        ) + mass
+        self.sleep_state["structural_observations_since_sleep"] = int(
+            self.sleep_state.get("structural_observations_since_sleep", 0)
+        ) + len(records)
 
     @torch.no_grad()
     def _apply_controller_stat_deltas(
@@ -1874,6 +2070,7 @@ class TrainingWakeMixin:
 
         accepted_appends: list[dict[str, Any]] = []
         accepted_refreshes: list[dict[str, Any]] = []
+        admission_results: list[dict[str, Any]] = []
         for owner_id in sorted(grouped):
             rows = grouped[owner_id]
             items = []
@@ -1919,6 +2116,19 @@ class TrainingWakeMixin:
             )
             for (_, proposal), item, result in zip(rows, items, admission):
                 action = str(result["action"])
+                admission_results.append({
+                    "token": (
+                        int(proposal.get("sequence_index", 0)),
+                        int(proposal.get("event_index", 0)),
+                    ),
+                    "owner_id": owner_id,
+                    "proposal": self._cpuize_transaction_value(proposal),
+                    "action": action,
+                    # Keep the full scalar admission metadata in the log.  The
+                    # proposal replay is authoritative, while these fields
+                    # make hidden-state mismatches diagnosable.
+                    "decision": self._cpuize_transaction_value(result),
+                })
                 if action in {"append", "refresh"}:
                     record = {
                         "token": (
@@ -1965,7 +2175,30 @@ class TrainingWakeMixin:
             for transaction in transactions
             if transaction.controller_stat_delta
         ])
-        if accepted_appends or accepted_refreshes or total_usage.get("node_credit") is not None:
+        structural_evidence: list[dict[str, Any]] = []
+        for transaction in transactions:
+            for evidence in transaction.queue_split_evidence or ():
+                if not isinstance(evidence, Mapping):
+                    continue
+                structural_evidence.append({
+                    "token": (
+                        int(transaction.sequence_index),
+                        int(evidence.get("event_index", transaction.event_index)),
+                    ),
+                    **{
+                        key: self._cpuize_transaction_value(value)
+                        for key, value in evidence.items()
+                        if key != "item"
+                    },
+                })
+        structural_evidence.sort(key=lambda item: tuple(item.get("token", (0, 0))))
+        self._apply_committed_structural_evidence(structural_evidence)
+        if (
+            admission_results
+            or accepted_appends
+            or accepted_refreshes
+            or total_usage.get("node_credit") is not None
+        ):
             self.tree.episodic_memory.invalidate_packed_mirror()
         return CommitLog(
             accepted_appends=tuple(accepted_appends),
@@ -1983,10 +2216,12 @@ class TrainingWakeMixin:
                 for transaction in transactions
                 if transaction.controller_stat_delta
             ),
-            structural_evidence=tuple(
-                transaction.queue_split_evidence
-                for transaction in transactions
-                if transaction.queue_split_evidence
+            structural_evidence=tuple(structural_evidence),
+            admission_results=tuple(
+                sorted(
+                    admission_results,
+                    key=lambda item: tuple(item.get("token", (0, 0))),
+                )
             ),
             state_hash=self._memory_state_hash(),
         )
@@ -1999,12 +2234,19 @@ class TrainingWakeMixin:
         # arrays, but replay must restore their original event order.  Sorting
         # the combined records also keeps same-owner append/refresh admission
         # identical to rank 0 when the bank has finite capacity.
-        accepted = sorted(
-            list(commit_log.accepted_appends)
-            + list(commit_log.accepted_refreshes),
+        admission = sorted(
+            list(commit_log.admission_results or ()),
             key=lambda entry: tuple(entry.get("token", (0, 0))),
         )
-        for entry in accepted:
+        if not admission:
+            # Backward compatibility with logs written before the full
+            # admission stream was introduced.
+            admission = sorted(
+                list(commit_log.accepted_appends)
+                + list(commit_log.accepted_refreshes),
+                key=lambda entry: tuple(entry.get("token", (0, 0))),
+            )
+        for entry in admission:
             proposal = dict(entry.get("proposal", {}))
             transactions.append(
                 WakeTransaction(
@@ -2040,7 +2282,24 @@ class TrainingWakeMixin:
                     age_advance=int(commit_log.age_advance),
                 )
             )
-        self._apply_transaction_proposals(transactions, replay=True)
+        replay_log = self._apply_transaction_proposals(transactions, replay=True)
+        expected_actions = {
+            tuple(entry.get("token", (0, 0))): str(entry.get("action", ""))
+            for entry in admission
+            if entry.get("action") is not None
+        }
+        actual_actions = {
+            tuple(entry.get("token", (0, 0))): str(entry.get("action", ""))
+            for entry in replay_log.admission_results or ()
+        }
+        if expected_actions and actual_actions != expected_actions:
+            raise RuntimeError(
+                "distributed Wake admission replay diverged: "
+                f"expected={expected_actions}, got={actual_actions}"
+            )
+        self._apply_committed_structural_evidence(
+            tuple(commit_log.structural_evidence or ())
+        )
 
     def commit_wake_transactions(
         self,
@@ -2126,6 +2385,7 @@ class TrainingWakeMixin:
         flat: Mapping[str, Tensor],
         age_base_offsets: Optional[Sequence[int]] = None,
         defer_commit: bool = False,
+        distributed_max_depth: Optional[int] = None,
     ) -> list[Dict[str, Any]]:
         """Run the Retweet shared-snapshot Wake transaction.
 
@@ -2177,6 +2437,7 @@ class TrainingWakeMixin:
             frontier_block_sparse=True,
             functional_controller_state=defer_commit,
             defer_commit=defer_commit,
+            distributed_max_depth=distributed_max_depth,
         )
 
     def _train_wake_sequence_packed_impl(
@@ -2198,6 +2459,7 @@ class TrainingWakeMixin:
         commit_working_state: bool = False,
         frontier_block_sparse: bool = False,
         defer_commit: bool = False,
+        distributed_max_depth: Optional[int] = None,
     ) -> list[Dict[str, Any]]:
         """Run the tensor-backed causal Wake transaction implementation.
 
@@ -2247,6 +2509,12 @@ class TrainingWakeMixin:
             device=self.device,
             dtype=torch.long,
         )
+        local_max_depth = max(lengths)
+        max_depth = (
+            max(local_max_depth, int(distributed_max_depth))
+            if distributed_max_depth is not None
+            else local_max_depth
+        )
         active_rows_by_time = tuple(
             torch.as_tensor(
                 [
@@ -2257,7 +2525,7 @@ class TrainingWakeMixin:
                 device=self.device,
                 dtype=torch.long,
             )
-            for event_index in range(max(lengths))
+            for event_index in range(max_depth)
         )
 
         leaf_count = len(self.tree.leaf_ids)
@@ -2405,6 +2673,14 @@ class TrainingWakeMixin:
                 if functional_controller_state
                 else None
             )
+            distributed_controller_runtime = None
+            if functional_controller_state and defer_commit:
+                candidate_runtime = getattr(self, "distributed_runtime", None)
+                if (
+                    candidate_runtime is not None
+                    and candidate_runtime.is_distributed
+                ):
+                    distributed_controller_runtime = candidate_runtime
             # Everything below this point is independent of recurrent
             # working memory. Build it once for all flat rows so the time loop
             # only performs the causal working-memory/controller transition.
@@ -2657,6 +2933,14 @@ class TrainingWakeMixin:
 
             for event_index, active in enumerate(active_rows_by_time):
                 if active.numel() == 0:
+                    if (
+                        surprise_state is not None
+                        and distributed_controller_runtime is not None
+                    ):
+                        surprise_state = self._sync_empty_distributed_surprise_depth(
+                            surprise_state,
+                            distributed_controller_runtime,
+                        )
                     continue
                 flat_rows = offsets_tensor.index_select(0, active) + event_index
                 working_delta = self.tree.working_memory.make_trainable_rows(
@@ -2750,6 +3034,7 @@ class TrainingWakeMixin:
                         ),
                         controller_context_zeros,
                         surprise_state,
+                        distributed_runtime=distributed_controller_runtime,
                     )
                 if profile_enabled:
                     self._wake_profile_stop("controller")

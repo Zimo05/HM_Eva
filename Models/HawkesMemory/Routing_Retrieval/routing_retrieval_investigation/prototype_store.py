@@ -143,7 +143,6 @@ class NodePrototypeStore(nn.Module):
 
         weights = node_weights.to(device=z.device, dtype=z.dtype)
         batch_count = weights.sum(dim=0)
-        active = batch_count > 0.0
         batch_mean = torch.einsum("bn,bd->nd", weights, z)
         batch_mean = batch_mean / batch_count.clamp_min(1e-12).unsqueeze(-1)
         centered = z.unsqueeze(1) - batch_mean.unsqueeze(0)
@@ -153,8 +152,42 @@ class NodePrototypeStore(nn.Module):
             centered.square(),
         )
 
-        old_count = self.count
-        total = old_count + batch_count
+        self.update_weighted_sufficient_statistics(
+            batch_count,
+            batch_mean,
+            batch_m2,
+        )
+
+    @torch.no_grad()
+    def update_weighted_sufficient_statistics(
+        self,
+        batch_count: Tensor,
+        batch_mean: Tensor,
+        batch_m2: Tensor,
+    ) -> None:
+        """Merge one weighted batch represented by Welford statistics.
+
+        Distributed Global updates use this form after reducing each rank's
+        per-node ``(count, mean, m2)`` statistics.  Merging the aggregate
+        keeps the result identical on every rank without gathering event
+        representations or replaying rank-local update order.
+        """
+        node_count = len(self.node_ids)
+        if (
+            batch_count.ndim != 1
+            or batch_count.shape[0] != node_count
+            or batch_mean.shape != (node_count, self.feature_dim)
+            or batch_m2.shape != (node_count, self.feature_dim)
+        ):
+            raise ValueError(
+                "weighted sufficient statistics must have shapes "
+                "[N], [N, D], and [N, D]"
+            )
+        if batch_count.device != self.count.device:
+            raise ValueError("weighted statistics must share the store device")
+
+        active = batch_count > 0.0
+        total = self.count + batch_count
         mean_delta = batch_mean - self.mean
         merged_mean = self.mean + (
             mean_delta
@@ -163,19 +196,70 @@ class NodePrototypeStore(nn.Module):
         cross = (
             mean_delta.square()
             * (
-                old_count * batch_count
+                self.count * batch_count
                 / total.clamp_min(1e-12)
             ).unsqueeze(-1)
         )
         merged_m2 = self.m2 + batch_m2 + cross
 
-        self.count.copy_(torch.where(active, total, old_count))
+        self.count.copy_(torch.where(active, total, self.count))
         self.mean.copy_(
             torch.where(active.unsqueeze(-1), merged_mean, self.mean)
         )
         self.m2.copy_(
             torch.where(active.unsqueeze(-1), merged_m2, self.m2)
         )
+
+    @torch.no_grad()
+    def frontier_sufficient_statistics(
+        self,
+        z: Tensor,
+        node_indices: Tensor,
+        responsibility: Tensor,
+        mask: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return per-node ``(count, sum, squared-sum)`` statistics."""
+        expected = node_indices.shape
+        if (
+            z.ndim != 2
+            or node_indices.ndim != 2
+            or responsibility.shape != expected
+            or mask.shape != expected
+            or expected[0] != z.size(0)
+        ):
+            raise ValueError(
+                "frontier tensors must align as [B, K] with z [B, D]"
+            )
+        if node_indices.dtype != torch.long or mask.dtype != torch.bool:
+            raise ValueError("node_indices must be long and mask must be bool")
+        validate_inputs = getattr(
+            self,
+            "validate_update_inputs",
+            responsibility.device.type != "cuda",
+        )
+        if validate_inputs and bool(
+            (responsibility.masked_select(mask) < 0.0).any()
+        ):
+            raise ValueError("responsibility must be non-negative")
+
+        node_count = len(self.node_ids)
+        safe_indices = node_indices.clamp_min(0)
+        direct = responsibility.new_zeros(z.size(0), node_count)
+        direct.scatter_add_(
+            1,
+            safe_indices,
+            responsibility.masked_fill(~mask, 0.0),
+        )
+        node_weights = direct @ self.ancestor_matrix.to(
+            device=direct.device,
+            dtype=direct.dtype,
+        )
+        batch_count = node_weights.sum(dim=0)
+        batch_sum = node_weights.transpose(0, 1) @ z
+        batch_second_moment = node_weights.transpose(0, 1) @ z.square()
+        # Counts, sums, and squared sums are additive across ranks.  The
+        # caller converts them to Welford ``(mean, m2)`` after all-reduce.
+        return batch_count, batch_sum, batch_second_moment
 
     @torch.no_grad()
     def update_leaf_responsibility(

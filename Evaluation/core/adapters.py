@@ -26,6 +26,32 @@ def python_for(args) -> str:
     return args.python_executable or sys.executable
 
 
+def _retweet_hm_torchrun_command(command: list[str], python: str, args) -> list[str]:
+    """Wrap only Retweet HM training in the requested multi-process launcher."""
+    process_count = int(getattr(args, "hm_num_gpus", 1) or 1)
+    if process_count <= 1:
+        return command
+    # ``torchrun`` must execute the training script directly; passing the
+    # Python interpreter as a script argument would silently start one worker
+    # instead of the intended process group.  Prefer the launcher next to the
+    # selected interpreter so ``--python`` remains an isolated environment.
+    python_path = Path(python)
+    sibling = python_path.with_name("torchrun")
+    launcher = (
+        str(sibling)
+        if sibling.is_file() and os.access(sibling, os.X_OK)
+        else "torchrun"
+    )
+    if command and command[0] == python:
+        command = command[1:]
+    return [
+        launcher,
+        "--standalone",
+        f"--nproc_per_node={process_count}",
+        *command,
+    ]
+
+
 def device_index(device: str) -> str:
     if device == "auto":
         try:
@@ -608,6 +634,8 @@ def stationary_command(
                 "0.95",
             ]
         env["PYTHONPATH"] = os.pathsep.join((str(MODELS_ROOT / "HawkesMemory"), str(memory), env.get("PYTHONPATH", "")))
+        if spec.dataset == "retweet":
+            command = _retweet_hm_torchrun_command(command, python, args)
         return command, memory, env
     raise KeyError(f"unsupported model: {spec.model}")
 

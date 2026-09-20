@@ -236,6 +236,10 @@ class CommitLog:
     age_advance: int = 0
     controller_stat_delta: Any = field(default_factory=dict)
     structural_evidence: Any = field(default_factory=tuple)
+    # Every proposal and its admission result, including ``queue``.  The
+    # append/refresh arrays above are retained as compact result summaries,
+    # while this stream is the authoritative deterministic Bank replay log.
+    admission_results: Any = field(default_factory=tuple)
     state_hash: str = ""
 
     def to_payload(self) -> dict[str, Any]:
@@ -250,6 +254,7 @@ class CommitLog:
             age_advance=int(payload.get("age_advance", 0)),
             controller_stat_delta=payload.get("controller_stat_delta", {}),
             structural_evidence=payload.get("structural_evidence", ()),
+            admission_results=payload.get("admission_results", ()),
             state_hash=str(payload.get("state_hash", "")),
         )
 

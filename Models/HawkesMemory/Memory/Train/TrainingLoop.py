@@ -950,6 +950,122 @@ class TrainingLoopMixin:
         ).strip().casefold()
         return family == "retweet" and mode == "snapshot"
 
+    def _reduce_retweet_wake_statistics(
+        self,
+        runtime: Any,
+        *,
+        wake_prediction: float,
+        wake_wm: float,
+        writes: int,
+        append_writes: int,
+        refresh_writes: int,
+        write_decisions: int,
+        memorizes: int,
+        queue_splits: int,
+        event_count: int,
+        wake_action_counts: Mapping[str, int],
+        gate_probability_totals: Mapping[str, float],
+        gate_activation_totals: Mapping[str, float],
+        novelty_total: float,
+        max_similarity_total: float,
+        similarity_count_total: float,
+        frontier_size_total: float,
+        frontier_visited_total: float,
+        frontier_branch_total: float,
+        expansion_utility_total: float,
+        frontier_node_counts: Mapping[str, int],
+        max_gradient_norm: float,
+        sequence_owner_counts: Mapping[str, int],
+        memory_assignment_counts: Mapping[str, int],
+        posterior_entropy_total: float,
+        prior_posterior_kl_total: float,
+        owner_depth_total: float,
+        owner_lca_total: float,
+        write_candidates: int,
+        write_probes: int,
+        write_gate_passes: int,
+        write_utility_passes: int,
+        accepted_write_utility_sum: float,
+        harmful_writes: int,
+        raw_structural_mass: float,
+        structural_observations: int,
+    ) -> dict[str, Any]:
+        """Reduce additive Wake counters once per wavefront epoch.
+
+        The Retweet snapshot path shards sequences across ranks, so every
+        quantity consumed by Sleep or reported as an epoch metric must be a
+        global sum.  Keeping this as one fixed-layout tensor also guarantees
+        identical collective ordering on all ranks.
+        """
+
+        action_names = tuple(action.value for action in Action)
+        node_ids = tuple(self.tree.all_node_ids)
+        values = [
+            wake_prediction, wake_wm, writes, append_writes, refresh_writes,
+            write_decisions, memorizes, queue_splits, event_count,
+            novelty_total, max_similarity_total, similarity_count_total,
+            frontier_size_total, frontier_visited_total, frontier_branch_total,
+            expansion_utility_total, posterior_entropy_total,
+            prior_posterior_kl_total, owner_depth_total, owner_lca_total,
+            write_candidates, write_probes, write_gate_passes,
+            write_utility_passes, accepted_write_utility_sum, harmful_writes,
+            raw_structural_mass, structural_observations,
+        ]
+        values.extend(wake_action_counts.get(name, 0) for name in action_names)
+        values.extend(gate_probability_totals.get(name, 0.0) for name in action_names)
+        values.extend(gate_activation_totals.get(name, 0.0) for name in action_names)
+        values.extend(frontier_node_counts.get(node_id, 0) for node_id in node_ids)
+        values.extend(sequence_owner_counts.get(node_id, 0) for node_id in node_ids)
+        values.extend(memory_assignment_counts.get(node_id, 0) for node_id in node_ids)
+        stats = torch.tensor(values, device=self.device, dtype=torch.float64)
+        runtime.all_reduce(stats)
+        max_value = torch.tensor(
+            float(max_gradient_norm), device=self.device, dtype=torch.float64
+        )
+        runtime.all_reduce(max_value, op=torch.distributed.ReduceOp.MAX)
+
+        cursor = 0
+        def take() -> float:
+            nonlocal cursor
+            value = float(stats[cursor].item())
+            cursor += 1
+            return value
+
+        result: dict[str, Any] = {}
+        for name in (
+            "wake_prediction", "wake_wm", "writes", "append_writes",
+            "refresh_writes", "write_decisions", "memorizes", "queue_splits",
+            "event_count", "novelty_total", "max_similarity_total",
+            "similarity_count_total", "frontier_size_total",
+            "frontier_visited_total", "frontier_branch_total",
+            "expansion_utility_total", "posterior_entropy_total",
+            "prior_posterior_kl_total", "owner_depth_total", "owner_lca_total",
+            "write_candidates", "write_probes", "write_gate_passes",
+            "write_utility_passes", "accepted_write_utility_sum",
+            "harmful_writes", "raw_structural_mass", "structural_observations",
+        ):
+            result[name] = take()
+        result["wake_action_counts"] = Counter(
+            {name: int(round(take())) for name in action_names}
+        )
+        result["gate_probability_totals"] = {
+            name: take() for name in action_names
+        }
+        result["gate_activation_totals"] = {
+            name: take() for name in action_names
+        }
+        result["frontier_node_counts"] = Counter(
+            {node_id: int(round(take())) for node_id in node_ids}
+        )
+        result["sequence_owner_counts"] = Counter(
+            {node_id: int(round(take())) for node_id in node_ids}
+        )
+        result["memory_assignment_counts"] = Counter(
+            {node_id: int(round(take())) for node_id in node_ids}
+        )
+        result["max_gradient_norm"] = float(max_value.item())
+        return result
+
     def _iter_distributed_snapshot_batches(
         self,
         dataset: Sequence[Mapping[str, Tensor]],
@@ -1389,7 +1505,22 @@ class TrainingLoopMixin:
                 )
             for wavefront_index, wake_batch in wake_batches:
                 if distributed_snapshot_wake:
+                    local_depth = 0 if wake_batch is None else max(
+                        (int(value) for value in wake_batch.get("lengths", ())),
+                        default=0,
+                    )
+                    depth_tensor = torch.tensor(
+                        [local_depth], device=self.device, dtype=torch.long
+                    )
+                    distributed_runtime.all_reduce(
+                        depth_tensor,
+                        op=torch.distributed.ReduceOp.MAX,
+                    )
+                    distributed_max_depth = int(depth_tensor.item())
                     if wake_batch is None:
+                        self.synchronize_distributed_controller_depths(
+                            distributed_max_depth
+                        )
                         self._last_wake_snapshot_results = []
                         transaction_batch = WakeTransactionBatch(
                             transactions=(),
@@ -1412,6 +1543,7 @@ class TrainingLoopMixin:
                             frontier_rows=wake_batch["frontier_rows"],
                             flat=wake_batch["flat"],
                             age_base_offsets=wake_batch["age_base_offsets"],
+                            distributed_max_depth=distributed_max_depth,
                         )
                     batch_results = self.commit_wake_transactions(
                         transaction_batch
@@ -1592,6 +1724,85 @@ class TrainingLoopMixin:
                 if profile_report:
                     print(profile_report)
             wake_seconds = time.perf_counter() - wake_started
+
+            if distributed_snapshot_wake:
+                reduced = self._reduce_retweet_wake_statistics(
+                    distributed_runtime,
+                    wake_prediction=wake_prediction,
+                    wake_wm=wake_wm,
+                    writes=writes,
+                    append_writes=append_writes,
+                    refresh_writes=refresh_writes,
+                    write_decisions=write_decisions,
+                    memorizes=memorizes,
+                    queue_splits=queue_splits,
+                    event_count=event_count,
+                    wake_action_counts=wake_action_counts,
+                    gate_probability_totals=gate_probability_totals,
+                    gate_activation_totals=gate_activation_totals,
+                    novelty_total=novelty_total,
+                    max_similarity_total=max_similarity_total,
+                    similarity_count_total=similarity_count_total,
+                    frontier_size_total=frontier_size_total,
+                    frontier_visited_total=frontier_visited_total,
+                    frontier_branch_total=frontier_branch_total,
+                    expansion_utility_total=expansion_utility_total,
+                    frontier_node_counts=frontier_node_counts,
+                    max_gradient_norm=max_gradient_norm,
+                    sequence_owner_counts=sequence_owner_counts,
+                    memory_assignment_counts=memory_assignment_counts,
+                    posterior_entropy_total=posterior_entropy_total,
+                    prior_posterior_kl_total=prior_posterior_kl_total,
+                    owner_depth_total=owner_depth_total,
+                    owner_lca_total=owner_lca_total,
+                    write_candidates=write_candidates,
+                    write_probes=write_probes,
+                    write_gate_passes=write_gate_passes,
+                    write_utility_passes=write_utility_passes,
+                    accepted_write_utility_sum=accepted_write_utility_sum,
+                    harmful_writes=harmful_writes,
+                    raw_structural_mass=raw_structural_mass,
+                    structural_observations=structural_observations,
+                )
+                wake_prediction = reduced["wake_prediction"]
+                wake_wm = reduced["wake_wm"]
+                writes = int(round(reduced["writes"]))
+                append_writes = int(round(reduced["append_writes"]))
+                refresh_writes = int(round(reduced["refresh_writes"]))
+                write_decisions = int(round(reduced["write_decisions"]))
+                memorizes = int(round(reduced["memorizes"]))
+                queue_splits = int(round(reduced["queue_splits"]))
+                event_count = int(round(reduced["event_count"]))
+                wake_action_counts = reduced["wake_action_counts"]
+                gate_probability_totals = reduced["gate_probability_totals"]
+                gate_activation_totals = reduced["gate_activation_totals"]
+                novelty_total = reduced["novelty_total"]
+                max_similarity_total = reduced["max_similarity_total"]
+                similarity_count_total = reduced["similarity_count_total"]
+                frontier_size_total = reduced["frontier_size_total"]
+                frontier_visited_total = reduced["frontier_visited_total"]
+                frontier_branch_total = reduced["frontier_branch_total"]
+                expansion_utility_total = reduced["expansion_utility_total"]
+                frontier_node_counts = reduced["frontier_node_counts"]
+                max_gradient_norm = reduced["max_gradient_norm"]
+                sequence_owner_counts = reduced["sequence_owner_counts"]
+                memory_assignment_counts = reduced["memory_assignment_counts"]
+                posterior_entropy_total = reduced["posterior_entropy_total"]
+                prior_posterior_kl_total = reduced["prior_posterior_kl_total"]
+                owner_depth_total = reduced["owner_depth_total"]
+                owner_lca_total = reduced["owner_lca_total"]
+                write_candidates = int(round(reduced["write_candidates"]))
+                write_probes = int(round(reduced["write_probes"]))
+                write_gate_passes = int(round(reduced["write_gate_passes"]))
+                write_utility_passes = int(round(reduced["write_utility_passes"]))
+                accepted_write_utility_sum = reduced[
+                    "accepted_write_utility_sum"
+                ]
+                harmful_writes = int(round(reduced["harmful_writes"]))
+                raw_structural_mass = reduced["raw_structural_mass"]
+                structural_observations = int(
+                    round(reduced["structural_observations"])
+                )
 
             # Wake Compute is rank-local, but Sleep consumes one global
             # responsibility matrix. Gather only those compact rows here;

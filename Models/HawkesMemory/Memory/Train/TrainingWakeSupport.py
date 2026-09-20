@@ -1752,14 +1752,38 @@ class TrainingWakeSupportMixin:
         *,
         accepted_tokens: Sequence[tuple[int, int]] = (),
     ) -> None:
-        """Discard non-persistent structural probes.
+        """Record Retweet snapshot evidence at the Commit boundary.
 
-        Kept as a checkpoint/call-site compatibility boundary.  Probation or
-        rejected candidates must never become Sleep/Split evidence; only rows
-        promoted into ``EpisodicMemory`` may carry structural weight.
+        The ordered path intentionally keeps its historical discard boundary:
+        probation/rejected candidates cannot silently drive Sleep.  Retweet
+        snapshot uses CommitLog ownership, so retaining the detached evidence
+        is safe and lets the rank-0 transaction stream replay it on peers.
         """
-        del records, accepted_tokens
-        self.sleep_state["structural_evidence_buffer"] = {}
+        if not bool(getattr(self, "_uses_retweet_snapshot_wake_path", lambda: False)()):
+            del records, accepted_tokens
+            self.sleep_state["structural_evidence_buffer"] = {}
+            return
+        buffer = self.sleep_state.setdefault("structural_evidence_buffer", {})
+        if not isinstance(buffer, dict):
+            buffer = {}
+        else:
+            buffer = {
+                str(owner): list(values)
+                for owner, values in buffer.items()
+                if isinstance(values, (tuple, list))
+            }
+        cpuize = getattr(self, "_cpuize_transaction_value", lambda value: value)
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            owner_id = str(record.get("owner_id", "root"))
+            compact = {
+                key: cpuize(value)
+                for key, value in record.items()
+                if key != "item"
+            }
+            buffer.setdefault(owner_id, []).append(compact)
+        self.sleep_state["structural_evidence_buffer"] = dict(buffer)
 
     def _finalize_write_probe_batch(
         self,

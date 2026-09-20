@@ -612,6 +612,31 @@ class FrontierRoutingRetrieval(nn.Module):
             selected_nodes,
             torch.ones_like(selected_values),
         )
+        self.update_expansion_gain_sufficient_statistics(sums, counts)
+
+    @torch.no_grad()
+    def update_expansion_gain_sufficient_statistics(
+        self,
+        sums: Tensor,
+        counts: Tensor,
+    ) -> None:
+        """Apply an EMA update from per-node gain sums and visit counts.
+
+        The distributed Global path all-reduces these compact sufficient
+        statistics so every rank applies the same gain update without
+        gathering rank-local event rows.
+        """
+        self._sync_gain_tensor()
+        if (
+            sums.ndim != 1
+            or counts.ndim != 1
+            or sums.shape != self._expansion_gain_tensor.shape
+            or counts.shape != self._expansion_gain_tensor.shape
+        ):
+            raise ValueError("gain sufficient statistics must have shape [N]")
+        if sums.device != self._expansion_gain_tensor.device:
+            raise ValueError("gain statistics must share the frontier device")
+        decay = self.config.expansion_gain_decay
         old = self._expansion_gain_tensor.to(sums)
         updated = decay * old + (1.0 - decay) * (
             sums / counts.clamp_min(1.0)

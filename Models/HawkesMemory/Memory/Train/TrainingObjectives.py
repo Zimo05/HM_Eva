@@ -58,6 +58,174 @@ class TrainingObjectivesMixin:
         means = sums / counts.clamp_min(1.0).reshape(count_shape)
         return means, counts
 
+    def _distributed_reliability_statistics(
+        self,
+        teacher: Tensor | None,
+        student: Tensor | None,
+        node_indices: Tensor | None,
+        mask: Tensor | None,
+        *,
+        distributed_runtime: Any,
+    ) -> tuple[float, float, float, float]:
+        """All-reduce per-node Controller-teacher sufficient statistics.
+
+        ``child_teacher_reliability`` intentionally averages node means, not
+        raw rows.  Reducing only its final scalar would therefore make the
+        result depend on rank-local node coverage.  Reduce counts and the
+        confidence/JS sums for every node, then perform the same observed-node
+        mean on every rank.
+        """
+        node_count = len(self.tree.all_node_ids)
+        if teacher is None:
+            statistics = torch.zeros(
+                3,
+                node_count,
+                device=self.device,
+                dtype=torch.float64,
+            )
+        else:
+            statistics = torch.zeros(
+                3,
+                node_count,
+                device=teacher.device,
+                dtype=torch.float64,
+            )
+            if mask is not None and bool(mask.any()):
+                q = teacher[mask].detach().to(torch.float64).clamp_min(1e-12)
+                p = student[mask].detach().to(torch.float64).clamp_min(1e-12)
+                q = q / q.sum(dim=-1, keepdim=True)
+                p = p / p.sum(dim=-1, keepdim=True)
+                indices = node_indices[mask]
+                counts = statistics[0]
+                counts.index_add_(
+                    0,
+                    indices,
+                    torch.ones_like(indices, dtype=statistics.dtype),
+                )
+                confidence_rows = (
+                    1.0
+                    + (q * q.log()).sum(dim=-1) / math.log(2.0)
+                ).clamp(0.0, 1.0)
+                statistics[1].index_add_(0, indices, confidence_rows)
+                mixture = 0.5 * (q + p)
+                js_rows = 0.5 * (
+                    q * (q.log() - mixture.clamp_min(1e-12).log())
+                ).sum(dim=-1)
+                js_rows = js_rows + 0.5 * (
+                    p * (p.log() - mixture.clamp_min(1e-12).log())
+                ).sum(dim=-1)
+                statistics[2].index_add_(0, indices, js_rows.clamp_min(0.0))
+        distributed_runtime.all_reduce(statistics)
+        counts = statistics[0]
+        observed = counts > 0.0
+        if not bool(observed.any()):
+            return 0.0, 0.0, 0.0, 0.0
+        confidence = statistics[1] / counts.clamp_min(1.0)
+        js = statistics[2] / counts.clamp_min(1.0)
+        observed_confidence = confidence[observed].mean()
+        observed_js = js[observed]
+        observed_alignment = (1.0 - js / math.log(2.0)).clamp(0.0, 1.0)
+        return (
+            float(observed_confidence.item()),
+            float(observed_confidence.item()),
+            float(observed_js.mean().item()),
+            float(observed_alignment[observed].mean().item()),
+        )
+
+    def _synchronize_distributed_frontier_state(
+        self,
+        *,
+        distributed_runtime: Any,
+        z: Tensor | None,
+        frontier_node_indices: Tensor | None,
+        posterior: Tensor | None,
+        frontier_mask: Tensor | None,
+        expanded_node_indices: Tensor | None,
+        observed_gain: Tensor | None,
+        expanded_mask: Tensor | None,
+        regional_node_indices: Tensor | None,
+        regional_gain: Tensor | None,
+    ) -> None:
+        """Apply identical prototype/gain updates from all-rank statistics."""
+        prototypes = self.tree.frontier_routing.prototypes
+        node_count = len(self.tree.all_node_ids)
+        feature_dim = int(prototypes.feature_dim)
+        if z is None:
+            statistics = torch.zeros(
+                node_count + 2 * node_count * feature_dim,
+                device=self.device,
+                dtype=prototypes.mean.dtype,
+            )
+        else:
+            counts, sums, second = prototypes.frontier_sufficient_statistics(
+                z.detach(),
+                frontier_node_indices.detach(),
+                posterior.detach(),
+                frontier_mask.detach(),
+            )
+            statistics = torch.cat((
+                counts.to(prototypes.mean.dtype),
+                sums.to(prototypes.mean.dtype).reshape(-1),
+                second.to(prototypes.mean.dtype).reshape(-1),
+            ))
+        distributed_runtime.all_reduce(statistics)
+        counts = statistics[:node_count]
+        offset = node_count
+        sums = statistics[offset:offset + node_count * feature_dim].reshape(
+            node_count, feature_dim
+        )
+        second = statistics[offset + node_count * feature_dim:].reshape(
+            node_count, feature_dim
+        )
+        mean = sums / counts.clamp_min(1e-12).unsqueeze(-1)
+        m2 = (
+            second - counts.unsqueeze(-1) * mean.square()
+        ).clamp_min(0.0)
+        prototypes.update_weighted_sufficient_statistics(counts, mean, m2)
+
+        frontier = self.tree.frontier_routing
+        frontier._sync_gain_tensor()
+        gain_dtype = frontier._expansion_gain_tensor.dtype
+
+        def gain_statistics(
+            node_indices: Tensor | None,
+            values: Tensor | None,
+            mask: Tensor | None,
+        ) -> Tensor:
+            if node_indices is None:
+                return torch.zeros(
+                    2 * node_count,
+                    device=self.device,
+                    dtype=gain_dtype,
+                )
+            selected_nodes = node_indices.detach().masked_select(mask.detach())
+            selected_values = values.detach().masked_select(mask.detach()).clamp_min(0.0)
+            sums = torch.zeros(
+                node_count,
+                device=selected_values.device,
+                dtype=gain_dtype,
+            )
+            counts = torch.zeros_like(sums)
+            if selected_nodes.numel():
+                sums.scatter_add_(0, selected_nodes, selected_values.to(gain_dtype))
+                counts.scatter_add_(
+                    0,
+                    selected_nodes,
+                    torch.ones_like(selected_values, dtype=gain_dtype),
+                )
+            return torch.cat((sums, counts))
+
+        for node_indices, values, mask in (
+            (expanded_node_indices, observed_gain, expanded_mask),
+            (regional_node_indices, regional_gain, None if regional_node_indices is None else torch.ones_like(regional_node_indices, dtype=torch.bool)),
+        ):
+            gain_stats = gain_statistics(node_indices, values, mask)
+            distributed_runtime.all_reduce(gain_stats)
+            frontier.update_expansion_gain_sufficient_statistics(
+                gain_stats[:node_count],
+                gain_stats[node_count:],
+            )
+
     def _probe_leaf_local_theta(self, leaf_id: str) -> Tensor:
         """Leaf parameters whose only trainable term is its local offset."""
         fixed = self.tree.base_semantic_theta(leaf_id).detach()
@@ -998,13 +1166,24 @@ class TrainingObjectivesMixin:
             ).strip().casefold()
             == "snapshot"
         )
+        distributed_global = distributed_retweet_snapshot
         if distributed_retweet_snapshot:
             # Global samples are assigned contiguously to keep every rank's
             # local objective a disjoint contribution to the all-reduce.
             start, end = distributed_runtime.contiguous_shard(len(order))
             order = order[start:end]
-        batch_size = self.wake_config.route_balance_batch_size
+        # ``route_balance_batch_size`` is the optimizer's *global* batch
+        # contract.  A distributed Retweet rank owns only a contiguous shard;
+        # divide the contract before constructing local batches so all-reduced
+        # gradients still represent the same number of sequences as one GPU.
+        global_batch_size = int(self.wake_config.route_balance_batch_size)
+        batch_size = global_batch_size
         if distributed_retweet_snapshot:
+            batch_size = max(
+                1,
+                (global_batch_size + distributed_runtime.world_size - 1)
+                // distributed_runtime.world_size,
+            )
             # Every rank must enter the same number of collective calls.  A
             # final short shard therefore contributes an explicit empty local
             # batch; its zero gradients participate in the same SUM reduction
@@ -1154,6 +1333,37 @@ class TrainingObjectivesMixin:
                     )
                     max_gradient_norm = max(max_gradient_norm, gradient_norm)
                     self.optimizer.step()
+                    if distributed_global:
+                        observed_reliability = (
+                            self._distributed_reliability_statistics(
+                                None,
+                                None,
+                                None,
+                                None,
+                                distributed_runtime=distributed_runtime,
+                            )
+                        )
+                        if not self.training_config.controller_only_finetune:
+                            decay = self.wake_config.route_encoder_reliability_decay
+                            self.encoder_routing_reliability = (
+                                decay * self.encoder_routing_reliability
+                                + (1.0 - decay) * observed_reliability[0]
+                            )
+                            self.last_teacher_confidence = observed_reliability[1]
+                            self.last_teacher_student_js = observed_reliability[2]
+                            self.last_teacher_student_alignment = observed_reliability[3]
+                            self._synchronize_distributed_frontier_state(
+                                distributed_runtime=distributed_runtime,
+                                z=None,
+                                frontier_node_indices=None,
+                                posterior=None,
+                                frontier_mask=None,
+                                expanded_node_indices=None,
+                                observed_gain=None,
+                                expanded_mask=None,
+                                regional_node_indices=None,
+                                regional_gain=None,
+                            )
                     optimizer_steps += 1
                 continue
             sequence_count = len(moved_sequences)
@@ -1622,26 +1832,38 @@ class TrainingObjectivesMixin:
             )
             max_gradient_norm = max(max_gradient_norm, gradient_norm)
             self.optimizer.step()
-            reliability = child_teacher_reliability(
-                local["energy_teacher"],
-                local["student"],
-                memory_output["expanded_node_indices"].detach(),
-                memory_output["expanded_mask"].detach(),
-                node_count=len(self.tree.all_node_ids),
-            )
-            decay = self.wake_config.route_encoder_reliability_decay
-            reliability_status = torch.stack((
-                reliability["reliability"],
-                reliability["teacher_confidence"],
-                reliability["teacher_student_js"],
-                reliability["teacher_student_alignment"],
-            )).detach().cpu().tolist()
+            if distributed_global:
+                # Controller reliability, prototype moments, and frontier
+                # gains are persistent Global state too; synchronize their
+                # sufficient statistics before the next rank-local batch.
+                reliability_status = self._distributed_reliability_statistics(
+                    local["energy_teacher"],
+                    local["student"],
+                    memory_output["expanded_node_indices"].detach(),
+                    memory_output["expanded_mask"].detach(),
+                    distributed_runtime=distributed_runtime,
+                )
+            else:
+                reliability = child_teacher_reliability(
+                    local["energy_teacher"],
+                    local["student"],
+                    memory_output["expanded_node_indices"].detach(),
+                    memory_output["expanded_mask"].detach(),
+                    node_count=len(self.tree.all_node_ids),
+                )
+                reliability_status = torch.stack((
+                    reliability["reliability"],
+                    reliability["teacher_confidence"],
+                    reliability["teacher_student_js"],
+                    reliability["teacher_student_alignment"],
+                )).detach().cpu().tolist()
             (
                 observed_reliability,
                 observed_teacher_confidence,
                 observed_teacher_student_js,
                 observed_teacher_student_alignment,
             ) = reliability_status
+            decay = self.wake_config.route_encoder_reliability_decay
             if not self.training_config.controller_only_finetune:
                 self.encoder_routing_reliability = (
                     decay * self.encoder_routing_reliability
@@ -1659,26 +1881,44 @@ class TrainingObjectivesMixin:
             )
             reliability_updates += 1
             if not self.training_config.controller_only_finetune:
-                self.tree.frontier_routing.prototypes.update_frontier_responsibility(
-                    z_all.detach(),
-                    memory_output["frontier_node_indices"].detach(),
-                    posterior.detach(),
-                    frontier_mask.detach(),
-                )
-                self.tree.frontier_routing.update_expansion_gain(
-                    memory_output["expanded_node_indices"].detach(),
-                    local["observed_gain"],
-                    memory_output["expanded_mask"].detach(),
-                )
-                if regional["node_indices"].numel():
-                    regional_mask = torch.ones_like(
-                        regional["node_indices"], dtype=torch.bool
+                if distributed_global:
+                    self._synchronize_distributed_frontier_state(
+                        distributed_runtime=distributed_runtime,
+                        z=z_all,
+                        frontier_node_indices=memory_output[
+                            "frontier_node_indices"
+                        ],
+                        posterior=posterior,
+                        frontier_mask=frontier_mask,
+                        expanded_node_indices=memory_output[
+                            "expanded_node_indices"
+                        ],
+                        observed_gain=local["observed_gain"],
+                        expanded_mask=memory_output["expanded_mask"],
+                        regional_node_indices=regional["node_indices"],
+                        regional_gain=regional["refinement_gain"].clamp_min(0.0),
+                    )
+                else:
+                    self.tree.frontier_routing.prototypes.update_frontier_responsibility(
+                        z_all.detach(),
+                        memory_output["frontier_node_indices"].detach(),
+                        posterior.detach(),
+                        frontier_mask.detach(),
                     )
                     self.tree.frontier_routing.update_expansion_gain(
-                        regional["node_indices"].detach(),
-                        regional["refinement_gain"].clamp_min(0.0).detach(),
-                        regional_mask,
+                        memory_output["expanded_node_indices"].detach(),
+                        local["observed_gain"],
+                        memory_output["expanded_mask"].detach(),
                     )
+                    if regional["node_indices"].numel():
+                        regional_mask = torch.ones_like(
+                            regional["node_indices"], dtype=torch.bool
+                        )
+                        self.tree.frontier_routing.update_expansion_gain(
+                            regional["node_indices"].detach(),
+                            regional["refinement_gain"].clamp_min(0.0).detach(),
+                            regional_mask,
+                        )
             optimizer_steps += 1
             total_encoder_grad_scale += encoder_grad_scale
 

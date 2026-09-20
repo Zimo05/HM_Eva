@@ -1002,13 +1002,63 @@ def _device_environment(
     })
     if str(device).startswith("cuda"):
         env["DEVICE_TYPE"] = "cuda"
-        primary_device = int(str(device).split(":", 1)[1]) if ":" in str(device) else 0
+        primary_index = (
+            int(str(device).split(":", 1)[1]) if ":" in str(device) else 0
+        )
+        visible_device_ids = [
+            value.strip()
+            for value in env.get("CUDA_VISIBLE_DEVICES", "").split(",")
+            if value.strip()
+        ]
+        explicit_attention_ids = [
+            value.strip()
+            for value in env.get("ATTENTION_DEVICE_IDS", "").split(",")
+            if value.strip()
+        ]
+        requested_attention_gpus = max(1, int(attention_num_gpus))
+
+        if visible_device_ids:
+            if primary_index >= len(visible_device_ids):
+                raise ValueError(
+                    f"device {device!r} selects visible CUDA index "
+                    f"{primary_index}, but CUDA_VISIBLE_DEVICES only exposes "
+                    f"{len(visible_device_ids)} device(s): "
+                    f"{','.join(visible_device_ids)}"
+                )
+            primary_device_id = visible_device_ids[primary_index]
+            default_attention_ids = visible_device_ids[
+                primary_index:primary_index + requested_attention_gpus
+            ]
+        else:
+            primary_device_id = str(primary_index)
+            default_attention_ids = [
+                str(primary_index + offset)
+                for offset in range(requested_attention_gpus)
+            ]
+
+        attention_device_ids = (
+            explicit_attention_ids or default_attention_ids
+        )
+        if len(attention_device_ids) < requested_attention_gpus:
+            source = (
+                "ATTENTION_DEVICE_IDS"
+                if explicit_attention_ids
+                else "CUDA_VISIBLE_DEVICES"
+            )
+            raise ValueError(
+                f"attention_num_gpus={requested_attention_gpus} requires "
+                f"{requested_attention_gpus} CUDA device IDs, but {source} "
+                f"provides only {len(attention_device_ids)} usable ID(s): "
+                f"{','.join(attention_device_ids)}"
+            )
+
         # THP/upstream remains single-GPU.  Only the Attention Encoder gets
         # the additional visible devices for sequence-parallel training.
-        env["DEVICES"] = str(primary_device)
+        # Explicit attention IDs win; otherwise preserve the physical IDs
+        # already selected by CUDA_VISIBLE_DEVICES instead of renumbering them.
+        env["DEVICES"] = primary_device_id
         env["ATTENTION_DEVICE_IDS"] = ",".join(
-            str(primary_device + offset)
-            for offset in range(max(1, int(attention_num_gpus)))
+            attention_device_ids[:requested_attention_gpus]
         )
     else:
         env["DEVICE_TYPE"] = "cpu"

@@ -145,8 +145,9 @@ def split_train_internal_dev_ids(
 def build_routing_targets(
     pipeline: MultiAttentionEncoderPipeline,
     *,
+    include_path: bool = True,
     verbose: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor | None]:
     """Build per-sequence routing targets from leaf membership.
 
     Returns
@@ -154,9 +155,10 @@ def build_routing_targets(
     leaf_target : LongTensor [S]
         For each sequence (row of ``Z_matrix`` == global ID), the node index of
         its leaf.  ``-1`` if not found (ignored in the loss).
-    path_target : FloatTensor [S, N]
+    path_target : FloatTensor [S, N] or None
         Multi-label membership: 1 for every ancestor node (root..leaf) that
-        contains the sequence, else 0.
+        contains the sequence, else 0.  It is not allocated when path
+        supervision is disabled.
     """
     node_ids = pipeline.node_ids
     n = len(node_ids)
@@ -166,14 +168,17 @@ def build_routing_targets(
     leaf_nodes = [nid for nid in node_ids if pipeline.feature_extractor._is_leaf(nid)]
 
     leaf_target = torch.full((s,), -1, dtype=torch.long)
-    path_target = torch.zeros(s, n, dtype=torch.float32)
+    path_target = (
+        torch.zeros(s, n, dtype=torch.float32) if include_path else None
+    )
 
     # Multi-label membership: a node contains a sequence iff it is listed.
-    for nid in node_ids:
-        idx = id_to_idx[nid]
-        for gid in pipeline.node_sequences.get(nid, []):
-            if 0 <= gid < s:
-                path_target[gid, idx] = 1.0
+    if path_target is not None:
+        for nid in node_ids:
+            idx = id_to_idx[nid]
+            for gid in pipeline.node_sequences.get(nid, []):
+                if 0 <= gid < s:
+                    path_target[gid, idx] = 1.0
 
     # Leaf assignment.
     for nid in leaf_nodes:
@@ -186,6 +191,8 @@ def build_routing_targets(
     if verbose:
         print(f"[Targets] {n_assigned}/{s} sequences assigned to a leaf "
               f"({len(leaf_nodes)} leaves, {n} nodes total)")
+        if path_target is None:
+            print("[Targets] Path supervision disabled; skipped [S, N] target.")
     return leaf_target, path_target
 
 
@@ -310,40 +317,99 @@ class EncoderTrainer:
         if self.is_rank0:
             H_refined.backward(grad_H)
 
+    @torch.no_grad()
+    def _clip_gradients(self, max_norm: float) -> None:
+        """Clip tree and sequence gradients with one shared scale.
+
+        Sequence gradients have already been SUM-reduced and are identical on
+        every rank.  Rank 0 additionally owns the complete tree gradient, so
+        it computes the joint norm ``sqrt(||g_tree||^2 + ||g_seq||^2)`` and
+        broadcasts the resulting scale.  Applying that same scale everywhere
+        preserves the single-process relative update between both parameter
+        groups.
+        """
+        if max_norm <= 0:
+            return
+        parameters = self.tree_parameters + self.sequence_parameters
+        if not self.distributed:
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+            return
+
+        scale = torch.ones((), device=self.device, dtype=torch.float64)
+        if self.is_rank0:
+            total_sq = torch.zeros((), device=self.device, dtype=torch.float64)
+            for parameter in parameters:
+                if parameter.grad is not None:
+                    grad = parameter.grad.detach()
+                    total_sq.add_(grad.double().pow(2).sum())
+            total_norm = total_sq.sqrt()
+            max_norm_tensor = torch.tensor(
+                float(max_norm), device=self.device, dtype=torch.float64
+            )
+            scale = torch.clamp(
+                max_norm_tensor / (total_norm + 1e-6), max=1.0
+            )
+
+        dist.broadcast(scale, src=0)
+        for parameter in self.sequence_parameters:
+            if parameter.grad is not None:
+                parameter.grad.mul_(scale.to(parameter.grad.dtype))
+        if self.is_rank0:
+            for parameter in self.tree_parameters:
+                if parameter.grad is not None:
+                    parameter.grad.mul_(scale.to(parameter.grad.dtype))
+
     def _distributed_metrics(
         self,
-        totals: Dict[str, float],
-        count: int,
+        totals: Dict[str, Tuple[float, float]],
         correct: int,
         counted: int,
     ) -> Tuple[Dict[str, float], int, int]:
-        """Aggregate epoch sums for logging without changing autograd."""
-        if not self.distributed:
-            metrics = {
-                key: value / max(count, 1) for key, value in totals.items()
-            }
-            return metrics, correct, counted
-
-        # Keep the payload shape identical even when one rank has no valid
-        # leaf labels in its shard.
-        keys = ("route", "path", "recon", "total")
+        """Reduce raw metric numerators/denominators across all ranks."""
+        keys = ("route", "path", "recon")
         payload = torch.tensor(
-            [totals.get(key, 0.0) for key in keys]
-            + [float(count), float(correct), float(counted)],
+            [
+                value
+                for key in keys
+                for value in totals.get(key, (0.0, 0.0))
+            ]
+            + [float(correct), float(counted)],
             device=self.device,
             dtype=torch.float64,
         )
-        dist.all_reduce(payload, op=dist.ReduceOp.SUM)
-        global_count = max(float(payload[len(keys)].item()), 1.0)
-        metrics = {
-            key: float(payload[i].item()) / global_count
+        if self.distributed:
+            dist.all_reduce(payload, op=dist.ReduceOp.SUM)
+        global_totals = {
+            key: (
+                float(payload[2 * i].item()),
+                float(payload[2 * i + 1].item()),
+            )
             for i, key in enumerate(keys)
         }
+        metrics = self._metrics_from_stats(global_totals)
+        offset = 2 * len(keys)
         return (
             metrics,
-            int(round(payload[len(keys) + 1].item())),
-            int(round(payload[len(keys) + 2].item())),
+            int(round(payload[offset].item())),
+            int(round(payload[offset + 1].item())),
         )
+
+    def _metrics_from_stats(
+        self,
+        totals: Dict[str, Tuple[float, float]],
+    ) -> Dict[str, float]:
+        """Convert exact ``(numerator, denominator)`` pairs to means."""
+        metrics = {
+            key: numerator / denominator
+            for key, (numerator, denominator) in totals.items()
+            if denominator > 0
+        }
+        metrics["total"] = (
+            self.route_weight * metrics.get("route", 0.0)
+            + self.path_weight * metrics.get("path", 0.0)
+            + self.recon_weight * metrics.get("recon", 0.0)
+        )
+        return metrics
 
     def _set_training_mode(self, training: bool) -> None:
         for module in self.p.trainable_modules():
@@ -362,19 +428,25 @@ class EncoderTrainer:
         out,
         z_batch: torch.Tensor,
         leaf_t: torch.Tensor,
-        path_t: torch.Tensor,
+        path_t: torch.Tensor | None,
         global_normalize: bool = False,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+    ) -> Tuple[
+        torch.Tensor,
+        Dict[str, float],
+        Dict[str, Tuple[float, float]],
+    ]:
         route_prob = out.route_prob                      # [B, N]
         log_route = torch.log(route_prob.clamp_min(1e-9))
 
         valid = leaf_t >= 0
         losses: Dict[str, float] = {}
+        metric_stats: Dict[str, Tuple[float, float]] = {}
         total = torch.zeros((), device=self.device)
 
         # ---- Routing CE (to true leaf) ----
         if self.route_weight > 0:
             route_count = int(valid.sum().item())
+            route_sum_value = 0.0
             route_denom = self._global_count(route_count, global_normalize)
             if route_count:
                 route_sum = F.nll_loss(
@@ -384,9 +456,15 @@ class EncoderTrainer:
                 route_graph = route_sum / route_denom.to(route_sum.dtype)
                 total = total + self.route_weight * route_graph
                 losses["route"] = float(route_local.item())
+                route_sum_value = float(route_sum.detach().item())
+            metric_stats["route"] = (route_sum_value, float(route_count))
 
         # ---- Ancestor-path BCE (multi-label membership) ----
         if self.path_weight > 0:
+            if path_t is None:
+                raise RuntimeError(
+                    "path_weight > 0 requires path-supervision targets"
+                )
             path_count = int(route_prob.numel())
             path_denom = self._global_count(path_count, global_normalize)
             path_sum = F.binary_cross_entropy(
@@ -396,10 +474,15 @@ class EncoderTrainer:
             path_graph = path_sum / path_denom.to(path_sum.dtype)
             total = total + self.path_weight * path_graph
             losses["path"] = float(path_local.item())
+            metric_stats["path"] = (
+                float(path_sum.detach().item()),
+                float(path_count),
+            )
 
         # ---- Reconstruction of z from the target-leaf deterministic feature ----
         if self.recon_weight > 0:
             recon_count = int(z_batch[valid].numel())
+            recon_sum_value = 0.0
             recon_denom = self._global_count(recon_count, global_normalize)
             if valid.any():
                 det = out.deterministic_tree                 # [B, N, d]
@@ -416,9 +499,11 @@ class EncoderTrainer:
                 recon_graph = recon_sum / recon_denom.to(recon_sum.dtype)
                 total = total + self.recon_weight * recon_graph
                 losses["recon"] = float(recon_local.item())
+                recon_sum_value = float(recon_sum.detach().item())
+            metric_stats["recon"] = (recon_sum_value, float(recon_count))
 
         losses["total"] = float(total.item())
-        return total, losses
+        return total, losses, metric_stats
 
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -426,7 +511,7 @@ class EncoderTrainer:
         self,
         indices: torch.Tensor,
         leaf_t: torch.Tensor,
-        path_t: torch.Tensor,
+        path_t: torch.Tensor | None,
         train_pool_ids: Collection[int],
         batch_size: int,
     ) -> Dict[str, float]:
@@ -441,8 +526,7 @@ class EncoderTrainer:
         H_tree = p.forward_node_inputs(allowed_sequence_ids=train_pool_ids)
         H_refined = p.forward_structural(H_tree)
 
-        totals: Dict[str, float] = {}
-        examples = 0
+        totals: Dict[str, Tuple[float, float]] = {}
         correct = 0
         counted = 0
         indices = indices.to(self.device)
@@ -450,13 +534,18 @@ class EncoderTrainer:
             idx = indices[start:start + batch_size]
             z_batch = Z[idx]
             out = self._forward_batch(H_refined, z_batch)
-            _, parts = self._compute_loss(
-                out, z_batch, leaf_t[idx], path_t[idx]
+            _, _, batch_stats = self._compute_loss(
+                out,
+                z_batch,
+                leaf_t[idx],
+                path_t[idx] if path_t is not None else None,
             )
-            batch_n = int(idx.numel())
-            examples += batch_n
-            for key, value in parts.items():
-                totals[key] = totals.get(key, 0.0) + value * batch_n
+            for key, (numerator, denominator) in batch_stats.items():
+                old_numerator, old_denominator = totals.get(key, (0.0, 0.0))
+                totals[key] = (
+                    old_numerator + numerator,
+                    old_denominator + denominator,
+                )
 
             valid = leaf_t[idx] >= 0
             if valid.any():
@@ -464,9 +553,7 @@ class EncoderTrainer:
                 correct += int((pred == leaf_t[idx][valid]).sum().item())
                 counted += int(valid.sum().item())
 
-        metrics = {
-            key: value / max(examples, 1) for key, value in totals.items()
-        }
+        metrics = self._metrics_from_stats(totals)
         metrics["route_acc"] = correct / counted if counted else 0.0
         return metrics
 
@@ -495,9 +582,14 @@ class EncoderTrainer:
         p = self.p
         Z = p.Z_matrix                                   # [S, d]
         S = Z.shape[0]
-        leaf_t, path_t = build_routing_targets(p, verbose=self.is_rank0)
+        leaf_t, path_t = build_routing_targets(
+            p,
+            include_path=self.path_weight > 0,
+            verbose=self.is_rank0,
+        )
         leaf_t = leaf_t.to(self.device)
-        path_t = path_t.to(self.device)
+        if path_t is not None:
+            path_t = path_t.to(self.device)
         if strict_bootstrap is None:
             strict_bootstrap = split_manifest is not None
         if strict_bootstrap and split_manifest is None:
@@ -577,8 +669,7 @@ class EncoderTrainer:
         for epoch in range(1, epochs + 1):
             self._set_training_mode(True)
             order = self._global_order(train_idx.numel())
-            epoch_losses: Dict[str, float] = {}
-            n_batches = 0
+            epoch_stats: Dict[str, Tuple[float, float]] = {}
             correct = 0
             counted = 0
 
@@ -598,11 +689,11 @@ class EncoderTrainer:
                 H_refined, H_shared = self._shared_tree_batch(train_pool_ids)
                 out = self._forward_batch(H_shared, z_batch)
 
-                loss, parts = self._compute_loss(
+                loss, _, batch_stats = self._compute_loss(
                     out,
                     z_batch,
                     leaf_t[idx],
-                    path_t[idx],
+                    path_t[idx] if path_t is not None else None,
                     global_normalize=self.distributed,
                 )
 
@@ -619,25 +710,17 @@ class EncoderTrainer:
                     self._reduce_tree_gradient(H_refined, H_shared)
                     self._reduce_sequence_gradients()
 
-                if grad_clip > 0:
-                    if self.distributed:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.sequence_parameters, grad_clip
-                        )
-                        if self.is_rank0:
-                            torch.nn.utils.clip_grad_norm_(
-                                self.tree_parameters, grad_clip
-                            )
-                    else:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.tree_parameters + self.sequence_parameters,
-                            grad_clip,
-                        )
+                self._clip_gradients(grad_clip)
                 self.optimizer.step()
 
-                for key, value in parts.items():
-                    epoch_losses[key] = epoch_losses.get(key, 0.0) + value
-                n_batches += 1
+                for key, (numerator, denominator) in batch_stats.items():
+                    old_numerator, old_denominator = epoch_stats.get(
+                        key, (0.0, 0.0)
+                    )
+                    epoch_stats[key] = (
+                        old_numerator + numerator,
+                        old_denominator + denominator,
+                    )
 
                 valid = leaf_t[idx] >= 0
                 if valid.any():
@@ -646,7 +729,7 @@ class EncoderTrainer:
                     counted += int(valid.sum().item())
 
             train_metrics, correct, counted = self._distributed_metrics(
-                epoch_losses, n_batches, correct, counted
+                epoch_stats, correct, counted
             )
             train_metrics["route_acc"] = correct / counted if counted else 0.0
             if self.distributed:
@@ -993,6 +1076,7 @@ def main() -> None:
             "tree_owner": "rank0",
             "sequence_side": "sequence_data_parallel_replicas",
             "loss_normalization": "global_sum_over_global_valid_count",
+            "gradient_clipping": "joint_tree_sequence_scale",
         },
     }
     if "test_metrics" in training_result:

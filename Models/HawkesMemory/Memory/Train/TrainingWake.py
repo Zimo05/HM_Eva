@@ -1701,11 +1701,26 @@ class TrainingWakeMixin:
         sequence_indices: Sequence[int],
         *,
         wavefront_index: int,
+        commit_positions: Optional[Sequence[int]] = None,
     ) -> WakeTransactionBatch:
         """Convert Compute rows into a deterministic, gatherable transaction buffer."""
 
+        if commit_positions is None:
+            # A direct/single-process caller only has the current wavefront;
+            # its row order is already the physical order.  Distributed Wake
+            # supplies the global shuffled positions explicitly.
+            commit_positions = tuple(range(len(sequence_indices)))
+        if len(commit_positions) != len(sequence_indices):
+            raise ValueError(
+                "snapshot transaction commit positions do not align with "
+                "sequence indices"
+            )
         records: list[WakeTransaction] = []
-        for result, sequence_index in zip(results, sequence_indices):
+        for result, sequence_index, commit_position in zip(
+            results,
+            sequence_indices,
+            commit_positions,
+        ):
             proposals = list(result.get("write_proposals", ()))
             usage = result.get("usage_credits", {})
             metrics = {
@@ -1752,6 +1767,10 @@ class TrainingWakeMixin:
                         WakeTransaction(
                             sequence_index=int(sequence_index),
                             event_index=event_index,
+                            commit_order=(
+                                int(commit_position),
+                                event_index,
+                            ),
                             write_proposals=(
                                 proposal_payload,
                             ),
@@ -1785,6 +1804,7 @@ class TrainingWakeMixin:
                     WakeTransaction(
                         sequence_index=int(sequence_index),
                         event_index=0,
+                        commit_order=(int(commit_position), 0),
                         usage_credits=usage_payload,
                         age_advance=age_advance,
                         queue_split_evidence=queue_split_evidence,
@@ -1881,6 +1901,7 @@ class TrainingWakeMixin:
         self,
         *,
         wavefront_index: int = 0,
+        commit_positions: Optional[Sequence[int]] = None,
         **kwargs: Any,
     ) -> WakeTransactionBatch:
         """Compute Retweet Wake against one immutable snapshot.
@@ -1908,11 +1929,35 @@ class TrainingWakeMixin:
             results,
             sequence_indices,
             wavefront_index=wavefront_index,
+            commit_positions=commit_positions,
         )
 
     @staticmethod
     def _transaction_token(transaction: WakeTransaction) -> tuple[int, int]:
-        return int(transaction.sequence_index), int(transaction.event_index)
+        return transaction.commit_key()
+
+    @staticmethod
+    def _commit_entry_order(entry: Mapping[str, Any]) -> tuple[int, int]:
+        """Read a CommitLog physical-order key with legacy fallback."""
+
+        order = entry.get("commit_order")
+        if order is not None:
+            try:
+                values = tuple(order)
+                if len(values) >= 2:
+                    return int(values[0]), int(values[1])
+            except (TypeError, ValueError):
+                pass
+        token = entry.get("token")
+        if token is None:
+            token = (
+                entry.get("sequence_index", 0),
+                entry.get("event_index", 0),
+            )
+        try:
+            return int(token[0]), int(token[1])
+        except (TypeError, ValueError, IndexError):
+            return 0, 0
 
     def _memory_state_hash(self) -> str:
         """Hash the mutable memory/topology state for optional parity checks."""
@@ -1996,13 +2041,13 @@ class TrainingWakeMixin:
         variance = self.controller.surprise_variance
         observations = self.controller.surprise_observations
         decay = float(self.controller.surprise_ema_decay)
-        rows: list[tuple[int, torch.Tensor]] = []
+        rows: list[tuple[tuple[int, int], torch.Tensor]] = []
         for delta in deltas:
             values = delta.get("surprise_values")
             if values is None:
                 continue
             values = torch.as_tensor(values).reshape(-1)
-            rows.append((int(delta.get("sequence_index", 0)), values))
+            rows.append((self._commit_entry_order(delta), values))
         # The packed Controller updates its EMA once per event position using
         # all active sequences in that wavefront. Reconstruct the same
         # sufficient statistics after rank 0 gathers the sequence rows.
@@ -2052,10 +2097,7 @@ class TrainingWakeMixin:
                 if isinstance(proposal, Mapping):
                     proposals.append((transaction, proposal))
         proposals.sort(
-            key=lambda pair: (
-                int(pair[0].sequence_index),
-                int(pair[0].event_index),
-            )
+            key=lambda pair: self._transaction_token(pair[0])
         )
         # The ordered scalar path advances the logical clock before admitting
         # the final wavefront proposals.  Preserve that age semantics when the
@@ -2114,13 +2156,18 @@ class TrainingWakeMixin:
                 semantic_theta=self.tree.semantic_theta(owner_id).detach(),
                 decays=self.hawkes.decays.detach(),
             )
-            for (_, proposal), item, result in zip(rows, items, admission):
+            for (transaction, proposal), item, result in zip(
+                rows,
+                items,
+                admission,
+            ):
                 action = str(result["action"])
                 admission_results.append({
                     "token": (
                         int(proposal.get("sequence_index", 0)),
                         int(proposal.get("event_index", 0)),
                     ),
+                    "commit_order": self._transaction_token(transaction),
                     "owner_id": owner_id,
                     "proposal": self._cpuize_transaction_value(proposal),
                     "action": action,
@@ -2135,6 +2182,7 @@ class TrainingWakeMixin:
                             int(proposal.get("sequence_index", 0)),
                             int(proposal.get("event_index", 0)),
                         ),
+                        "commit_order": self._transaction_token(transaction),
                         "owner_id": owner_id,
                         "proposal": self._cpuize_transaction_value(proposal),
                         "action": action,
@@ -2170,6 +2218,7 @@ class TrainingWakeMixin:
         self._apply_controller_stat_deltas([
             {
                 "sequence_index": int(transaction.sequence_index),
+                "commit_order": self._transaction_token(transaction),
                 **transaction.controller_stat_delta,
             }
             for transaction in transactions
@@ -2185,13 +2234,17 @@ class TrainingWakeMixin:
                         int(transaction.sequence_index),
                         int(evidence.get("event_index", transaction.event_index)),
                     ),
+                    "commit_order": (
+                        self._transaction_token(transaction)[0],
+                        int(evidence.get("event_index", transaction.event_index)),
+                    ),
                     **{
                         key: self._cpuize_transaction_value(value)
                         for key, value in evidence.items()
                         if key != "item"
                     },
                 })
-        structural_evidence.sort(key=lambda item: tuple(item.get("token", (0, 0))))
+        structural_evidence.sort(key=self._commit_entry_order)
         self._apply_committed_structural_evidence(structural_evidence)
         if (
             admission_results
@@ -2209,6 +2262,7 @@ class TrainingWakeMixin:
                 {
                     "sequence_index": int(transaction.sequence_index),
                     "event_index": int(transaction.event_index),
+                    "commit_order": self._transaction_token(transaction),
                     **self._cpuize_transaction_value(
                         transaction.controller_stat_delta
                     ),
@@ -2220,7 +2274,7 @@ class TrainingWakeMixin:
             admission_results=tuple(
                 sorted(
                     admission_results,
-                    key=lambda item: tuple(item.get("token", (0, 0))),
+                    key=self._commit_entry_order,
                 )
             ),
             state_hash=self._memory_state_hash(),
@@ -2236,7 +2290,7 @@ class TrainingWakeMixin:
         # identical to rank 0 when the bank has finite capacity.
         admission = sorted(
             list(commit_log.admission_results or ()),
-            key=lambda entry: tuple(entry.get("token", (0, 0))),
+            key=self._commit_entry_order,
         )
         if not admission:
             # Backward compatibility with logs written before the full
@@ -2244,7 +2298,7 @@ class TrainingWakeMixin:
             admission = sorted(
                 list(commit_log.accepted_appends)
                 + list(commit_log.accepted_refreshes),
-                key=lambda entry: tuple(entry.get("token", (0, 0))),
+                key=self._commit_entry_order,
             )
         for entry in admission:
             proposal = dict(entry.get("proposal", {}))
@@ -2252,24 +2306,24 @@ class TrainingWakeMixin:
                 WakeTransaction(
                     sequence_index=int(entry.get("token", (0, 0))[0]),
                     event_index=int(entry.get("token", (0, 0))[1]),
+                    commit_order=self._commit_entry_order(entry),
                     write_proposals=(proposal,),
                 )
             )
         controller_deltas = sorted(
             list(commit_log.controller_stat_delta or ()),
-            key=lambda entry: (
-                int(entry.get("sequence_index", 0)),
-                int(entry.get("event_index", 0)),
-            ),
+            key=self._commit_entry_order,
         )
         for entry in controller_deltas:
             delta = dict(entry)
             delta.pop("sequence_index", None)
             delta.pop("event_index", None)
+            delta.pop("commit_order", None)
             transactions.append(
                 WakeTransaction(
                     sequence_index=int(entry.get("sequence_index", 0)),
                     event_index=int(entry.get("event_index", 0)),
+                    commit_order=self._commit_entry_order(entry),
                     controller_stat_delta=delta,
                 )
             )
@@ -2305,7 +2359,7 @@ class TrainingWakeMixin:
         self,
         transaction_batch: WakeTransactionBatch,
     ) -> list[Dict[str, Any]]:
-        """Gather, sort, commit on rank 0, and replay the compact CommitLog."""
+        """Gather, sort by physical Wake order, and replay one CommitLog."""
 
         runtime = getattr(self, "distributed_runtime", None)
         if runtime is None:

@@ -1032,6 +1032,37 @@ class MultiAttentionEncoderPipeline:
             if m is not None
         ]
 
+    def tree_side_modules(self) -> List[nn.Module]:
+        """Modules that build the shared tree representation.
+
+        The tree is intentionally owned by rank 0 in sequence-parallel
+        training.  Keeping this grouping explicit prevents the training loop
+        from accidentally replicating tree computation or reducing its
+        parameters as if they were sequence-side replicas.
+        """
+        return [
+            m
+            for m in (
+                self.node_embedder,
+                self.node_fusion,
+                self.relation_bias,
+                self.structural_block,
+            )
+            if m is not None
+        ]
+
+    def sequence_side_modules(self) -> List[nn.Module]:
+        """Modules replicated on every rank for local sequence batches."""
+        return [m for m in (self.cross_attention,) if m is not None]
+
+    def tree_side_parameters(self):
+        for module in self.tree_side_modules():
+            yield from module.parameters()
+
+    def sequence_side_parameters(self):
+        for module in self.sequence_side_modules():
+            yield from module.parameters()
+
     def trainable_parameters(self):
         for m in self.trainable_modules():
             yield from m.parameters()

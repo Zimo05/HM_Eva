@@ -34,6 +34,8 @@ def _validate_runtime(parser: argparse.ArgumentParser, args: argparse.Namespace)
         parser.error("--eval-batch-size must be positive")
     if hasattr(args, "hm_num_gpus") and args.hm_num_gpus <= 0:
         parser.error("--hm-num-gpus must be positive")
+    if hasattr(args, "attention_num_gpus") and args.attention_num_gpus <= 0:
+        parser.error("--attention-num-gpus must be positive")
     if sys.version_info < (3, 10):
         parser.error(
             "Evaluation 需要 Python 3.10+；当前入口由 "
@@ -69,16 +71,21 @@ def _validate_runtime(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if missing:
         parser.error(f"实验环境 {executable!r} 缺少依赖：{', '.join(missing)}。")
     hm_num_gpus = int(getattr(args, "hm_num_gpus", 1) or 1)
-    if (
-        hm_num_gpus > 1
-        and args.device != "cpu"
-        and runtime["cuda"]
-        and runtime["cuda_device_count"] < hm_num_gpus
+    attention_num_gpus = int(getattr(args, "attention_num_gpus", 1) or 1)
+    for option_name, requested_gpus in (
+        ("--hm-num-gpus", hm_num_gpus),
+        ("--attention-num-gpus", attention_num_gpus),
     ):
-        parser.error(
-            f"--hm-num-gpus {hm_num_gpus} requires at least that many CUDA devices; "
-            f"{executable!r} reports {runtime['cuda_device_count']}"
-        )
+        if (
+            requested_gpus > 1
+            and args.device != "cpu"
+            and runtime["cuda"]
+            and runtime["cuda_device_count"] < requested_gpus
+        ):
+            parser.error(
+                f"{option_name} {requested_gpus} requires at least that many CUDA devices; "
+                f"{executable!r} reports {runtime['cuda_device_count']}"
+            )
     if args.device.startswith("cuda"):
         if not runtime["cuda"]:
             if args.dry_run:
@@ -120,6 +127,15 @@ def stationary_args(*, dws: bool = False) -> argparse.Namespace:
         help=(
             "number of processes for the Retweet HM snapshot adapter; "
             "values greater than one launch torchrun"
+        ),
+    )
+    parser.add_argument(
+        "--attention-num-gpus",
+        type=int,
+        default=1,
+        help=(
+            "number of processes for the Attention Encoder sequence-parallel "
+            "stage; values greater than one launch torchrun"
         ),
     )
     parser.add_argument(

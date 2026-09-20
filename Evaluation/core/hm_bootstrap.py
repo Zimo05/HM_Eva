@@ -950,6 +950,7 @@ def _device_environment(
     device: str,
     batch_size: int,
     attention_batch_size: int,
+    attention_num_gpus: int,
     thp_epochs: int,
     attention_epochs: int,
     seed: int,
@@ -975,6 +976,7 @@ def _device_environment(
         "THP_DATA_PARALLEL": "0",
         "THP_SEED": str(int(seed)),
         "ATTENTION_BATCH_SIZE": str(max(1, int(attention_batch_size))),
+        "ATTENTION_NUM_GPUS": str(max(1, int(attention_num_gpus))),
         "ATTENTION_EPOCHS": str(max(1, int(attention_epochs))),
         "ATTENTION_SEED": str(int(seed)),
         "DATA_PATH": str(paths["all_json"]),
@@ -1000,10 +1002,18 @@ def _device_environment(
     })
     if str(device).startswith("cuda"):
         env["DEVICE_TYPE"] = "cuda"
-        env["DEVICES"] = str(device).split(":", 1)[1] if ":" in str(device) else "0"
+        primary_device = int(str(device).split(":", 1)[1]) if ":" in str(device) else 0
+        # THP/upstream remains single-GPU.  Only the Attention Encoder gets
+        # the additional visible devices for sequence-parallel training.
+        env["DEVICES"] = str(primary_device)
+        env["ATTENTION_DEVICE_IDS"] = ",".join(
+            str(primary_device + offset)
+            for offset in range(max(1, int(attention_num_gpus)))
+        )
     else:
         env["DEVICE_TYPE"] = "cpu"
         env["DEVICES"] = ""
+        env["ATTENTION_DEVICE_IDS"] = ""
     return env
 
 
@@ -1041,6 +1051,7 @@ def build_stationary_hm_upstream(
     device: str,
     python_executable: str,
     batch_size: int | None = None,
+    attention_num_gpus: int = 1,
     epochs: int | None = None,
     smoke: bool = False,
 ) -> HMUpstreamArtifacts:
@@ -1049,6 +1060,8 @@ def build_stationary_hm_upstream(
     import numpy as np
 
     dataset = _validate_stationary_dataset(dataset)
+    if int(attention_num_gpus) <= 0:
+        raise ValueError("attention_num_gpus must be positive")
     if dataset in {"taobao", "stackoverflow"}:
         # Taobao and StackOverflow benefit from longer Hawkes fitting for the
         # real-data long-tail regime.  StackOverflow additionally gets the
@@ -1131,6 +1144,7 @@ def build_stationary_hm_upstream(
         device=device,
         batch_size=effective_batch,
         attention_batch_size=attention_batch,
+        attention_num_gpus=attention_num_gpus,
         thp_epochs=requested_epochs,
         attention_epochs=attention_epochs,
         seed=seed,
@@ -1354,6 +1368,10 @@ def build_stationary_hm_upstream(
         "cluster_selection": cluster_stats,
         "attention_training": {
             "epochs": int(attention_epochs),
+            "num_gpus": int(attention_num_gpus),
+            "parallelism": "shared_h_tree_sequence_data_parallel"
+            if int(attention_num_gpus) > 1
+            else "single_process",
             "patience": 0,
             "early_stopping": False,
             "fixed_contract_epochs": DEFAULT_ATTENTION_EPOCHS,
@@ -1419,6 +1437,10 @@ def build_stationary_hm_upstream(
             "bootstrap_protocol": upstream_manifest["bootstrap_protocol"],
             "attention_training": {
                 "epochs": int(attention_epochs),
+                "num_gpus": int(attention_num_gpus),
+                "parallelism": "shared_h_tree_sequence_data_parallel"
+                if int(attention_num_gpus) > 1
+                else "single_process",
                 "patience": 0,
                 "early_stopping": False,
                 "fixed_contract_epochs": DEFAULT_ATTENTION_EPOCHS,

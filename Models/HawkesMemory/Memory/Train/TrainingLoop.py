@@ -1102,6 +1102,13 @@ class TrainingLoopMixin:
                 local_batch["age_base_offsets"] = tuple(
                     global_age_offsets[local_start:local_end]
                 )
+                # ``sequence_index`` is a dataset identity and may be
+                # unrelated to the shuffled order used by this epoch.  Keep
+                # the global position in that order beside the local shard so
+                # Commit can reproduce the single-GPU physical trajectory.
+                local_batch["commit_positions"] = tuple(
+                    range(start + local_start, start + local_end)
+                )
                 yield wavefront_index, local_batch
             except StopIteration as error:
                 raise RuntimeError(
@@ -1531,6 +1538,7 @@ class TrainingLoopMixin:
                     else:
                         transaction_batch = self.compute_wake_snapshot(
                             wavefront_index=wavefront_index,
+                            commit_positions=wake_batch["commit_positions"],
                             sequences=wake_batch["sequences"],
                             sequence_indices=wake_batch["sequence_indices"],
                             z_flat=wake_batch["z_flat"],

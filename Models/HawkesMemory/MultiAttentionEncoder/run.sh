@@ -10,7 +10,9 @@ set -euo pipefail
 #   bash MultiAttentionEncoder/run.sh final_encode
 #
 # Optional overrides:
-#   PYTHON=/path/to/python DEVICES=0,1,2,3 bash MultiAttentionEncoder/run.sh train
+#   PYTHON=/path/to/python DEVICES=0 bash MultiAttentionEncoder/run.sh train
+#   ATTENTION_NUM_GPUS=4 ATTENTION_DEVICE_IDS=0,1,2,3 \
+#     bash MultiAttentionEncoder/run.sh train_attention
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -30,10 +32,31 @@ THP_EPOCHS="${THP_EPOCHS:-100}"
 THP_DATA_PARALLEL="${THP_DATA_PARALLEL:-1}"
 THP_SEED="${THP_SEED:-42}"
 ATTENTION_BATCH_SIZE="${ATTENTION_BATCH_SIZE:-64}"
+# Attention Encoder can use sequence-parallel torchrun independently of the
+# single-GPU THP/upstream stages.  ``ATTENTION_DEVICE_IDS`` is intentionally
+# separate from ``DEVICES`` so enabling this path does not change THP.
+ATTENTION_NUM_GPUS="${ATTENTION_NUM_GPUS:-1}"
+ATTENTION_DEVICE_IDS="${ATTENTION_DEVICE_IDS:-$DEVICE_IDS}"
+if ! [[ "$ATTENTION_NUM_GPUS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ATTENTION_NUM_GPUS must be a positive integer: $ATTENTION_NUM_GPUS" >&2
+  exit 2
+fi
+if [[ "$DEVICE_TYPE" == "cuda" ]]; then
+  IFS=',' read -r -a ATTENTION_DEVICE_ARRAY <<< "$ATTENTION_DEVICE_IDS"
+  if (( ${#ATTENTION_DEVICE_ARRAY[@]} < ATTENTION_NUM_GPUS )); then
+    echo "ATTENTION_DEVICE_IDS must list at least ATTENTION_NUM_GPUS devices: ${ATTENTION_DEVICE_IDS}" >&2
+    exit 2
+  fi
+fi
 # Fixed evaluation contract: Attention Encoder always trains for 50 epochs;
 # early stopping is disabled below with --patience 0.
 ATTENTION_EPOCHS="${ATTENTION_EPOCHS:-50}"
 ATTENTION_SEED="${ATTENTION_SEED:-42}"
+
+TORCHRUN_BIN="${TORCHRUN:-$(dirname "$PYTHON_BIN")/torchrun}"
+if [[ ! -x "$TORCHRUN_BIN" ]]; then
+  TORCHRUN_BIN="torchrun"
+fi
 
 DATA_PATH="${DATA_PATH:-$PROJECT_ROOT/Data/tree_13/13Cluster/THP_13.json}"
 # The strict training/attention stages use the complete keyed JSON so their
@@ -182,38 +205,57 @@ case "$ACTION" in
         "$ATTENTION_TREE_CSV"
     fi
 
-    CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$DEVICE_IDS" \
-      "$PYTHON_BIN" "$SCRIPT_DIR/AttentionEncoder/Train.py" \
-        --thp_json "$ATTENTION_DATA_PATH" \
-        --tree_csv "$ATTENTION_TREE_CSV" \
-        --summary_csv "$ATTENTION_SUMMARY_CSV" \
-        --checkpoint "$BEST_CHECKPOINT" \
-        ${ATTENTION_EMBEDDING_ARGS[@]+"${ATTENTION_EMBEDDING_ARGS[@]}"} \
-        --weights_out "$ATTENTION_WEIGHTS" \
-        --d_model 128 \
-        --num_heads 4 \
-        --d_rnn 128 \
-        --d_inner_hid 256 \
-        --d_k 32 \
-        --d_v 32 \
-        --n_layers 3 \
-        --dropout 0.3 \
-        --epochs "$ATTENTION_EPOCHS" \
-        --batch_size "$ATTENTION_BATCH_SIZE" \
-        --lr 0.001 \
-        --weight_decay 0.0001 \
-        --route_weight 1.0 \
-        --path_weight 0.0 \
-        --recon_weight 0.5 \
-        --grad_clip 1.0 \
-        --seed "$ATTENTION_SEED" \
-        --train_ratio 0.8 \
-        --dev_ratio 0.1 \
-        --patience 0 \
-        --min_delta 0.0001 \
-        --device "$DEVICE_TYPE" \
-        ${ATTENTION_STRICT_SPLIT_ARGS[@]+"${ATTENTION_STRICT_SPLIT_ARGS[@]}"} \
-        ${ATTENTION_BOOTSTRAP_ARGS[@]+"${ATTENTION_BOOTSTRAP_ARGS[@]}"}
+    ATTENTION_TRAIN_ARGS=(
+      --thp_json "$ATTENTION_DATA_PATH"
+      --tree_csv "$ATTENTION_TREE_CSV"
+      --summary_csv "$ATTENTION_SUMMARY_CSV"
+      --checkpoint "$BEST_CHECKPOINT"
+      --weights_out "$ATTENTION_WEIGHTS"
+      --d_model 128
+      --num_heads 4
+      --d_rnn 128
+      --d_inner_hid 256
+      --d_k 32
+      --d_v 32
+      --n_layers 3
+      --dropout 0.3
+      --epochs "$ATTENTION_EPOCHS"
+      --batch_size "$ATTENTION_BATCH_SIZE"
+      --lr 0.001
+      --weight_decay 0.0001
+      --route_weight 1.0
+      --path_weight 0.0
+      --recon_weight 0.5
+      --grad_clip 1.0
+      --seed "$ATTENTION_SEED"
+      --train_ratio 0.8
+      --dev_ratio 0.1
+      --patience 0
+      --min_delta 0.0001
+      --device "$DEVICE_TYPE"
+    )
+    if [[ -n "$ATTENTION_ENCODED_PATH" ]]; then
+      ATTENTION_TRAIN_ARGS+=(--encoded_embeddings "$ATTENTION_ENCODED_PATH")
+    fi
+    if [[ -n "$ATTENTION_SPLIT_MANIFEST" ]]; then
+      ATTENTION_TRAIN_ARGS+=(
+        --split-manifest "$ATTENTION_SPLIT_MANIFEST"
+        --split-data-path "$ATTENTION_SPLIT_DATA_PATH"
+        --strict-bootstrap
+      )
+    fi
+    if (( ATTENTION_NUM_GPUS > 1 )); then
+      CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$ATTENTION_DEVICE_IDS" \
+        "$TORCHRUN_BIN" \
+          --standalone \
+          --nproc_per_node="$ATTENTION_NUM_GPUS" \
+          "$SCRIPT_DIR/AttentionEncoder/Train.py" \
+          "${ATTENTION_TRAIN_ARGS[@]}"
+    else
+      CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$DEVICE_IDS" \
+        "$PYTHON_BIN" "$SCRIPT_DIR/AttentionEncoder/Train.py" \
+          "${ATTENTION_TRAIN_ARGS[@]}"
+    fi
     ;;
 
   final_encode)

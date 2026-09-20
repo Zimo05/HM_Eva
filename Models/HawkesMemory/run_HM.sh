@@ -14,6 +14,8 @@ else
   PYTHON_BIN="python"
 fi
 DEVICE_IDS="${DEVICES:-0}"
+ATTENTION_NUM_GPUS="${ATTENTION_NUM_GPUS:-1}"
+ATTENTION_DEVICE_IDS="${ATTENTION_DEVICE_IDS:-$DEVICE_IDS}"
 
 DATA_ROOT="${DATA_ROOT:-$PROJECT_PARENT/HawkesMemory_wfy/Data/tree_17}"
 DATA_PATH="${DATA_PATH:-$DATA_ROOT/17Cluster/THP_17.json}"
@@ -92,6 +94,7 @@ Usage:
 
 Optional environment overrides:
   RUN_NAME=name EPOCHS=60 PYTHON=/path/to/python DEVICES=0 ./run_HM.sh <action>
+  ATTENTION_NUM_GPUS=4 ATTENTION_DEVICE_IDS=0,1,2,3 ./run_HM.sh train-attention
   GLOBAL_PADDED_GRU_MODE=dense WAKE_PADDED_GRU_MODE=packed ./run_HM.sh memory
   BASE_CONTROLLER_CHECKPOINT=/path/model.pt CONTROLLER_VERSION=6 ./run_HM.sh controller-finetune
   # Optional cold-start priors for adaptive two-radius matching:
@@ -154,6 +157,8 @@ run_encoder_stage() {
   env \
     PYTHON="$PYTHON_BIN" \
     DEVICES="$DEVICE_IDS" \
+    ATTENTION_NUM_GPUS="$ATTENTION_NUM_GPUS" \
+    ATTENTION_DEVICE_IDS="$ATTENTION_DEVICE_IDS" \
     DATA_PATH="$DATA_PATH" \
     OUTPUT_DIR="$THP_OUTPUT_DIR" \
     TRAIN_LOG="$THP_TRAIN_LOG" \

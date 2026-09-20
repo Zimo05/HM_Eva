@@ -153,6 +153,9 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
                     getattr(args, "batch_size", None)
                     or getattr(args, "eval_batch_size", 64)
                 ),
+                attention_num_gpus=int(
+                    getattr(args, "attention_num_gpus", 1) or 1
+                ),
                 epochs=getattr(args, "epochs", None),
                 smoke=bool(getattr(args, "smoke", False)),
             )

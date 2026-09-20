@@ -110,6 +110,30 @@ class WakeTransaction:
     queue_split_evidence: Any = field(default_factory=tuple)
     age_advance: int = 0
     controller_stat_delta: Mapping[str, Any] = field(default_factory=dict)
+    # ``sequence_index`` identifies the sample; it is not the order in which
+    # the sample was presented to Wake.  Snapshot Commit therefore carries an
+    # explicit physical order key.  Older payloads omit this field and fall
+    # back to the legacy identity order in :meth:`commit_key`.
+    commit_order: tuple[int, int] | None = None
+
+    def commit_key(self) -> tuple[int, int]:
+        """Return the deterministic physical Commit order for this record.
+
+        ``commit_order`` is deliberately separate from ``sequence_index``:
+        the latter is a stable dataset identity while the former follows the
+        epoch's shuffled wavefront.  Be permissive when reading old/object
+        collective payloads so a missing or malformed key remains compatible
+        with pre-ordering transaction logs.
+        """
+
+        if self.commit_order is not None:
+            try:
+                values = tuple(self.commit_order)
+                if len(values) >= 2:
+                    return int(values[0]), int(values[1])
+            except (TypeError, ValueError):
+                pass
+        return int(self.sequence_index), int(self.event_index)
 
     def to_payload(self) -> dict[str, Any]:
         return _plain(self)
@@ -143,6 +167,10 @@ class WakeTransactionBatch:
     @property
     def event_index(self) -> tuple[int, ...]:
         return tuple(item.event_index for item in self.transactions)
+
+    @property
+    def commit_order(self) -> tuple[tuple[int, int], ...]:
+        return tuple(item.commit_key() for item in self.transactions)
 
     @property
     def prediction_metrics(self) -> tuple[Mapping[str, Any], ...]:
@@ -194,7 +222,7 @@ class WakeTransactionBatch:
             transactions=tuple(
                 sorted(
                     self.transactions,
-                    key=lambda item: (int(item.sequence_index), int(item.event_index)),
+                    key=lambda item: item.commit_key(),
                 )
             ),
             wavefront_index=self.wavefront_index,

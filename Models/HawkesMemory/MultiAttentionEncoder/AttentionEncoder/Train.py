@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 import random
 import sys
 from pathlib import Path
@@ -53,6 +54,7 @@ from typing import Collection, Dict, Tuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -142,6 +144,8 @@ def split_train_internal_dev_ids(
 # ---------------------------------------------------------------------------
 def build_routing_targets(
     pipeline: MultiAttentionEncoderPipeline,
+    *,
+    verbose: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build per-sequence routing targets from leaf membership.
 
@@ -179,8 +183,9 @@ def build_routing_targets(
                 leaf_target[gid] = idx
 
     n_assigned = int((leaf_target >= 0).sum().item())
-    print(f"[Targets] {n_assigned}/{s} sequences assigned to a leaf "
-          f"({len(leaf_nodes)} leaves, {n} nodes total)")
+    if verbose:
+        print(f"[Targets] {n_assigned}/{s} sequences assigned to a leaf "
+              f"({len(leaf_nodes)} leaves, {n} nodes total)")
     return leaf_target, path_target
 
 
@@ -199,6 +204,10 @@ class EncoderTrainer:
     ):
         self.p = pipeline
         self.device = pipeline.device
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        self.distributed = self.world_size > 1 and dist.is_available() and dist.is_initialized()
+        self.is_rank0 = self.rank == 0
         self.route_weight = route_weight
         self.path_weight = path_weight
         self.recon_weight = recon_weight
@@ -210,8 +219,131 @@ class EncoderTrainer:
             nn.Linear(pipeline.d_model, pipeline.d_model),
         ).to(self.device)
 
-        params = list(pipeline.trainable_parameters()) + list(self.recon_head.parameters())
+        self.tree_parameters = list(pipeline.tree_side_parameters())
+        self.sequence_parameters = list(pipeline.sequence_side_parameters())
+        self.sequence_parameters.extend(self.recon_head.parameters())
+        params = self.tree_parameters + self.sequence_parameters
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+
+    def _global_count(self, local_count: int, enabled: bool) -> torch.Tensor:
+        """Return a device scalar containing a local/global sample count."""
+        count = torch.tensor(
+            float(local_count), device=self.device, dtype=torch.float64
+        )
+        if enabled and self.distributed:
+            dist.all_reduce(count, op=dist.ReduceOp.SUM)
+        return count.clamp_min(1.0)
+
+    def _global_order(self, num_items: int) -> torch.Tensor:
+        """Generate one permutation on rank 0 and broadcast it to all ranks."""
+        if not self.distributed:
+            return torch.randperm(num_items, device=self.device)
+        # NCCL cannot broadcast CPU tensors; Gloo can.  Keep the permutation
+        # on the process-group device and only move local indices when needed.
+        order_device = (
+            self.device if self.device.type == "cuda" else torch.device("cpu")
+        )
+        if self.is_rank0:
+            order = torch.randperm(num_items, device=order_device)
+        else:
+            order = torch.empty(num_items, dtype=torch.long, device=order_device)
+        dist.broadcast(order, src=0)
+        return order
+
+    def _shared_tree_batch(
+        self,
+        train_pool_ids: Collection[int],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build the tree once, then broadcast a detached H-tree snapshot.
+
+        The returned pair is ``(H_refined, H_shared)``.  In distributed mode
+        ``H_refined`` exists only on rank 0 and retains its autograd graph;
+        ``H_shared`` is the detached leaf consumed by every sequence-side
+        replica.  In single-process mode both values refer to the normal
+        differentiable tree output.
+        """
+        p = self.p
+        if not self.distributed:
+            H_tree = p.forward_node_inputs(allowed_sequence_ids=train_pool_ids)
+            H_refined = p.forward_structural(H_tree)
+            return H_refined, H_refined
+
+        if self.is_rank0:
+            H_tree = p.forward_node_inputs(allowed_sequence_ids=train_pool_ids)
+            H_refined = p.forward_structural(H_tree)
+            H_shared = H_refined.detach().clone()
+        else:
+            H_refined = torch.empty(0, device=self.device)
+            # The dimensions/dtype are stable after setup_modules().
+            H_shared = torch.empty(
+                (len(p.node_ids), p.d_model),
+                device=self.device,
+                dtype=p.node_features["struct"].dtype,
+            )
+        dist.broadcast(H_shared, src=0)
+        H_shared.requires_grad_(True)
+        return H_refined, H_shared
+
+    def _reduce_sequence_gradients(self) -> None:
+        """SUM-reduce gradients for replicated sequence-side parameters."""
+        if not self.distributed:
+            return
+        for parameter in self.sequence_parameters:
+            if parameter.grad is None:
+                parameter.grad = torch.zeros_like(parameter)
+            dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
+
+    def _reduce_tree_gradient(
+        self,
+        H_refined: torch.Tensor,
+        H_shared: torch.Tensor,
+    ) -> None:
+        """Aggregate dL/dH and replay it through rank 0's tree graph."""
+        if not self.distributed:
+            return
+        grad_H = H_shared.grad
+        if grad_H is None:
+            grad_H = torch.zeros_like(H_shared)
+        else:
+            grad_H = grad_H.detach().clone()
+        dist.all_reduce(grad_H, op=dist.ReduceOp.SUM)
+        if self.is_rank0:
+            H_refined.backward(grad_H)
+
+    def _distributed_metrics(
+        self,
+        totals: Dict[str, float],
+        count: int,
+        correct: int,
+        counted: int,
+    ) -> Tuple[Dict[str, float], int, int]:
+        """Aggregate epoch sums for logging without changing autograd."""
+        if not self.distributed:
+            metrics = {
+                key: value / max(count, 1) for key, value in totals.items()
+            }
+            return metrics, correct, counted
+
+        # Keep the payload shape identical even when one rank has no valid
+        # leaf labels in its shard.
+        keys = ("route", "path", "recon", "total")
+        payload = torch.tensor(
+            [totals.get(key, 0.0) for key in keys]
+            + [float(count), float(correct), float(counted)],
+            device=self.device,
+            dtype=torch.float64,
+        )
+        dist.all_reduce(payload, op=dist.ReduceOp.SUM)
+        global_count = max(float(payload[len(keys)].item()), 1.0)
+        metrics = {
+            key: float(payload[i].item()) / global_count
+            for i, key in enumerate(keys)
+        }
+        return (
+            metrics,
+            int(round(payload[len(keys) + 1].item())),
+            int(round(payload[len(keys) + 2].item())),
+        )
 
     def _set_training_mode(self, training: bool) -> None:
         for module in self.p.trainable_modules():
@@ -231,6 +363,7 @@ class EncoderTrainer:
         z_batch: torch.Tensor,
         leaf_t: torch.Tensor,
         path_t: torch.Tensor,
+        global_normalize: bool = False,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         route_prob = out.route_prob                      # [B, N]
         log_route = torch.log(route_prob.clamp_min(1e-9))
@@ -240,28 +373,49 @@ class EncoderTrainer:
         total = torch.zeros((), device=self.device)
 
         # ---- Routing CE (to true leaf) ----
-        if valid.any():
-            l_route = F.nll_loss(log_route[valid], leaf_t[valid])
-            total = total + self.route_weight * l_route
-            losses["route"] = float(l_route.item())
+        if self.route_weight > 0:
+            route_count = int(valid.sum().item())
+            route_denom = self._global_count(route_count, global_normalize)
+            if route_count:
+                route_sum = F.nll_loss(
+                    log_route[valid], leaf_t[valid], reduction="sum"
+                )
+                route_local = route_sum / max(route_count, 1)
+                route_graph = route_sum / route_denom.to(route_sum.dtype)
+                total = total + self.route_weight * route_graph
+                losses["route"] = float(route_local.item())
 
         # ---- Ancestor-path BCE (multi-label membership) ----
         if self.path_weight > 0:
-            l_path = F.binary_cross_entropy(
-                route_prob.clamp(1e-9, 1 - 1e-9), path_t
+            path_count = int(route_prob.numel())
+            path_denom = self._global_count(path_count, global_normalize)
+            path_sum = F.binary_cross_entropy(
+                route_prob.clamp(1e-9, 1 - 1e-9), path_t, reduction="sum"
             )
-            total = total + self.path_weight * l_path
-            losses["path"] = float(l_path.item())
+            path_local = path_sum / max(path_count, 1)
+            path_graph = path_sum / path_denom.to(path_sum.dtype)
+            total = total + self.path_weight * path_graph
+            losses["path"] = float(path_local.item())
 
         # ---- Reconstruction of z from the target-leaf deterministic feature ----
-        if self.recon_weight > 0 and valid.any():
-            det = out.deterministic_tree                 # [B, N, d]
-            idx = leaf_t[valid]                          # [Bv]
-            d_target = det[valid][torch.arange(idx.size(0), device=self.device), idx]
-            z_hat = self.recon_head(d_target)
-            l_recon = F.mse_loss(z_hat, z_batch[valid])
-            total = total + self.recon_weight * l_recon
-            losses["recon"] = float(l_recon.item())
+        if self.recon_weight > 0:
+            recon_count = int(z_batch[valid].numel())
+            recon_denom = self._global_count(recon_count, global_normalize)
+            if valid.any():
+                det = out.deterministic_tree                 # [B, N, d]
+                idx = leaf_t[valid]                          # [Bv]
+                d_valid = det[valid]
+                d_target = d_valid[
+                    torch.arange(idx.size(0), device=self.device), idx
+                ]
+                z_hat = self.recon_head(d_target)
+                recon_sum = F.mse_loss(
+                    z_hat, z_batch[valid], reduction="sum"
+                )
+                recon_local = recon_sum / max(recon_count, 1)
+                recon_graph = recon_sum / recon_denom.to(recon_sum.dtype)
+                total = total + self.recon_weight * recon_graph
+                losses["recon"] = float(recon_local.item())
 
         losses["total"] = float(total.item())
         return total, losses
@@ -341,7 +495,7 @@ class EncoderTrainer:
         p = self.p
         Z = p.Z_matrix                                   # [S, d]
         S = Z.shape[0]
-        leaf_t, path_t = build_routing_targets(p)
+        leaf_t, path_t = build_routing_targets(p, verbose=self.is_rank0)
         leaf_t = leaf_t.to(self.device)
         path_t = path_t.to(self.device)
         if strict_bootstrap is None:
@@ -386,27 +540,28 @@ class EncoderTrainer:
         train_pool_ids = frozenset(train_cpu.tolist())
         train_idx = train_cpu.to(self.device)
 
-        print("\n" + "=" * 60)
-        if strict_bootstrap:
+        if self.is_rank0:
+            print("\n" + "=" * 60)
+            if strict_bootstrap:
+                print(
+                    f"Strict bootstrap split: D_train fit={train_cpu.numel()}, "
+                    f"internal-dev={dev_cpu.numel()} (seed={split_seed})"
+                )
+                print(
+                    "Formal validation/test are excluded; formal test is deferred "
+                    "to Evaluate.py after final HM checkpoint."
+                )
+            else:
+                print(
+                    f"Split: train={train_cpu.numel()}, dev={dev_cpu.numel()}, "
+                    f"test={test_cpu.numel()} (seed={split_seed})"
+                )
             print(
-                f"Strict bootstrap split: D_train fit={train_cpu.numel()}, "
-                f"internal-dev={dev_cpu.numel()} (seed={split_seed})"
+                f"Training: {epochs} epochs, {train_cpu.numel()} train sequences, "
+                f"batch={batch_size}"
             )
-            print(
-                "Formal validation/test are excluded; formal test is deferred "
-                "to Evaluate.py after final HM checkpoint."
-            )
-        else:
-            print(
-                f"Split: train={train_cpu.numel()}, dev={dev_cpu.numel()}, "
-                f"test={test_cpu.numel()} (seed={split_seed})"
-            )
-        print(
-            f"Training: {epochs} epochs, {train_cpu.numel()} train sequences, "
-            f"batch={batch_size}"
-        )
-        print("[Leakage guard] H_tree semantic pooling uses train sequences only.")
-        print("=" * 60)
+            print("[Leakage guard] H_tree semantic pooling uses train sequences only.")
+            print("=" * 60)
 
         best_dev_route = float("inf")
         best_epoch = 0
@@ -414,39 +569,70 @@ class EncoderTrainer:
         best_recon = None
         stale_epochs = 0
 
+        if self.distributed and batch_size < self.world_size:
+            raise ValueError(
+                "sequence-parallel attention requires batch_size >= world_size"
+            )
+
         for epoch in range(1, epochs + 1):
             self._set_training_mode(True)
-            order = torch.randperm(train_idx.numel(), device=self.device)
-            perm = train_idx[order]
+            order = self._global_order(train_idx.numel())
             epoch_losses: Dict[str, float] = {}
             n_batches = 0
             correct = 0
             counted = 0
 
             for start in range(0, train_idx.numel(), batch_size):
-                idx = perm[start:start + batch_size]
+                global_pos = order[start:start + batch_size]
+                if self.distributed:
+                    local_pos = global_pos[self.rank::self.world_size]
+                    local_pos = local_pos.to(train_idx.device)
+                else:
+                    local_pos = global_pos
+                idx = train_idx[local_pos]
                 z_batch = Z[idx]
 
-                # Recompute node + structural embeddings so gradients flow.
-                # The semantic pool contains no dev/test sequence embeddings.
-                H_tree = p.forward_node_inputs(
-                    allowed_sequence_ids=train_pool_ids
-                )
-                H_refined = p.forward_structural(H_tree)
-                out = self._forward_batch(H_refined, z_batch)
+                self.optimizer.zero_grad(set_to_none=True)
+                # Rank 0 owns the tree graph.  All ranks consume a detached
+                # broadcast snapshot and only run their local sequence shard.
+                H_refined, H_shared = self._shared_tree_batch(train_pool_ids)
+                out = self._forward_batch(H_shared, z_batch)
 
                 loss, parts = self._compute_loss(
-                    out, z_batch, leaf_t[idx], path_t[idx]
+                    out,
+                    z_batch,
+                    leaf_t[idx],
+                    path_t[idx],
+                    global_normalize=self.distributed,
                 )
 
-                self.optimizer.zero_grad()
-                loss.backward()
-                if grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        list(p.trainable_parameters())
-                        + list(self.recon_head.parameters()),
-                        grad_clip,
+                # Keep an autograd path alive for an empty/fully-unassigned
+                # local shard so all ranks can still participate in collectives.
+                if not loss.requires_grad:
+                    loss = loss + sum(
+                        (parameter.sum() * 0.0)
+                        for parameter in self.sequence_parameters
                     )
+                loss.backward()
+
+                if self.distributed:
+                    self._reduce_tree_gradient(H_refined, H_shared)
+                    self._reduce_sequence_gradients()
+
+                if grad_clip > 0:
+                    if self.distributed:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.sequence_parameters, grad_clip
+                        )
+                        if self.is_rank0:
+                            torch.nn.utils.clip_grad_norm_(
+                                self.tree_parameters, grad_clip
+                            )
+                    else:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.tree_parameters + self.sequence_parameters,
+                            grad_clip,
+                        )
                 self.optimizer.step()
 
                 for key, value in parts.items():
@@ -459,58 +645,77 @@ class EncoderTrainer:
                     correct += int((pred == leaf_t[idx][valid]).sum().item())
                     counted += int(valid.sum().item())
 
-            train_metrics = {
-                key: value / max(n_batches, 1)
-                for key, value in epoch_losses.items()
-            }
-            train_metrics["route_acc"] = correct / counted if counted else 0.0
-            dev_metrics = self._evaluate(
-                dev_cpu,
-                leaf_t,
-                path_t,
-                train_pool_ids=train_pool_ids,
-                batch_size=batch_size,
+            train_metrics, correct, counted = self._distributed_metrics(
+                epoch_losses, n_batches, correct, counted
             )
+            train_metrics["route_acc"] = correct / counted if counted else 0.0
+            if self.distributed:
+                if self.is_rank0:
+                    dev_metrics = self._evaluate(
+                        dev_cpu,
+                        leaf_t,
+                        path_t,
+                        train_pool_ids=train_pool_ids,
+                        batch_size=batch_size,
+                    )
+                else:
+                    dev_metrics = {}
+                dev_payload = [dev_metrics]
+                dist.broadcast_object_list(dev_payload, src=0)
+                dev_metrics = dev_payload[0]
+            else:
+                dev_metrics = self._evaluate(
+                    dev_cpu,
+                    leaf_t,
+                    path_t,
+                    train_pool_ids=train_pool_ids,
+                    batch_size=batch_size,
+                )
             dev_route = dev_metrics.get("route", dev_metrics["total"])
 
             if dev_route < best_dev_route - min_delta:
                 best_dev_route = dev_route
                 best_epoch = epoch
-                best_modules = [
-                    copy.deepcopy(module.state_dict())
-                    for module in p.trainable_modules()
-                ]
-                best_recon = copy.deepcopy(self.recon_head.state_dict())
+                if self.is_rank0:
+                    best_modules = [
+                        copy.deepcopy(module.state_dict())
+                        for module in p.trainable_modules()
+                    ]
+                    best_recon = copy.deepcopy(self.recon_head.state_dict())
                 stale_epochs = 0
             else:
                 stale_epochs += 1
 
             if epoch % log_every == 0:
-                print(
-                    f"  Epoch {epoch:3d}/{epochs}  "
-                    f"train[{self._format_metrics(train_metrics)}]  "
-                    f"dev[{self._format_metrics(dev_metrics)}]"
-                )
+                if self.is_rank0:
+                    print(
+                        f"  Epoch {epoch:3d}/{epochs}  "
+                        f"train[{self._format_metrics(train_metrics)}]  "
+                        f"dev[{self._format_metrics(dev_metrics)}]"
+                    )
 
             effective_patience = 0 if strict_bootstrap else patience
             if effective_patience > 0 and stale_epochs >= effective_patience:
-                print(
-                    f"[Early stopping] dev route loss did not improve by "
-                    f"{min_delta:g} for {effective_patience} epochs."
-                )
+                if self.is_rank0:
+                    print(
+                        f"[Early stopping] dev route loss did not improve by "
+                        f"{min_delta:g} for {effective_patience} epochs."
+                    )
                 break
 
-        if best_modules is None or best_recon is None:
-            raise RuntimeError("Training finished without a valid dev checkpoint.")
-        for module, state in zip(p.trainable_modules(), best_modules):
-            module.load_state_dict(state)
-        self.recon_head.load_state_dict(best_recon)
+        if self.is_rank0:
+            if best_modules is None or best_recon is None:
+                raise RuntimeError("Training finished without a valid dev checkpoint.")
+            for module, state in zip(p.trainable_modules(), best_modules):
+                module.load_state_dict(state)
+            self.recon_head.load_state_dict(best_recon)
 
-        print("=" * 60)
-        print(
-            f"Training complete. Restored epoch {best_epoch} "
-            f"(best dev route loss={best_dev_route:.6f})."
-        )
+        if self.is_rank0:
+            print("=" * 60)
+            print(
+                f"Training complete. Restored epoch {best_epoch} "
+                f"(best dev route loss={best_dev_route:.6f})."
+            )
         result: Dict[str, object] = {
             "best_epoch": best_epoch,
             "best_dev_route_loss": best_dev_route,
@@ -529,14 +734,30 @@ class EncoderTrainer:
             },
         }
         if strict_bootstrap:
-            internal_dev_metrics = self._evaluate(
-                dev_cpu,
-                leaf_t,
-                path_t,
-                train_pool_ids=train_pool_ids,
-                batch_size=batch_size,
-            )
-            print(f"[Internal-dev] {self._format_metrics(internal_dev_metrics)}")
+            if self.distributed:
+                if self.is_rank0:
+                    internal_dev_metrics = self._evaluate(
+                        dev_cpu,
+                        leaf_t,
+                        path_t,
+                        train_pool_ids=train_pool_ids,
+                        batch_size=batch_size,
+                    )
+                else:
+                    internal_dev_metrics = {}
+                payload = [internal_dev_metrics]
+                dist.broadcast_object_list(payload, src=0)
+                internal_dev_metrics = payload[0]
+            else:
+                internal_dev_metrics = self._evaluate(
+                    dev_cpu,
+                    leaf_t,
+                    path_t,
+                    train_pool_ids=train_pool_ids,
+                    batch_size=batch_size,
+                )
+            if self.is_rank0:
+                print(f"[Internal-dev] {self._format_metrics(internal_dev_metrics)}")
             result["internal_dev_metrics"] = internal_dev_metrics
             result["bootstrap_protocol"] = {
                 "scope": "D_train",
@@ -546,21 +767,62 @@ class EncoderTrainer:
                 "early_stopping": False,
             }
         else:
-            test_metrics = self._evaluate(
-                test_cpu,
-                leaf_t,
-                path_t,
-                train_pool_ids=train_pool_ids,
-                batch_size=batch_size,
-            )
-            print(f"[Test] {self._format_metrics(test_metrics)}")
+            if self.distributed:
+                if self.is_rank0:
+                    test_metrics = self._evaluate(
+                        test_cpu,
+                        leaf_t,
+                        path_t,
+                        train_pool_ids=train_pool_ids,
+                        batch_size=batch_size,
+                    )
+                else:
+                    test_metrics = {}
+                payload = [test_metrics]
+                dist.broadcast_object_list(payload, src=0)
+                test_metrics = payload[0]
+            else:
+                test_metrics = self._evaluate(
+                    test_cpu,
+                    leaf_t,
+                    path_t,
+                    train_pool_ids=train_pool_ids,
+                    batch_size=batch_size,
+                )
+            if self.is_rank0:
+                print(f"[Test] {self._format_metrics(test_metrics)}")
             result["test_metrics"] = test_metrics
+        if self.distributed:
+            # All ranks leave the training loop together.  Only rank 0 owns
+            # the restored checkpoint; non-zero ranks never write weights.
+            dist.barrier()
         return result
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def _init_distributed(args) -> Tuple[int, int, bool, str | None]:
+    """Initialize torchrun state and return rank/device metadata.
+
+    The encoder intentionally uses a small explicit process group instead of
+    wrapping the whole pipeline in DDP: only sequence-side modules are
+    replicated, while rank 0 owns the shared tree graph.
+    """
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return 0, 1, False, None
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    use_cuda = torch.cuda.is_available() and str(args.device).lower() != "cpu"
+    backend = "nccl" if use_cuda else "gloo"
+    if use_cuda:
+        torch.cuda.set_device(local_rank)
+    if not dist.is_initialized():
+        dist.init_process_group(backend=backend, init_method="env://")
+    return int(os.environ.get("RANK", local_rank)), world_size, True, backend
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the Multi-Attention Encoder.")
     parser.add_argument("--thp_json", type=str,
@@ -630,6 +892,15 @@ def main() -> None:
     if args.strict_bootstrap and args.split_manifest is None:
         parser.error("--strict-bootstrap requires --split-manifest")
 
+    rank, world_size, distributed, backend = _init_distributed(args)
+    if distributed:
+        if backend == "nccl":
+            runtime_device = f"cuda:{int(os.environ.get('LOCAL_RANK', '0'))}"
+        else:
+            runtime_device = "cpu"
+    else:
+        runtime_device = args.device
+
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -637,7 +908,11 @@ def main() -> None:
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms(True, warn_only=True)
-    print(f"[Reproducibility] seed={args.seed}")
+    if rank == 0:
+        print(
+            f"[Reproducibility] seed={args.seed} "
+            f"world_size={world_size} distributed={distributed}"
+        )
 
     pipeline = MultiAttentionEncoderPipeline(
         thp_json_path=args.thp_json,
@@ -654,7 +929,7 @@ def main() -> None:
         dropout=args.dropout,
         batch_size=args.batch_size,
         parent_emb_dim=args.parent_emb_dim,
-        device=args.device,
+        device=runtime_device,
     )
 
     # Enable gradients for the attention modules.
@@ -713,6 +988,12 @@ def main() -> None:
             if strict_manifest is not None or args.strict_bootstrap
             else "transductive"
         ),
+        "attention_parallelism": {
+            "world_size": int(world_size),
+            "tree_owner": "rank0",
+            "sequence_side": "sequence_data_parallel_replicas",
+            "loss_normalization": "global_sum_over_global_valid_count",
+        },
     }
     if "test_metrics" in training_result:
         metadata["test_metrics"] = training_result["test_metrics"]
@@ -724,13 +1005,19 @@ def main() -> None:
         metadata["data_provenance"] = build_data_provenance(
             strict_manifest, thp_checkpoint=args.checkpoint
         )
-    pipeline.save_module_weights(
-        args.weights_out,
-        metadata=metadata,
-    )
-    print(f"\nDone. Use them with:\n"
-          f"  python AttenEncoderMain.py --checkpoint {args.checkpoint} "
-          f"--weights {args.weights_out}")
+    if distributed:
+        dist.barrier()
+    if rank == 0:
+        pipeline.save_module_weights(
+            args.weights_out,
+            metadata=metadata,
+        )
+        print(f"\nDone. Use them with:\n"
+              f"  python AttenEncoderMain.py --checkpoint {args.checkpoint} "
+              f"--weights {args.weights_out}")
+    if distributed:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

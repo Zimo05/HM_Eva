@@ -88,6 +88,11 @@ _PERSISTENT_CONFIG_DESTS = frozenset({
     "merge_dual_lr",
     "merge_dual_initial",
     "light_replay_budget",
+    "light_min_gain",
+    "split_steps",
+    "split_lr",
+    "split_min_replay_per_group",
+    "split_persistence_cycles",
     "split_min_structural_strength",
     "split_min_effective_sample_size",
     "split_route_loss_weight",
@@ -319,6 +324,11 @@ def _checkpoint_config_value(payload: Mapping, dest: str):
         )
     if dest in {
         "light_replay_budget",
+        "light_min_gain",
+        "split_steps",
+        "split_lr",
+        "split_min_replay_per_group",
+        "split_persistence_cycles",
         "split_min_structural_strength",
         "split_min_effective_sample_size",
         "split_route_loss_weight",
@@ -1161,6 +1171,45 @@ def _parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--light-min-gain",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum predictive gain required for a Light Sleep semantic "
+            "absorption."
+        ),
+    )
+    parser.add_argument(
+        "--split-steps",
+        type=int,
+        default=30,
+        help="Gradient steps used to fit one Deep Split hypothesis.",
+    )
+    parser.add_argument(
+        "--split-lr",
+        type=float,
+        default=1e-3,
+        help="Learning rate used to fit one Deep Split hypothesis.",
+    )
+    parser.add_argument(
+        "--split-min-replay-per-group",
+        type=int,
+        default=2,
+        help=(
+            "Minimum replay windows retained from each persistent Bank mode "
+            "group before a Split hypothesis is constructed."
+        ),
+    )
+    parser.add_argument(
+        "--split-persistence-cycles",
+        type=int,
+        default=1,
+        help=(
+            "Consecutive valid Sleep cycles required before Split enters "
+            "topology arbitration."
+        ),
+    )
+    parser.add_argument(
         "--split-min-structural-strength",
         type=float,
         default=0.0,
@@ -1651,6 +1700,18 @@ def main() -> None:
         raise ValueError(
             "--alignment-epochs requires --sequence-summary membership"
         )
+    if args.light_min_gain < 0.0:
+        raise ValueError("--light-min-gain must be non-negative")
+    if args.split_steps <= 0:
+        raise ValueError("--split-steps must be positive")
+    if args.split_lr <= 0.0:
+        raise ValueError("--split-lr must be positive")
+    if args.split_min_replay_per_group < 0:
+        raise ValueError(
+            "--split-min-replay-per-group must be non-negative"
+        )
+    if args.split_persistence_cycles <= 0:
+        raise ValueError("--split-persistence-cycles must be positive")
     residual_initialization = (
         args.sequence_summary is not None
         and args.residual_init_scale > 0.0
@@ -2066,6 +2127,15 @@ def main() -> None:
         trainer.controller.count_saturation = args.count_saturation
         trainer.controller.count_topk = args.count_topk
         trainer.sleep_config.light_replay_budget = args.light_replay_budget
+        trainer.sleep_config.light_min_gain = args.light_min_gain
+        trainer.sleep_config.split_steps = args.split_steps
+        trainer.sleep_config.split_lr = args.split_lr
+        trainer.sleep_config.split_min_replay_per_group = (
+            args.split_min_replay_per_group
+        )
+        trainer.sleep_config.split_persistence_cycles = (
+            args.split_persistence_cycles
+        )
         trainer.sleep_config.deep_availability_tau = (
             args.deep_availability_tau
         )
@@ -2096,6 +2166,14 @@ def main() -> None:
             "dynamics_weight": args.merge_dynamics_weight,
             "normalize_by_events": True,
         }
+        # Merge and topology-prune use the same projected complexity price.
+        # Keep the CLI's single dual setting authoritative for both paths.
+        trainer.structure_config.topology_prune_kwargs["dual_lr"] = (
+            args.merge_dual_lr
+        )
+        trainer.structure_config.topology_prune_kwargs["dual_initial"] = (
+            args.merge_dual_initial
+        )
         trainer._reconcile_optimizer_parameters()
         _apply_cl_metadata(trainer, args)
         _apply_evaluation_ablation(trainer, args.evaluation_ablation)
@@ -2513,6 +2591,11 @@ def main() -> None:
         ),
         sleep=SleepConfig(
             light_replay_budget=args.light_replay_budget,
+            light_min_gain=args.light_min_gain,
+            split_steps=args.split_steps,
+            split_lr=args.split_lr,
+            split_min_replay_per_group=args.split_min_replay_per_group,
+            split_persistence_cycles=args.split_persistence_cycles,
             deep_availability_tau=args.deep_availability_tau,
             deep_probe_interval=args.deep_probe_interval,
             deep_computation_cost=args.deep_computation_cost,
@@ -2542,6 +2625,10 @@ def main() -> None:
                 "stale_weight": args.merge_stale_weight,
                 "dynamics_weight": args.merge_dynamics_weight,
                 "normalize_by_events": True,
+            },
+            topology_prune_kwargs={
+                "dual_lr": args.merge_dual_lr,
+                "dual_initial": args.merge_dual_initial,
             },
         ),
         training=TrainingConfig(

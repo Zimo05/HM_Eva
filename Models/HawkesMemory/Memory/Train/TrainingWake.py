@@ -2105,6 +2105,30 @@ class TrainingWakeMixin:
         if age_advance:
             self.tree.episodic_memory.step_age(age_advance)
 
+        # Usage credit is defined on the pre-commit packed-memory snapshot.
+        # Apply it before any append/refresh/compression/eviction can mutate
+        # the bank row identity used to produce that snapshot.
+        total_usage: dict[str, Any] = {}
+        for payload in usage_payloads:
+            if not isinstance(payload, Mapping):
+                continue
+            node_ids = tuple(payload.get("node_ids", ()))
+            node_credit = payload.get("node_credit")
+            if node_credit is None:
+                continue
+            node_credit = torch.as_tensor(node_credit).detach().cpu()
+            prior = total_usage.get("node_credit")
+            total_usage["node_ids"] = node_ids
+            total_usage["node_credit"] = (
+                node_credit if prior is None else prior + node_credit
+            )
+        if total_usage.get("node_credit") is not None:
+            memory = self.tree.episodic_memory
+            memory.apply_cycle_usage_credit(
+                total_usage["node_credit"].to(self.device),
+                total_usage["node_ids"],
+            )
+
         grouped: dict[str, list[tuple[WakeTransaction, Mapping[str, Any]]]] = {}
         for transaction, proposal in proposals:
             owner_id = str(proposal.get("owner_id", "root"))
@@ -2195,26 +2219,6 @@ class TrainingWakeMixin:
                         item.queue_weight
                     )
 
-        total_usage: dict[str, Any] = {}
-        for payload in usage_payloads:
-            if not isinstance(payload, Mapping):
-                continue
-            node_ids = tuple(payload.get("node_ids", ()))
-            node_credit = payload.get("node_credit")
-            if node_credit is None:
-                continue
-            node_credit = torch.as_tensor(node_credit).detach().cpu()
-            prior = total_usage.get("node_credit")
-            total_usage["node_ids"] = node_ids
-            total_usage["node_credit"] = (
-                node_credit if prior is None else prior + node_credit
-            )
-        if total_usage.get("node_credit") is not None:
-            memory = self.tree.episodic_memory
-            memory.apply_cycle_usage_credit(
-                total_usage["node_credit"].to(self.device),
-                total_usage["node_ids"],
-            )
         self._apply_controller_stat_deltas([
             {
                 "sequence_index": int(transaction.sequence_index),

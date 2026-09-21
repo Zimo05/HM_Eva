@@ -48,6 +48,10 @@ from easy_tpp.model.torch_model.torch_attnhp import AttNHP  # noqa: E402
 from easy_tpp.model.torch_model.torch_s2p2 import S2P2  # noqa: E402
 from easy_tpp.preprocess.dataset import TPPDataset, get_data_loader  # noqa: E402
 from easy_tpp.preprocess.event_tokenizer import EventTokenizer  # noqa: E402
+from Evaluation.core.intensity_eval import (  # noqa: E402
+    EasyTPPIntensityAdapter,
+    evaluate_intensity_curves,
+)
 
 
 MODEL_CLASSES = {"S2P2": S2P2, "AttNHP": AttNHP}
@@ -387,10 +391,10 @@ def _make_model_config(model: str, dim_process: int, dtime_max: float, gpu: int)
     thinning = THINNING_BY_MODEL[model]
     if model == "S2P2":
         return _ModelConfig(
-            # B 稳健型：H=128, P=16, 4 layers.
+            # Requested S2P2 architecture: H=128, P=128, L=2.
             hidden_size=128,
             time_emb_size=16,
-            num_layers=4,
+            num_layers=2,
             num_heads=2,
             use_mc_samples=True,
             loss_integral_num_sample_per_step=10,
@@ -403,7 +407,7 @@ def _make_model_config(model: str, dim_process: int, dtime_max: float, gpu: int)
             model_id=model,
             gpu=gpu,
             model_specs={
-                "P": 16,
+                "P": 128,
                 "dropout_rate": 0.1,
                 "act_func": "gelu",
                 "for_loop": True,
@@ -1008,6 +1012,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-sequences", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--max-events-per-sequence", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--intensity-output-dir", type=Path, default=None)
+    parser.add_argument("--intensity-ground-truth-dir", type=Path, default=None)
+    parser.add_argument("--intensity-regime-id", default=None)
+    parser.add_argument("--intensity-checkpoint-task", type=int, default=None)
+    parser.add_argument("--intensity-samples", type=int, default=256)
+    parser.add_argument("--intensity-plot-anchors", type=int, default=2)
     return parser
 
 
@@ -1032,6 +1042,23 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--early-stop-patience must be positive")
     if args.max_sequences is not None and args.max_sequences < 1:
         raise ValueError("--max-sequences must be positive")
+    if args.intensity_samples < 2:
+        raise ValueError("--intensity-samples must be at least two")
+    if args.intensity_plot_anchors < 0:
+        raise ValueError("--intensity-plot-anchors must be non-negative")
+    intensity_values = (
+        args.intensity_output_dir,
+        args.intensity_ground_truth_dir,
+        args.intensity_regime_id,
+        args.intensity_checkpoint_task,
+    )
+    if any(value is not None for value in intensity_values) and not all(
+        value is not None for value in intensity_values
+    ):
+        raise ValueError(
+            "intensity evaluation requires output dir, ground truth dir, "
+            "regime ID, and checkpoint task together"
+        )
     output = args.output_dir.expanduser().resolve()
     archive = (args.archive or output.with_suffix(".tar.gz")).expanduser().resolve()
     if archive.exists():
@@ -1209,6 +1236,24 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed + 100_000,
         collect_predictions=True,
     )
+    intensity_summary = None
+    if args.intensity_output_dir is not None:
+        intensity_adapter = EasyTPPIntensityAdapter(
+            model,
+            dim_process,
+            model_name=args.model,
+        )
+        _intensity_rows, intensity_summary = evaluate_intensity_curves(
+            intensity_adapter,
+            records["test"],
+            output_dir=args.intensity_output_dir,
+            ground_truth_dir=args.intensity_ground_truth_dir,
+            regime_id=args.intensity_regime_id,
+            model_name=args.model,
+            checkpoint_task=args.intensity_checkpoint_task,
+            samples=args.intensity_samples,
+            plot_anchors=args.intensity_plot_anchors,
+        )
     test_row = {
         "Epoch": best_epoch,
         "Split": "test",
@@ -1250,6 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
             "selection_metric": "validation_loglike",
             "validation_loglike": None if args.evaluate_only else best_validation,
             "test": test_metrics,
+            "intensity": intensity_summary,
             "artifacts": {
                 "checkpoint": str(checkpoint) if checkpoint.is_file() else None,
                 "epoch_metrics": str(output / "csv" / "epoch_metrics.csv"),

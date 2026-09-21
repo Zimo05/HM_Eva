@@ -31,6 +31,7 @@ from core.hm_bootstrap import expected_stationary_hm_upstream
 from core.manifest import compatible
 from core.runner import (
     _baseline_command,
+    _baseline_intensity_command_args,
     _continual_cl_config,
     _hm_continual_resume_checkpoint,
 )
@@ -120,6 +121,51 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
     )
     assert rmtpp_command[rmtpp_command.index("--lr-patience") + 1] == "6"
     assert rmtpp_command[rmtpp_command.index("--lr-factor") + 1] == "0.3"
+
+    fullynn_command, fullynn_cwd, _env = _baseline_command(
+        "FullyNN",
+        args,
+        ROOT / "prepared",
+        ROOT / "output",
+        ROOT / "previous.pt",
+        False,
+    )
+    assert fullynn_cwd == ROOT / "Models" / "FullyNN"
+    assert fullynn_command[1].endswith("Models/FullyNN/run_experiment.py")
+    assert fullynn_command[fullynn_command.index("--epochs") + 1] == "60"
+    assert fullynn_command[fullynn_command.index("--batch-size") + 1] == "64"
+    assert (
+        fullynn_command[fullynn_command.index("--initial-checkpoint") + 1]
+        == str(ROOT / "previous.pt")
+    )
+
+
+def test_continual_neural_baselines_share_intensity_cli_contract():
+    expected_flags = {
+        "--intensity-output-dir": ROOT / "curves",
+        "--intensity-ground-truth-dir": ROOT / "ground_truth",
+        "--intensity-regime-id": "A_1",
+        "--intensity-checkpoint-task": "3",
+        "--intensity-samples": "256",
+        "--intensity-plot-anchors": "2",
+    }
+    for model in ("RMTPP", "FullyNN", "THP", "S2P2", "AttNHP"):
+        command = _baseline_intensity_command_args(
+            model,
+            output_dir=ROOT / "curves",
+            ground_truth_dir=ROOT / "ground_truth",
+            regime_id="A_1",
+            checkpoint_task=3,
+        )
+        for flag, expected in expected_flags.items():
+            assert command[command.index(flag) + 1] == str(expected)
+    assert _baseline_intensity_command_args(
+        "TPP_LLM",
+        output_dir=ROOT / "curves",
+        ground_truth_dir=ROOT / "ground_truth",
+        regime_id="A_1",
+        checkpoint_task=3,
+    ) == []
 
 
 def test_hm_continual_propagates_validation_best_state():
@@ -337,6 +383,17 @@ def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
                 command[command.index("--wake-transaction-mode") + 1]
                 == "snapshot"
             )
+            assert command[command.index("--frontier-budget") + 1] == "4"
+            assert command[command.index("--residual-init-rank") + 1] == "2"
+            assert command[command.index("--max-writes-per-sequence") + 1] == "6"
+            assert (
+                command[command.index("--prototype-duplicate-threshold") + 1]
+                == "0.96"
+            )
+            assert (
+                command[command.index("--prototype-mode-threshold") + 1]
+                == "0.88"
+            )
         else:
             assert "--wake-dataset-family" not in command
             assert "--wake-transaction-mode" not in command
@@ -347,9 +404,29 @@ def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
             assert command[command.index("--frontier-budget") + 1] == "5"
             assert command[command.index("--frontier-routing-temperature") + 1] == "0.9"
             assert command[command.index("--residual-init-scale") + 1] == "0.06"
-        else:
+        elif dataset == "taobao":
             assert command[command.index("--epochs") + 1] == "60"
             assert command[command.index("--frontier-budget") + 1] == "7"
+            assert command[command.index("--frontier-routing-temperature") + 1] == "1.25"
+            assert command[command.index("--residual-init-scale") + 1] == "0.08"
+            expected_taobao_tuning = {
+                "--learning-rate": "0.0007",
+                "--grad-clip": "3.5",
+                "--router-lr-scale": "0.5",
+                "--route-encoder-grad-scale": "0.05",
+                "--alignment-lr": "0.0005",
+                "--deep-prior-probability": "0.18",
+                "--topology-inertia-tau": "4.0",
+                "--split-lr": "0.0005",
+                "--split-min-replay-per-group": "4",
+                "--split-persistence-cycles": "3",
+                "--light-min-gain": "0.025",
+                "--merge-dual-initial": "0.05",
+            }
+            for option, expected in expected_taobao_tuning.items():
+                assert command[command.index(option) + 1] == expected
+        else:
+            assert command[command.index("--epochs") + 1] == "60"
             assert command[command.index("--frontier-routing-temperature") + 1] == "1.10"
             assert command[command.index("--residual-init-scale") + 1] == "0.08"
         assert "--stability-constrained-cold-start" in command

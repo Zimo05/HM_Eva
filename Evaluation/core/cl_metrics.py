@@ -541,9 +541,11 @@ def compute_rrr(
         _as_int(_value(record, "task_id"), "task_id"): record
         for record in records
     }
+    protocol_task_ids = _protocol_task_ids(protocol)
+    first_protocol_task = protocol_task_ids[0] if protocol_task_ids else None
     first_seen = _protocol_first_seen(protocol)
     output: list[dict[str, Any]] = []
-    for task_id in _protocol_task_ids(protocol):
+    for task_id in protocol_task_ids:
         task = _protocol_task(protocol, task_id)
         if task is None:
             continue
@@ -557,6 +559,13 @@ def compute_rrr(
             first = boundaries.get(first_task) if first_task is not None else None
             returned = boundaries.get(task_id)
             first_pre = _finite(_value(first, "pre_nll")) if first else None
+            # C_init evaluated on the first protocol task is both the task-0
+            # pre-update boundary and the task-0 FWT scratch observation.
+            # Older HM result bundles recorded only the latter.  Recover that
+            # exact observation here, but never use scratch values from later
+            # tasks as recurrence baselines.
+            if first_pre is None and first_task == first_protocol_task and first:
+                first_pre = _finite(_value(first, "scratch_nll"))
             first_post = _finite(_value(first, "post_nll")) if first else None
             return_pre = _finite(_value(returned, "pre_nll")) if returned else None
             denominator = (

@@ -3,6 +3,7 @@ import gzip
 import json
 import numpy as np
 import pickle
+import sys
 import time
 from pathlib import Path
 import torch
@@ -15,6 +16,14 @@ import Utils
 from preprocess.Dataset import get_dataloader
 from transformer.Models import Transformer
 from tqdm import tqdm
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+from Evaluation.core.intensity_eval import (  # noqa: E402
+    THPIntensityAdapter,
+    evaluate_intensity_curves,
+)
 
 
 def _merge_target_stats(total, update):
@@ -83,6 +92,28 @@ def prepare_dataloader(opt):
         test_data, opt.batch_size, shuffle=False, num_workers=opt.num_workers
     )
     return trainloader, devloader, testloader, num_types, train_metadata
+
+
+def _load_intensity_records(data_root):
+    path = Path(data_root) / 'test.pkl'
+    with path.open('rb') as handle:
+        payload = pickle.load(handle, encoding='latin-1')
+    streams = payload.get('test')
+    if not isinstance(streams, (list, tuple)) or not streams:
+        raise ValueError('{} has no non-empty test split'.format(path))
+    records = []
+    for sequence_index, stream in enumerate(streams):
+        times = [float(event['time_since_start']) for event in stream]
+        types = [int(event['type_event']) for event in stream]
+        if len(times) != len(types) or len(times) < 2:
+            raise ValueError(
+                '{} test sequence {} is invalid'.format(path, sequence_index)
+            )
+        records.append({
+            'time_since_start': times,
+            'type_event': types,
+        })
+    return records
 
 
 def train_epoch(model, training_data, optimizer, pred_loss_func, opt):
@@ -477,6 +508,12 @@ def main():
     parser.add_argument('-prediction_log', type=str, default=None)
     parser.add_argument('-load', type=str, default=None)
     parser.add_argument('-evaluate_only', action='store_true')
+    parser.add_argument('-intensity_output_dir', type=Path, default=None)
+    parser.add_argument('-intensity_ground_truth_dir', type=Path, default=None)
+    parser.add_argument('-intensity_regime_id', default=None)
+    parser.add_argument('-intensity_checkpoint_task', type=int, default=None)
+    parser.add_argument('-intensity_samples', type=int, default=256)
+    parser.add_argument('-intensity_plot_anchors', type=int, default=2)
     parser.add_argument(
         '-selection_metric', choices=('ll', 'accuracy', 'rmse'), default='ll'
     )
@@ -496,6 +533,20 @@ def main():
     opt.device = torch.device(requested_device)
     if opt.device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA was requested but is not available')
+    intensity_values = (
+        opt.intensity_output_dir,
+        opt.intensity_ground_truth_dir,
+        opt.intensity_regime_id,
+        opt.intensity_checkpoint_task,
+    )
+    if any(value is not None for value in intensity_values) and not all(
+            value is not None for value in intensity_values):
+        raise ValueError(
+            'intensity evaluation requires output dir, ground truth dir, '
+            'regime ID, and checkpoint task together'
+        )
+    if opt.intensity_samples < 2 or opt.intensity_plot_anchors < 0:
+        raise ValueError('invalid intensity sample/plot count')
 
     log_path = Path(opt.log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -628,6 +679,19 @@ def main():
             .format(epoch=best_epoch, metric=opt.selection_metric,
                     ll=test_event, acc=test_type, rmse=test_time,
                     targets=target_values)
+        )
+    if opt.intensity_output_dir is not None:
+        intensity_adapter = THPIntensityAdapter(model, num_types)
+        evaluate_intensity_curves(
+            intensity_adapter,
+            _load_intensity_records(opt.data),
+            output_dir=opt.intensity_output_dir,
+            ground_truth_dir=opt.intensity_ground_truth_dir,
+            regime_id=opt.intensity_regime_id,
+            model_name='THP',
+            checkpoint_task=opt.intensity_checkpoint_task,
+            samples=opt.intensity_samples,
+            plot_anchors=opt.intensity_plot_anchors,
         )
     print('[Info] Final test metrics saved to {}'.format(opt.test_log))
 

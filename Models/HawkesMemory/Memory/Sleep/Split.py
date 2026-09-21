@@ -2595,8 +2595,18 @@ class SplitModule(nn.Module):
         m_min: float = 0.0,
         min_structural_strength: float = 0.0,
         min_effective_sample_size: float = 0.0,
+        persistence_cycles: int = 1,
     ) -> bool:
-        """Validate a proposal without imposing hand-designed thresholds."""
+        """Validate a proposal without imposing retired strength/ESS gates.
+
+        ``persistence_cycles`` is deliberately a small, explicit temporal
+        gate.  Bank admission still owns structural identity; this only
+        prevents one noisy Sleep snapshot from immediately reaching the
+        topology selector.
+        """
+        if int(persistence_cycles) <= 0:
+            raise ValueError("persistence_cycles must be positive")
+        persistence_cycles = int(persistence_cycles)
         N_mass = torch.as_tensor(out["N"]).detach()
         N_eff = torch.as_tensor(
             out.get("N_eff", N_mass)
@@ -2657,7 +2667,7 @@ class SplitModule(nn.Module):
             if has_bank_prior
             else bool(torch.isfinite(N_eff).all())
         )
-        eligible = bool(
+        evidence_eligible = bool(
             bool(torch.isfinite(N_mass).all())
             and child_ess_finite
             and math.isfinite(structural_strength)
@@ -2667,7 +2677,14 @@ class SplitModule(nn.Module):
             and invalid_flag_is_valid
             and not invalid_proposal
         )
-        commit_state.consecutive_ready = int(eligible)
+        if evidence_eligible:
+            commit_state.consecutive_ready += 1
+        else:
+            commit_state.consecutive_ready = 0
+        eligible = bool(
+            evidence_eligible
+            and commit_state.consecutive_ready >= persistence_cycles
+        )
         return eligible
 
     @staticmethod
@@ -2706,6 +2723,7 @@ class SplitModule(nn.Module):
         lambda_route: float | torch.Tensor = 0.0,
         hypothesis: Optional[FrozenBankSplitHypothesis] = None,
         lambda_anchor: float | torch.Tensor = 0.0,
+        persistence_cycles: int = 1,
     ) -> Dict[str, Any]:
         if hypothesis is not None:
             if batch.bank_group_weights is None:
@@ -2725,6 +2743,7 @@ class SplitModule(nn.Module):
                 delta_complexity=delta_complexity,
                 lambda_anchor=lambda_anchor,
                 lambda_route=lambda_route,
+                persistence_cycles=persistence_cycles,
             )
         if batch.bank_group_weights is not None:
             # Fallback callers that have a Bank batch but did not run the
@@ -2746,6 +2765,7 @@ class SplitModule(nn.Module):
                 delta_complexity=delta_complexity,
                 lambda_anchor=lambda_anchor,
                 lambda_route=lambda_route,
+                persistence_cycles=persistence_cycles,
             )
         if num_steps <= 0:
             raise ValueError("num_steps must be positive")
@@ -2810,6 +2830,7 @@ class SplitModule(nn.Module):
             m_min=self.m_min if m_min is None else m_min,
             min_structural_strength=min_structural_strength,
             min_effective_sample_size=min_effective_sample_size,
+            persistence_cycles=persistence_cycles,
         )
         final_out = self.attach_split_eligibility_output(
             out=final_out,
@@ -2835,6 +2856,7 @@ class SplitModule(nn.Module):
         delta_complexity: float | torch.Tensor = 1.0,
         lambda_anchor: float | torch.Tensor = 1e-2,
         lambda_route: float | torch.Tensor = 0.0,
+        persistence_cycles: int = 1,
     ) -> Dict[str, Any]:
         """Refine one frozen Bank hypothesis without changing its identity.
 
@@ -3112,6 +3134,7 @@ class SplitModule(nn.Module):
             m_min=0.0,
             min_structural_strength=min_structural_strength,
             min_effective_sample_size=min_effective_sample_size,
+            persistence_cycles=persistence_cycles,
         )
         final_out = self.attach_split_eligibility_output(
             out=final_out,
@@ -3142,6 +3165,7 @@ class SplitModule(nn.Module):
         residual_norm_ema: float = 1.0,
         lambda_route: float | torch.Tensor = 0.0,
         lambda_anchor: float | torch.Tensor = 1e-2,
+        persistence_cycles: int = 1,
     ) -> Dict[Any, Dict[str, Any]]:
         split_outputs = {}
 
@@ -3184,6 +3208,7 @@ class SplitModule(nn.Module):
                 delta_complexity=delta_complexity,
                 lambda_route=lambda_route,
                 lambda_anchor=lambda_anchor,
+                persistence_cycles=persistence_cycles,
             )
 
         return split_outputs

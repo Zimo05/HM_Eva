@@ -37,11 +37,16 @@ os.environ.setdefault(
     "HF_DATASETS_CACHE", str(LOCAL_CACHE_ROOT / "huggingface" / "datasets")
 )
 sys.path.insert(0, str(EASYTPP_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from data_configuration import DataConfiguration  # noqa: E402
 from easy_tpp.config_factory import Config  # noqa: E402
 from easy_tpp.runner import Runner  # noqa: E402
 from easy_tpp.utils import RunnerPhase, logger  # noqa: E402
+from Evaluation.core.intensity_eval import (  # noqa: E402
+    EasyTPPIntensityAdapter,
+    evaluate_intensity_curves,
+)
 
 
 def parse_args():
@@ -105,6 +110,12 @@ def parse_args():
     parser.add_argument("--prepared-data-dir", type=Path, default=None)
     parser.add_argument("--initial-checkpoint", type=Path, default=None)
     parser.add_argument("--evaluate-only", action="store_true")
+    parser.add_argument("--intensity-output-dir", type=Path, default=None)
+    parser.add_argument("--intensity-ground-truth-dir", type=Path, default=None)
+    parser.add_argument("--intensity-regime-id", default=None)
+    parser.add_argument("--intensity-checkpoint-task", type=int, default=None)
+    parser.add_argument("--intensity-samples", type=int, default=256)
+    parser.add_argument("--intensity-plot-anchors", type=int, default=2)
     return parser.parse_args()
 
 
@@ -131,6 +142,23 @@ def validate_args(args):
         )
     if args.gpu < -1:
         raise ValueError("--gpu must be -1 or a non-negative CUDA index")
+    if args.intensity_samples < 2:
+        raise ValueError("--intensity-samples must be at least two")
+    if args.intensity_plot_anchors < 0:
+        raise ValueError("--intensity-plot-anchors must be non-negative")
+    intensity_values = (
+        args.intensity_output_dir,
+        args.intensity_ground_truth_dir,
+        args.intensity_regime_id,
+        args.intensity_checkpoint_task,
+    )
+    if any(value is not None for value in intensity_values) and not all(
+        value is not None for value in intensity_values
+    ):
+        raise ValueError(
+            "intensity evaluation requires output dir, ground truth dir, "
+            "regime ID, and checkpoint task together"
+        )
 
 
 def _normalise_dataset_label(label):
@@ -441,7 +469,30 @@ def restore_checkpoint(runner, checkpoint_path):
     runner.model.load_state_dict(state, strict=False)
 
 
-def train_and_test(args, paths, config_path):
+def _evaluate_native_intensity(args, runner, adapted_dir, num_event_types):
+    if args.intensity_output_dir is None:
+        return None
+    records = read_records(Path(adapted_dir) / "test.json")
+    adapter = EasyTPPIntensityAdapter(
+        runner.model,
+        num_event_types,
+        model_name="RMTPP",
+    )
+    _rows, summary = evaluate_intensity_curves(
+        adapter,
+        records,
+        output_dir=args.intensity_output_dir,
+        ground_truth_dir=args.intensity_ground_truth_dir,
+        regime_id=args.intensity_regime_id,
+        model_name="RMTPP",
+        checkpoint_task=args.intensity_checkpoint_task,
+        samples=args.intensity_samples,
+        plot_anchors=args.intensity_plot_anchors,
+    )
+    return summary
+
+
+def train_and_test(args, paths, config_path, adapted_dir, num_event_types):
     pipeline = Config.build_from_yaml_file(
         str(config_path), experiment_id="RMTPP_train"
     )
@@ -480,6 +531,9 @@ def train_and_test(args, paths, config_path):
             ))
             writer.writeheader()
             writer.writerow(test_row)
+        _evaluate_native_intensity(
+            args, runner, adapted_dir, num_event_types
+        )
         runner.model_wrapper.close_summary()
         return [], test_row
 
@@ -551,7 +605,6 @@ def train_and_test(args, paths, config_path):
     test_metrics = evaluate_loader(
         runner, test_loader, paths["output"] / "predictions.jsonl.gz"
     )
-    runner.model_wrapper.close_summary()
     current_lr = runner.model_wrapper.opt.param_groups[0]["lr"]
     test_row = metric_row(best_epoch, "test", test_metrics, current_lr)
     test_row["SelectionMetric"] = "validation_{}".format(args.selection_metric)
@@ -577,6 +630,8 @@ def train_and_test(args, paths, config_path):
     persistent_checkpoint = paths["output"] / "checkpoint" / "best.pt"
     persistent_checkpoint.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(checkpoint_path, persistent_checkpoint)
+    _evaluate_native_intensity(args, runner, adapted_dir, num_event_types)
+    runner.model_wrapper.close_summary()
     return rows, test_row
 
 
@@ -727,7 +782,13 @@ def main():
                 "seed": args.seed,
             },
         )
-        rows, test_row = train_and_test(args, paths, config_path)
+        rows, test_row = train_and_test(
+            args,
+            paths,
+            config_path,
+            adapted_dir,
+            num_event_types,
+        )
         if not args.evaluate_only:
             plot_metrics(paths, rows, test_row)
         logger.info("RMTPP %s experiment complete", paths["run_name"])

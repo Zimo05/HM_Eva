@@ -800,7 +800,7 @@ def prepare_continual_baseline_dataset(
     for split_records in (train, dev, test):
         for index, record in enumerate(split_records):
             record["seq_idx"] = index
-    if model in {"RMTPP", "TPP_LLM"}:
+    if model in {"RMTPP", "FullyNN", "TPP_LLM"}:
         for split, records in (("train", train), ("dev", dev), ("test", test)):
             payload = records
             if model == "TPP_LLM":

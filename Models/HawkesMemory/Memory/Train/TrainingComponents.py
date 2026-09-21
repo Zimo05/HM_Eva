@@ -346,6 +346,10 @@ class SleepConfig:
     # Anchor for Deep's local refinement around the frozen Bank child laws.
     # This is a fitting regularizer, not a topology-selection price.
     split_anchor_weight: float = 1e-2
+    # Number of consecutive Sleep evaluations for which a Bank-backed Split
+    # hypothesis must remain valid before it can enter topology arbitration.
+    # Appended to preserve positional construction of older SleepConfig data.
+    split_persistence_cycles: int = 1
 
 
 @dataclass

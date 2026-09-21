@@ -399,20 +399,60 @@ def stationary_command(
         memory = MODELS_ROOT / "HawkesMemory" / "Memory"
         checkpoint = result_dir / "checkpoint" / "model.pt"
         best = result_dir / "checkpoint" / "best.pt"
+        # These values are the shared stationary HM baseline contract.  The
+        # Taobao branch below only changes the controls called out in the
+        # dataset-specific tuning sheet; keep the other datasets byte-for-
+        # byte compatible with their existing command.
+        taobao_tuning = spec.dataset == "taobao"
+        route_encoder_grad_scale = "0.08"
+        frontier_routing_temperature = "1.10"
+        deep_prior_probability = "0.10"
+        topology_inertia_tau = "3.0"
+        alignment_lr = "0.001"
         if spec.dataset == "stackoverflow":
             # StackOverflow has more event types and a slower long-tail
             # convergence profile.  Keep this override local to StackOverflow
-            # so the established DWS/Retweet/Taobao contract is unchanged.
+            # so the DWS/Taobao contracts are unchanged.
             hm_default_epochs = 120
             frontier_budget = "5"
             frontier_routing_temperature = "0.9"
             residual_init_scale = "0.06"
+            residual_init_rank = "4"
+            max_writes_per_sequence = "8"
+        elif spec.dataset == "retweet":
+            # Retweet's law space is small.  Use a narrower frontier and a
+            # lower-rank residual, and cap redundant online writes without
+            # changing the contracts for DWS, Taobao, or StackOverflow.
+            hm_default_epochs = 60
+            frontier_budget = "4"
+            frontier_routing_temperature = "1.10"
+            residual_init_scale = "0.08"
+            residual_init_rank = "2"
+            max_writes_per_sequence = "6"
         else:
             hm_default_epochs = 60
             frontier_budget = "7"
-            frontier_routing_temperature = "1.10"
             residual_init_scale = "0.08"
-        if spec.dataset in {"taobao", "stackoverflow"}:
+            residual_init_rank = "4"
+            max_writes_per_sequence = "8"
+        if taobao_tuning:
+            # Taobao has a long-tail law space and showed over-eager topology
+            # edits.  Use the middle of the requested ranges so this remains
+            # a deterministic benchmark setting rather than a search sweep.
+            frontier_routing_temperature = "1.25"  # +14% from 1.10
+            route_encoder_grad_scale = "0.05"       # 0.625x
+            deep_prior_probability = "0.18"
+            topology_inertia_tau = "4.0"
+            alignment_lr = "0.0005"
+        if spec.dataset == "retweet":
+            # Broaden both cosine-distance gates for the compact Retweet law
+            # space: duplicate radius 0.04 and initial mode radius 0.12.
+            prototype_duplicate_threshold = "0.96"
+            prototype_mode_threshold = "0.88"
+            prototype_mode_capacity = "12"
+            prototype_duplicate_quantile = "0.85"
+            prototype_mode_quantile = "0.95"
+        elif spec.dataset in {"taobao", "stackoverflow"}:
             prototype_duplicate_threshold = "0.97"
             prototype_mode_threshold = "0.92"
             prototype_mode_capacity = "16"
@@ -477,7 +517,7 @@ def stationary_command(
                 "--frontier-owner-confidence",
                 "0.50",
                 "--max-writes-per-sequence",
-                "8",
+                max_writes_per_sequence,
                 "--semantic-blend",
                 "0",
                 "--leaf-symmetry-scale",
@@ -499,7 +539,7 @@ def stationary_command(
                 "--route-encoder-warmup-epochs",
                 "0",
                 "--route-encoder-grad-scale",
-                "0.08",
+                route_encoder_grad_scale,
                 "--route-encoder-reliability-decay",
                 "0.80",
                 "--route-teacher-temperature",
@@ -520,7 +560,7 @@ def stationary_command(
                 "--deep-computation-cost",
                 "0.05",
                 "--deep-prior-probability",
-                "0.10",
+                deep_prior_probability,
                 "--deep-prior-weight",
                 "0.01",
                 "--deep-evidence-budget",
@@ -528,7 +568,7 @@ def stationary_command(
                 "--topology-inertia-strength",
                 "0.03",
                 "--topology-inertia-tau",
-                "3.0",
+                topology_inertia_tau,
             ]
             if spec.dataset == "retweet":
                 # Retweet is the isolated rollout target for the shared-bank
@@ -552,7 +592,7 @@ def stationary_command(
                     "--residual-init-scale",
                     residual_init_scale,
                     "--residual-init-rank",
-                    "4",
+                    residual_init_rank,
                     "--residual-init-grad-clip",
                     "0",
                     "--alignment-epochs",
@@ -560,7 +600,7 @@ def stationary_command(
                     "--alignment-batch-size",
                     "16",
                     "--alignment-lr",
-                    "0.001",
+                    alignment_lr,
                     "--alignment-weight-decay",
                     "0.00001",
                     "--alignment-temperature",
@@ -568,9 +608,40 @@ def stationary_command(
                     "--alignment-grad-clip",
                     "5.0",
                 ]
+        if taobao_tuning:
+            # Taobao-only stabilization knobs.  These flags are intentionally
+            # appended after the common contract so they are visible in the
+            # generated command and are recorded by Train.py's config.
+            command += [
+                # WM/base optimizer and its global gradient bound.
+                "--learning-rate",
+                "0.0007",
+                "--grad-clip",
+                "3.5",
+                # Router is a separate optimizer group.
+                "--router-lr-scale",
+                "0.5",
+                # Split evidence and fitting are deliberately slower to
+                # authorize a topology edit on this long-tail dataset.
+                "--split-lr",
+                "0.0005",
+                "--split-min-replay-per-group",
+                "4",
+                "--split-persistence-cycles",
+                "3",
+                "--light-min-gain",
+                "0.025",
+                # Start the shared topology-complexity price at the middle
+                # of the requested 0.04--0.06 range.  TrainingCLI mirrors
+                # this value into Merge and topology-prune dual state.
+                "--merge-dual-initial",
+                "0.05",
+                "--merge-dual-lr",
+                "0.000001",
+            ]
         if prototype_duplicate_threshold is not None:
-            # Taobao/StackOverflow prototype policy.  DWS and the other
-            # datasets keep the checkpoint/TrainingCLI defaults unchanged.
+            # Dataset-specific prototype policy. DWS and datasets not listed
+            # above keep the checkpoint/TrainingCLI defaults unchanged.
             command += [
                 "--prototype-duplicate-threshold",
                 prototype_duplicate_threshold,
@@ -880,8 +951,9 @@ def normalize_native_metrics(spec, result_dir: Path) -> dict[str, Any]:
     metrics = {
         "nll_per_event": -loglike if loglike is not None else None,
         "accuracy": value("accuracy"),
-        "time_mae": value("mae", "time_mae"),
+        "time_mae": value("mae", "time_mae", "time mae"),
         "time_rmse": value("rmse", "time_rmse"),
+        "macro_f1": value("macro-f1", "macro f1", "macro_f1"),
         "num_events": value("num_events", "numevents", "rmse numevents"),
         "source": str(path),
     }

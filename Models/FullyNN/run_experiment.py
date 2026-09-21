@@ -35,11 +35,16 @@ os.environ.setdefault(
     "HF_DATASETS_CACHE", str(LOCAL_CACHE_ROOT / "huggingface" / "datasets")
 )
 sys.path.insert(0, str(EASYTPP_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from data_configuration import DataConfiguration  # noqa: E402
 from easy_tpp.config_factory import Config  # noqa: E402
 from easy_tpp.runner import Runner  # noqa: E402
 from easy_tpp.utils import RunnerPhase, logger  # noqa: E402
+from Evaluation.core.intensity_eval import (  # noqa: E402
+    EasyTPPIntensityAdapter,
+    evaluate_intensity_curves,
+)
 
 
 def parse_args():
@@ -116,6 +121,23 @@ def parse_args():
             "instead of re-splitting/adapting the raw dataset."
         ),
     )
+    parser.add_argument(
+        "--initial-checkpoint",
+        type=Path,
+        default=None,
+        help="Existing FullyNN state_dict to load before training or evaluation.",
+    )
+    parser.add_argument(
+        "--evaluate-only",
+        action="store_true",
+        help="Evaluate without training; with no checkpoint, evaluate random initialization.",
+    )
+    parser.add_argument("--intensity-output-dir", type=Path, default=None)
+    parser.add_argument("--intensity-ground-truth-dir", type=Path, default=None)
+    parser.add_argument("--intensity-regime-id", default=None)
+    parser.add_argument("--intensity-checkpoint-task", type=int, default=None)
+    parser.add_argument("--intensity-samples", type=int, default=256)
+    parser.add_argument("--intensity-plot-anchors", type=int, default=2)
     return parser.parse_args()
 
 
@@ -320,7 +342,9 @@ def metric_row(epoch, split, metrics, learning_rate):
         "Time Log-likelihood": float(metrics.get("time_loglike", float("nan"))),
         "Mark Log-likelihood": float(metrics.get("mark_loglike", float("nan"))),
         "RMSE": float(metrics.get("rmse", float("nan"))),
+        "Time MAE": float(metrics.get("time_mae", metrics.get("mae", float("nan")))),
         "Accuracy": float(metrics.get("acc", float("nan"))),
+        "Macro-F1": float(metrics.get("macro_f1", float("nan"))),
         "NumEvents": int(metrics["num_events"]),
         "LearningRate": float(learning_rate),
         "Target 51 Accuracy": float(metrics.get(
@@ -335,7 +359,8 @@ def metric_row(epoch, split, metrics, learning_rate):
 def write_metrics(path, rows):
     fields = (
         "Epoch", "Split", "Log-likelihood", "Time Log-likelihood",
-        "Mark Log-likelihood", "RMSE", "Accuracy", "NumEvents", "LearningRate",
+        "Mark Log-likelihood", "RMSE", "Time MAE", "Accuracy", "Macro-F1",
+        "NumEvents", "LearningRate",
         "Target 51 Accuracy", "Target 61 Accuracy"
     )
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -380,6 +405,10 @@ def evaluate_loader(runner, data_loader, prediction_path=None):
     time_num_events = 0
     num_correct = 0
     type_num_events = 0
+    num_event_types = int(getattr(runner.model_wrapper.model, "num_event_types", 0))
+    if num_event_types <= 0:
+        raise RuntimeError("FullyNN model does not expose a positive num_event_types")
+    confusion = np.zeros((num_event_types, num_event_types), dtype=np.int64)
     sequence_cursor = 0
 
     prediction_handle = None
@@ -425,6 +454,19 @@ def evaluate_loader(runner, data_loader, prediction_path=None):
             # first observed event, so their local positions are 0-based and
             # the canonical event_index is position + 1.
             common_mask = event_mask & time_mask & type_mask
+            true_types = label_type[common_mask].astype(np.int64, copy=False)
+            predicted_types = pred_type[common_mask].astype(np.int64, copy=False)
+            valid_types = (
+                (true_types >= 0)
+                & (true_types < num_event_types)
+                & (predicted_types >= 0)
+                & (predicted_types < num_event_types)
+            )
+            np.add.at(
+                confusion,
+                (true_types[valid_types], predicted_types[valid_types]),
+                1,
+            )
             if prediction_handle is not None:
                 for batch_index, position in np.argwhere(common_mask):
                     prediction_handle.write(json.dumps({
@@ -444,6 +486,23 @@ def evaluate_loader(runner, data_loader, prediction_path=None):
 
     if total_num_events <= 0 or time_num_events <= 0 or type_num_events <= 0:
         raise RuntimeError("Evaluation found no target events")
+    f1_values = []
+    for label in range(num_event_types):
+        true_positive = int(confusion[label, label])
+        false_positive = int(confusion[:, label].sum() - true_positive)
+        false_negative = int(confusion[label, :].sum() - true_positive)
+        precision = (
+            true_positive / (true_positive + false_positive)
+            if true_positive + false_positive else 0.0
+        )
+        recall = (
+            true_positive / (true_positive + false_negative)
+            if true_positive + false_negative else 0.0
+        )
+        f1_values.append(
+            2.0 * precision * recall / (precision + recall)
+            if precision + recall else 0.0
+        )
     return {
         "loglike": -total_loss / total_num_events,
         "rmse": math.sqrt(squared_error / time_num_events),
@@ -451,6 +510,7 @@ def evaluate_loader(runner, data_loader, prediction_path=None):
         "time_rmse": math.sqrt(squared_error / time_num_events),
         "time_mae": absolute_error / time_num_events,
         "acc": num_correct / type_num_events,
+        "macro_f1": float(np.mean(f1_values)),
         "num_events": total_num_events,
         "rmse_num_events": time_num_events,
     }
@@ -477,7 +537,42 @@ def deterministic_evaluation(runner, data_loader, seed, prediction_path=None):
             torch.cuda.set_rng_state_all(cuda_state)
 
 
-def train_and_test(args, paths, config_path):
+def restore_checkpoint(runner, checkpoint_path):
+    kwargs = {"map_location": runner.model_wrapper.device}
+    try:
+        state = torch.load(checkpoint_path, weights_only=True, **kwargs)
+    except TypeError:
+        state = torch.load(checkpoint_path, **kwargs)
+    runner.model_wrapper.model.load_state_dict(state, strict=False)
+
+
+def evaluate_native_intensity(
+    args, runner, adapted_dir, num_event_types
+):
+    if args.intensity_output_dir is None:
+        return None
+    adapter = EasyTPPIntensityAdapter(
+        runner.model_wrapper.model,
+        num_event_types,
+        model_name="FullyNN",
+    )
+    _rows, summary = evaluate_intensity_curves(
+        adapter,
+        load_records(Path(adapted_dir) / "test.json"),
+        output_dir=args.intensity_output_dir,
+        ground_truth_dir=args.intensity_ground_truth_dir,
+        regime_id=args.intensity_regime_id,
+        model_name="FullyNN",
+        checkpoint_task=args.intensity_checkpoint_task,
+        samples=args.intensity_samples,
+        plot_anchors=args.intensity_plot_anchors,
+    )
+    return summary
+
+
+def train_and_test(
+    args, paths, config_path, adapted_dir, num_event_types
+):
     pipeline = Config.build_from_yaml_file(
         str(config_path), experiment_id="FullyNN_train"
     )
@@ -488,6 +583,15 @@ def train_and_test(args, paths, config_path):
 
     metrics_path = paths["log"] / (paths["run_name"] + "_metrics.csv")
     checkpoint_path = paths["checkpoints"] / (paths["run_name"] + "_best.pt")
+    initial_checkpoint = (
+        args.initial_checkpoint.expanduser().resolve()
+        if args.initial_checkpoint is not None
+        else None
+    )
+    if initial_checkpoint is not None:
+        if not initial_checkpoint.is_file():
+            raise FileNotFoundError(initial_checkpoint)
+        restore_checkpoint(runner, initial_checkpoint)
     rows = []
     best_epoch = None
     minimize_selection = args.selection_metric == "rmse"
@@ -495,109 +599,133 @@ def train_and_test(args, paths, config_path):
     stale_epochs = 0
     lr_stale_epochs = 0
 
-    for epoch in range(1, args.epochs + 1):
-        train_metrics = runner.run_one_epoch(train_loader, RunnerPhase.TRAIN)
-        valid_metrics = deterministic_validation(
-            runner, valid_loader, args.seed + 100000
-        )
-        current_lr = runner.model_wrapper.opt.param_groups[0]["lr"]
-        rows.append(metric_row(epoch, "train", train_metrics, current_lr))
-        rows.append(metric_row(epoch, "valid", valid_metrics, current_lr))
-        write_metrics(metrics_path, rows)
-        logger.info(
-            "[Epoch %d/%d] lr=%.2e | train LL=%.6f | valid LL=%.6f "
-            "(time=%.6f, mark=%.6f), RMSE=%.6f, accuracy=%.6f",
-            epoch,
-            args.epochs,
-            current_lr,
-            train_metrics["loglike"],
-            valid_metrics["loglike"],
-            valid_metrics.get("time_loglike", float("nan")),
-            valid_metrics.get("mark_loglike", float("nan")),
-            valid_metrics["rmse"],
-            valid_metrics["acc"],
-        )
-        if "target_51_accuracy" in valid_metrics:
+    if args.evaluate_only:
+        best_epoch = 0
+        if initial_checkpoint is None:
+            runner.model_wrapper.save(str(checkpoint_path))
+            evaluation_checkpoint = checkpoint_path
+        else:
+            evaluation_checkpoint = initial_checkpoint
+    else:
+        for epoch in range(1, args.epochs + 1):
+            train_metrics = runner.run_one_epoch(train_loader, RunnerPhase.TRAIN)
+            valid_metrics = deterministic_validation(
+                runner, valid_loader, args.seed + 100000
+            )
+            current_lr = runner.model_wrapper.opt.param_groups[0]["lr"]
+            rows.append(metric_row(epoch, "train", train_metrics, current_lr))
+            rows.append(metric_row(epoch, "valid", valid_metrics, current_lr))
+            write_metrics(metrics_path, rows)
             logger.info(
-                "[Epoch %d/%d] MIMIC target accuracy: predicate 51=%.6f, "
-                "predicate 61=%.6f, combined=%.6f",
+                "[Epoch %d/%d] lr=%.2e | train LL=%.6f | valid LL=%.6f "
+                "(time=%.6f, mark=%.6f), RMSE=%.6f, accuracy=%.6f",
                 epoch,
                 args.epochs,
-                valid_metrics["target_51_accuracy"],
-                valid_metrics.get("target_61_accuracy", float("nan")),
+                current_lr,
+                train_metrics["loglike"],
+                valid_metrics["loglike"],
+                valid_metrics.get("time_loglike", float("nan")),
+                valid_metrics.get("mark_loglike", float("nan")),
+                valid_metrics["rmse"],
                 valid_metrics["acc"],
             )
-        selection_value = float(valid_metrics[args.selection_metric])
-        improved = (
-            selection_value < best_selection - args.min_delta
-            if minimize_selection else
-            selection_value > best_selection + args.min_delta
-        )
-        if improved:
-            best_epoch = epoch
-            best_selection = selection_value
-            stale_epochs = 0
-            lr_stale_epochs = 0
-            runner.model_wrapper.save(str(checkpoint_path))
-            logger.info(
-                "Saved new best checkpoint at epoch %d (%s=%.6f)",
-                epoch, args.selection_metric, selection_value,
+            if "target_51_accuracy" in valid_metrics:
+                logger.info(
+                    "[Epoch %d/%d] MIMIC target accuracy: predicate 51=%.6f, "
+                    "predicate 61=%.6f, combined=%.6f",
+                    epoch,
+                    args.epochs,
+                    valid_metrics["target_51_accuracy"],
+                    valid_metrics.get("target_61_accuracy", float("nan")),
+                    valid_metrics["acc"],
+                )
+            selection_value = float(valid_metrics[args.selection_metric])
+            improved = (
+                selection_value < best_selection - args.min_delta
+                if minimize_selection else
+                selection_value > best_selection + args.min_delta
             )
-        else:
-            stale_epochs += 1
-            lr_stale_epochs += 1
+            if improved:
+                best_epoch = epoch
+                best_selection = selection_value
+                stale_epochs = 0
+                lr_stale_epochs = 0
+                runner.model_wrapper.save(str(checkpoint_path))
+                logger.info(
+                    "Saved new best checkpoint at epoch %d (%s=%.6f)",
+                    epoch, args.selection_metric, selection_value,
+                )
+            else:
+                stale_epochs += 1
+                lr_stale_epochs += 1
 
-        if lr_stale_epochs >= args.lr_patience:
-            old_lr = runner.model_wrapper.opt.param_groups[0]["lr"]
-            new_lr = old_lr * args.lr_factor
-            for group in runner.model_wrapper.opt.param_groups:
-                group["lr"] = new_lr
-            lr_stale_epochs = 0
-            logger.info("Reduced learning rate from %.2e to %.2e", old_lr, new_lr)
+            if lr_stale_epochs >= args.lr_patience:
+                old_lr = runner.model_wrapper.opt.param_groups[0]["lr"]
+                new_lr = old_lr * args.lr_factor
+                for group in runner.model_wrapper.opt.param_groups:
+                    group["lr"] = new_lr
+                lr_stale_epochs = 0
+                logger.info("Reduced learning rate from %.2e to %.2e", old_lr, new_lr)
 
-        if stale_epochs >= args.early_stop_patience:
-            logger.info(
-                "Early stopping at epoch %d after %d epochs without %s improvement",
-                epoch,
-                stale_epochs,
-                args.selection_metric,
-            )
-            break
+            if stale_epochs >= args.early_stop_patience:
+                logger.info(
+                    "Early stopping at epoch %d after %d epochs without %s improvement",
+                    epoch,
+                    stale_epochs,
+                    args.selection_metric,
+                )
+                break
 
-    if best_epoch is None:
-        raise RuntimeError("Training produced no validation checkpoint")
+        if best_epoch is None:
+            raise RuntimeError("Training produced no validation checkpoint")
+        runner.model_wrapper.restore(str(checkpoint_path))
+        evaluation_checkpoint = checkpoint_path
 
-    runner.model_wrapper.restore(str(checkpoint_path))
     test_metrics = deterministic_evaluation(
         runner,
         test_loader,
         args.seed + 200000,
         paths["output"] / "predictions.jsonl.gz",
     )
+    evaluate_native_intensity(
+        args, runner, adapted_dir, num_event_types
+    )
     runner.model_wrapper.close_summary()
     current_lr = runner.model_wrapper.opt.param_groups[0]["lr"]
     test_row = metric_row(best_epoch, "test", test_metrics, current_lr)
-    test_row["SelectionMetric"] = "validation_{}".format(args.selection_metric)
+    test_row["SelectionMetric"] = (
+        "checkpoint" if args.evaluate_only
+        else "validation_{}".format(args.selection_metric)
+    )
+    if args.evaluate_only:
+        # Keep the metrics CSV valid for the plotting/reporting path even
+        # though no train/validation epochs were run.
+        write_metrics(metrics_path, [
+            {key: value for key, value in test_row.items() if key != "SelectionMetric"}
+        ])
     test_path = paths["log"] / (paths["run_name"] + "_test.csv")
     fields = (
         "Epoch", "Split", "SelectionMetric", "Log-likelihood",
-        "Time Log-likelihood", "Mark Log-likelihood", "RMSE",
-        "Accuracy", "NumEvents", "LearningRate", "Target 51 Accuracy",
-        "Target 61 Accuracy"
+        "Time Log-likelihood", "Mark Log-likelihood", "RMSE", "Time MAE",
+        "Accuracy", "Macro-F1", "NumEvents", "LearningRate",
+        "Target 51 Accuracy", "Target 61 Accuracy"
     )
     with test_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerow(test_row)
     logger.info(
-        "Final test from best epoch %d: LL=%.6f (time=%.6f, mark=%.6f), "
-        "RMSE=%.6f, accuracy=%.6f",
+        "%s from epoch %d: LL=%.6f (time=%.6f, mark=%.6f), "
+        "RMSE=%.6f, time_MAE=%.6f, accuracy=%.6f, macro_F1=%.6f",
+        "Checkpoint evaluation" if args.evaluate_only else "Final test",
         best_epoch,
         test_metrics["loglike"],
         test_metrics.get("time_loglike", float("nan")),
         test_metrics.get("mark_loglike", float("nan")),
         test_metrics["rmse"],
+        test_metrics["time_mae"],
         test_metrics["acc"],
+        test_metrics["macro_f1"],
     )
     if "target_51_accuracy" in test_metrics:
         logger.info(
@@ -609,7 +737,7 @@ def train_and_test(args, paths, config_path):
         )
     persistent_checkpoint = paths["output"] / "checkpoint" / "best.pt"
     persistent_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(checkpoint_path, persistent_checkpoint)
+    shutil.copy2(evaluation_checkpoint, persistent_checkpoint)
     return metrics_path, test_row
 
 
@@ -905,6 +1033,23 @@ def main():
         raise ValueError("--lr-factor must be between 0 and 1")
     if args.learning_rate <= 0 or args.dtime_max <= 0 or args.min_delta < 0:
         raise ValueError("learning-rate/dtime-max must be positive and min-delta non-negative")
+    if args.intensity_samples < 2:
+        raise ValueError("--intensity-samples must be at least two")
+    if args.intensity_plot_anchors < 0:
+        raise ValueError("--intensity-plot-anchors must be non-negative")
+    intensity_values = (
+        args.intensity_output_dir,
+        args.intensity_ground_truth_dir,
+        args.intensity_regime_id,
+        args.intensity_checkpoint_task,
+    )
+    if any(value is not None for value in intensity_values) and not all(
+        value is not None for value in intensity_values
+    ):
+        raise ValueError(
+            "intensity evaluation requires output dir, ground truth dir, "
+            "regime ID, and checkpoint task together"
+        )
 
     paths = prepare_paths(args)
     console_log = paths["log"] / (paths["run_name"] + "_console.log")
@@ -969,7 +1114,9 @@ def main():
         config_path = write_config(
             args, paths, adapted_dir, num_event_types, training_stats
         )
-        metrics_path, test_row = train_and_test(args, paths, config_path)
+        metrics_path, test_row = train_and_test(
+            args, paths, config_path, adapted_dir, num_event_types
+        )
         plot_metrics(paths, metrics_path, test_row, baselines)
         write_diagnostic_summary(paths, test_row, baselines, num_event_types)
         logger.info("FullyNN %s experiment complete", paths["run_name"])

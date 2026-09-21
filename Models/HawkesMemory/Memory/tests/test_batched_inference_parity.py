@@ -20,6 +20,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
 try:
     import torch
 except ModuleNotFoundError:  # pragma: no cover - allows collection without HM deps
@@ -41,6 +43,8 @@ if torch is not None:
     from EvaluateCL import (
         EVENT_PREDICTION_SCOPES,
         EvaluationSet,
+        GroundTruthLaw,
+        _batched_law_evaluation,
         _event_prediction_set_names,
     )
     from Wake.HawkesParams import HawkesParams
@@ -240,6 +244,47 @@ def _assert_event_parity(test: unittest.TestCase, scalar, packed, source_index):
 
 @unittest.skipUnless(torch is not None, "requires the HM PyTorch dependencies")
 class BatchedInferenceParityTests(unittest.TestCase):
+    def test_law_grid_and_snapshot_selection_are_strict_causal(self):
+        law = GroundTruthLaw(
+            regime_id="A",
+            mu=np.asarray([1.0]),
+            W=np.zeros((1, 1, 1)),
+            betas=np.asarray([1.0]),
+            kind="base",
+        )
+        inverse_softplus = lambda value: torch.log(  # noqa: E731
+            torch.expm1(torch.tensor(float(value), dtype=torch.float64))
+        )
+        snapshots = [[
+            torch.stack([
+                inverse_softplus(value),
+                torch.tensor(-100.0, dtype=torch.float64),
+            ])
+            for value in (1.0, 2.0, 3.0)
+        ]]
+        sequences = [{
+            "times": torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64),
+            "types": torch.tensor([0, 0, 0], dtype=torch.long),
+        }]
+
+        grid, _target, predicted, _nise, _by_type = _batched_law_evaluation(
+            sequences,
+            snapshots,
+            law,
+            model_betas=torch.tensor([1.0], dtype=torch.float64),
+            expected_types=1,
+            expected_basis=1,
+            device=torch.device("cpu"),
+            intensity_samples=5,
+        )
+
+        self.assertGreater(float(grid[0, 0]), 1.0)
+        self.assertEqual(float(grid[0, -1]), 3.0)
+        # Just after t_0 use snapshot 0; at g == t_2, strict history ends at
+        # t_1 and therefore uses snapshot 1 rather than the future snapshot 2.
+        self.assertAlmostEqual(float(predicted[0, 0, 0]), 1.0, places=9)
+        self.assertAlmostEqual(float(predicted[0, -1, 0]), 2.0, places=9)
+
     def test_batched_event_nll_reduces_all_hawkes_axes(self):
         inference = _make_inference(EvaluationProtocol.FROZEN)
         sequence = _sequence(5, 7)

@@ -235,6 +235,12 @@ class TrainingLifecycleMixin:
             raise ValueError("prune_warmup_epochs must be non-negative")
         if self.sleep_config.light_replay_budget <= 0:
             raise ValueError("light_replay_budget must be positive")
+        if self.sleep_config.light_min_gain < 0.0:
+            raise ValueError("light_min_gain must be non-negative")
+        if self.sleep_config.split_steps <= 0:
+            raise ValueError("split_steps must be positive")
+        if self.sleep_config.split_lr <= 0.0:
+            raise ValueError("split_lr must be positive")
         if self.sleep_config.light_scan_budget_multiplier <= 0:
             raise ValueError(
                 "light_scan_budget_multiplier must be positive"
@@ -259,6 +265,15 @@ class TrainingLifecycleMixin:
         if split_min_replay_per_group < 0:
             raise ValueError(
                 "split_min_replay_per_group must be non-negative"
+            )
+        split_persistence_cycles = getattr(
+            self.sleep_config,
+            "split_persistence_cycles",
+            1,
+        )
+        if split_persistence_cycles <= 0:
+            raise ValueError(
+                "split_persistence_cycles must be positive"
             )
         split_route_loss_weight = getattr(
             self.sleep_config,

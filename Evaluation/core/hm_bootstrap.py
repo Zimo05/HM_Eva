@@ -635,6 +635,7 @@ def _hierarchical_clusters(
     source_ids,
     *,
     selector: Callable[..., tuple[int, Mapping[str, Any]]] | None = None,
+    min_clusters: int | None = None,
     max_clusters: int | None = None,
 ):
     """Build a train-only binary hierarchy and select a coarse cut.
@@ -661,12 +662,15 @@ def _hierarchical_clusters(
     effective_max_clusters = (
         DEFAULT_CLUSTER_MAX if max_clusters is None else int(max_clusters)
     )
+    effective_min_clusters = (
+        DEFAULT_CLUSTER_MIN if min_clusters is None else int(min_clusters)
+    )
     if effective_max_clusters < 2:
         raise ValueError("hierarchical clustering max_clusters must be at least two")
+    if effective_min_clusters < 2:
+        raise ValueError("hierarchical clustering min_clusters must be at least two")
     max_k = min(effective_max_clusters, n_samples)
-    min_k = min(DEFAULT_CLUSTER_MIN, max_k)
-    if min_k < 2:
-        min_k = 2
+    min_k = min(effective_min_clusters, max_k)
 
     root_indices = np.arange(n_samples, dtype=np.int64)
     root = {
@@ -1112,16 +1116,27 @@ def build_stationary_hm_upstream(
     dataset = _validate_stationary_dataset(dataset)
     if int(attention_num_gpus) <= 0:
         raise ValueError("attention_num_gpus must be positive")
-    if dataset in {"taobao", "stackoverflow"}:
+    if dataset == "retweet":
+        # Retweet has a small law space.  Search a deliberately coarser
+        # hierarchy so the upstream stage does not force near-duplicate
+        # dynamics into separate leaves before Wake gets a chance to merge
+        # their residual evidence.
+        hawkes_epochs = DEFAULT_HAWKES_EPOCHS
+        hawkes_selection_epochs = DEFAULT_HAWKES_SELECTION_EPOCHS
+        cluster_min = 2
+        cluster_max = 5
+    elif dataset in {"taobao", "stackoverflow"}:
         # Taobao and StackOverflow benefit from longer Hawkes fitting for the
         # real-data long-tail regime.  StackOverflow additionally gets the
-        # wider structural search below; Retweet keeps the original budget.
+        # wider structural search below.
         hawkes_epochs = 15
         hawkes_selection_epochs = 15
+        cluster_min = DEFAULT_CLUSTER_MIN
         cluster_max = 12 if dataset == "stackoverflow" else DEFAULT_CLUSTER_MAX
     else:
         hawkes_epochs = DEFAULT_HAWKES_EPOCHS
         hawkes_selection_epochs = DEFAULT_HAWKES_SELECTION_EPOCHS
+        cluster_min = DEFAULT_CLUSTER_MIN
         cluster_max = DEFAULT_CLUSTER_MAX
     canonical_path = Path(canonical_path).expanduser().resolve()
     split_manifest_path = Path(split_manifest_path).expanduser().resolve()
@@ -1322,10 +1337,12 @@ def build_stationary_hm_upstream(
         features,
         source_id_array,
         selector=select_hawkes_cut,
+        min_clusters=cluster_min,
         max_clusters=cluster_max,
     )
     cluster_stats.update({
         "hawkes_fit_epochs": int(hawkes_epochs),
+        "cluster_min": int(cluster_min),
         "cluster_max": int(cluster_max),
     })
 

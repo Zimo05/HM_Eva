@@ -53,6 +53,9 @@ from .specs import JobSpec
 
 
 DEFAULT_HM_CONTINUAL_EPOCHS = 60
+BASELINE_INTENSITY_MODELS = frozenset(
+    {"RMTPP", "FullyNN", "THP", "S2P2", "AttNHP"}
+)
 
 
 def _mark_hm_phase(target: Path, dataset: str, phase: str) -> None:
@@ -523,7 +526,7 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
     python = args.python_executable or sys.executable
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(__import__("pathlib").Path(__file__).resolve().parents[2]), env.get("PYTHONPATH", "")))
-    if model in {"RMTPP", "THP", "S2P2", "AttNHP"}:
+    if model in {"RMTPP", "FullyNN", "THP", "S2P2", "AttNHP"}:
         epochs = (
             (1 if args.smoke else 60)
             if args.epochs is None
@@ -557,6 +560,25 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
         if dataset_label:
             command += ["--dataset-label", dataset_label]
         cwd = MODELS_ROOT / "RMTPP"
+        if initial:
+            command += ["--initial-checkpoint", str(initial)]
+        if evaluate_only:
+            command += ["--evaluate-only"]
+    elif model == "FullyNN":
+        command = [
+            python,
+            str(MODELS_ROOT / "FullyNN" / "run_experiment.py"),
+            "--dataset", "taobao",
+            "--prepared-data-dir", str(prepared),
+            "--output-dir", str(output),
+            "--archive", str(output) + ".tar.gz",
+            "--overwrite",
+            "--seed", str(args.seed),
+            "--gpu", ("-1" if device == "cpu" else device.split(":")[-1]),
+            "--epochs", str(epochs),
+            "--batch-size", str(batch),
+        ]
+        cwd = MODELS_ROOT / "FullyNN"
         if initial:
             command += ["--initial-checkpoint", str(initial)]
         if evaluate_only:
@@ -608,6 +630,32 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
     return command, cwd, env
 
 
+def _baseline_intensity_command_args(
+    model: str,
+    *,
+    output_dir: Path,
+    ground_truth_dir: Path,
+    regime_id: str,
+    checkpoint_task: int,
+    samples: int = 256,
+    plot_anchors: int = 2,
+) -> list[str]:
+    """Return the common native-intensity CLI contract for CL baselines."""
+
+    if model not in BASELINE_INTENSITY_MODELS:
+        return []
+    if int(samples) < 2 or int(plot_anchors) < 0:
+        raise ValueError("invalid baseline intensity sample/plot count")
+    return [
+        "--intensity-output-dir", str(output_dir),
+        "--intensity-ground-truth-dir", str(ground_truth_dir),
+        "--intensity-regime-id", str(regime_id),
+        "--intensity-checkpoint-task", str(int(checkpoint_task)),
+        "--intensity-samples", str(int(samples)),
+        "--intensity-plot-anchors", str(int(plot_anchors)),
+    ]
+
+
 def _native_metric(model: str, output: Path) -> dict:
     if model == "TPP_LLM":
         return json.loads((output / "metrics.json").read_text(encoding="utf-8"))
@@ -618,7 +666,9 @@ def _native_metric(model: str, output: Path) -> dict:
         row = next(csv.DictReader(handle))
     values = {key.strip().lower(): value for key, value in row.items()}
     ll = float(values["log-likelihood"])
-    raw_events = values.get("num_events", values.get("events", 0))
+    raw_events = values.get(
+        "num_events", values.get("numevents", values.get("events", 0))
+    )
     try:
         num_events = int(float(raw_events))
     except (TypeError, ValueError):
@@ -1035,6 +1085,8 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
     adaptation_records: list[AdaptationRecord] = []
     adaptation_status_rows: list[dict[str, Any]] = []
     replay_rows = []
+    intensity_rows: list[dict[str, Any]] = []
+    intensity_summary_rows: list[dict[str, Any]] = []
     prediction_target = target / "predictions.jsonl.gz"
     with gzip.open(prediction_target, "wt", encoding="utf-8") as combined_predictions:
         for task in task_ids:
@@ -1180,6 +1232,19 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                     True,
                     dataset_label=protocol.benchmark_id,
                 )
+                intensity_output = (
+                    target
+                    / "intensity_curves"
+                    / f"checkpoint_task_{task:02d}"
+                    / anchor_id
+                )
+                command += _baseline_intensity_command_args(
+                    model,
+                    output_dir=intensity_output,
+                    ground_truth_dir=data_root / "ground_truth",
+                    regime_id=anchor_id,
+                    checkpoint_task=task,
+                )
                 run_command(command, cwd, env, target / "logs" / f"task_{task:02d}_anchor_{anchor_id}.log")
                 stage_rows.append({
                     "task": task,
@@ -1188,6 +1253,28 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                     "evaluation_scope": anchor_spec.evaluation_scope,
                     **_native_metric(model, anchor_output),
                 })
+                intensity_metrics_path = intensity_output / "intensity_metrics.csv"
+                intensity_summary_path = intensity_output / "intensity_summary.csv"
+                if intensity_metrics_path.is_file():
+                    with intensity_metrics_path.open(
+                        "r", newline="", encoding="utf-8"
+                    ) as handle:
+                        for row in csv.DictReader(handle):
+                            intensity_rows.append({
+                                **row,
+                                "evaluation_scope": anchor_spec.evaluation_scope,
+                                "first_seen_task": protocol.first_seen.get(anchor_id),
+                            })
+                if intensity_summary_path.is_file():
+                    with intensity_summary_path.open(
+                        "r", newline="", encoding="utf-8"
+                    ) as handle:
+                        for row in csv.DictReader(handle):
+                            intensity_summary_rows.append({
+                                **row,
+                                "evaluation_scope": anchor_spec.evaluation_scope,
+                                "first_seen_task": protocol.first_seen.get(anchor_id),
+                            })
     with (target / "sequence_metrics.csv").open("w", newline="", encoding="utf-8") as handle:
         fields = sorted({key for row in stage_rows for key in row})
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -1213,6 +1300,23 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
             ),
         )
     summary = _baseline_cl_summary(stage_rows, protocol, adaptation_records)
+    if model in BASELINE_INTENSITY_MODELS:
+        if not intensity_rows or not intensity_summary_rows:
+            raise RuntimeError(
+                f"{model} continual evaluation did not produce intensity artifacts"
+            )
+        write_csv(target / "intensity_metrics.csv", intensity_rows)
+        write_csv(target / "intensity_summary.csv", intensity_summary_rows)
+        summary["intensity"] = {
+            "native_conditional_intensity": True,
+            "surrogate_hawkes_fit": False,
+            "grid_samples": 256,
+            "grid_support": "post_first_event_to_last_event",
+            "history_rule": "event_time < grid_time",
+            "metrics": str((target / "intensity_metrics.csv").resolve()),
+            "summary": str((target / "intensity_summary.csv").resolve()),
+            "curve_root": str((target / "intensity_curves").resolve()),
+        }
     cl_report = summary["cl_metrics"]
     write_csv(target / "frozen_anchor_matrix.csv", cl_report["frozen_anchor_matrix"])
     write_csv(target / "law_metrics.csv", cl_report["law_metrics"])

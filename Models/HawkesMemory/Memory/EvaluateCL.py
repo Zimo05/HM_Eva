@@ -100,6 +100,7 @@ from Train.Inference import (
 
 BEST_CHECKPOINT_RE = re.compile(r"^task_(\d+)_best\.pt$")
 LEGACY_CHECKPOINT_RE = re.compile(r"^task_(\d+)\.pt$")
+INITIAL_CHECKPOINT_RE = re.compile(r"^initial_seed[^/]*\.pt$")
 # Compatibility name for callers that imported the old exact-name matcher.
 CHECKPOINT_RE = LEGACY_CHECKPOINT_RE
 SCALAR_METRICS = (
@@ -345,6 +346,39 @@ def _discover_checkpoints(checkpoint_dir: Path) -> dict[int, Path]:
         task_id: best.get(task_id, legacy_path)
         for task_id, legacy_path in legacy.items()
     } | best
+
+
+def _resolve_initial_checkpoint(
+    checkpoint_dir: Path,
+    configured: Path | None,
+) -> Path | None:
+    """Resolve ``C_init`` explicitly or from the checkpoint directory.
+
+    Older continual runner versions saved ``initial_seed*.pt`` but did not
+    pass ``--fwt-scratch-checkpoint`` to this evaluator.  Silently ignoring
+    that artifact drops the task-0 pre-update boundary and makes every RRR
+    undefined.  Auto-discovery keeps those completed runs evaluable without
+    retraining while rejecting an ambiguous directory containing multiple
+    initial states.
+    """
+
+    if configured is not None:
+        return Path(configured).expanduser().resolve()
+
+    candidates = sorted(
+        path.resolve()
+        for path in checkpoint_dir.iterdir()
+        if path.is_file() and INITIAL_CHECKPOINT_RE.fullmatch(path.name)
+    )
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        names = ", ".join(path.name for path in candidates)
+        raise ValueError(
+            "multiple C_init checkpoints found; pass "
+            f"--fwt-scratch-checkpoint explicitly: {names}"
+        )
+    return candidates[0]
 
 
 def _read_stage_metadata(
@@ -2032,8 +2066,10 @@ def _batched_law_evaluation(
     if not sequences or len(sequences) != len(snapshots):
         raise ValueError("law batch sequences and snapshots must be non-empty/aligned")
     lengths = [int(sequence["times"].numel()) for sequence in sequences]
-    if any(length <= 0 for length in lengths):
-        raise ValueError("law evaluation batches cannot contain empty sequences")
+    if any(length < 2 for length in lengths):
+        raise ValueError(
+            "law evaluation batches need at least two events per sequence"
+        )
     if any(len(rows) != length for rows, length in zip(snapshots, lengths)):
         raise ValueError("every law sequence needs one causal snapshot per event")
     batch_size = len(sequences)
@@ -2052,6 +2088,7 @@ def _batched_law_evaluation(
         batch_size, max_length, parameter_dim, device=device, dtype=torch.float64
     )
     horizons = []
+    starts = []
     for row_index, (sequence, sequence_snapshots, length) in enumerate(
         zip(sequences, snapshots, lengths)
     ):
@@ -2070,7 +2107,16 @@ def _batched_law_evaluation(
             torch.as_tensor(snapshot, device=device, dtype=torch.float64).reshape(-1)
             for snapshot in sequence_snapshots
         ])
-        horizons.append(max(float(times[-1].detach().cpu()), 1e-6))
+        start = torch.nextafter(
+            times[0],
+            torch.full((), math.inf, device=device, dtype=torch.float64),
+        )
+        if not bool(times[-1] > start):
+            raise ValueError(
+                "law evaluation needs a positive post-first-event span"
+            )
+        starts.append(float(start.detach().cpu()))
+        horizons.append(float(times[-1].detach().cpu()))
 
     unit_grid = torch.linspace(
         0.0,
@@ -2079,10 +2125,15 @@ def _batched_law_evaluation(
         device=device,
         dtype=torch.float64,
     )
-    horizon_tensor = torch.as_tensor(
-        horizons, device=device, dtype=torch.float64
+    start_tensor = torch.as_tensor(starts, device=device, dtype=torch.float64)
+    horizon_tensor = torch.as_tensor(horizons, device=device, dtype=torch.float64)
+    # Neural baselines have no native pre-first-event state.  Evaluate every
+    # model on the same post-first-event support, with later event-aligned
+    # points retaining the strict history rule t_j < g.
+    grid = (
+        start_tensor[:, None]
+        + (horizon_tensor - start_tensor)[:, None] * unit_grid[None, :]
     )
-    grid = horizon_tensor[:, None] * unit_grid[None, :]
     target_mu = torch.as_tensor(law.mu, device=device, dtype=torch.float64)
     target_W = torch.as_tensor(law.W, device=device, dtype=torch.float64)
     betas = torch.as_tensor(model_betas, device=device, dtype=torch.float64)
@@ -2110,11 +2161,13 @@ def _batched_law_evaluation(
         expected_types,
         expected_basis,
     )
-    snapshot_indices = (
+    history_counts = (
         (valid[:, None, :] & event_times[:, None, :].lt(grid[:, :, None]))
         .sum(dim=-1)
-        .clamp_min(0)
     )
+    # Snapshot row i is the state after event i, so a history containing n
+    # strict-past events maps to row n - 1.
+    snapshot_indices = history_counts.sub(1).clamp_min(0)
     max_snapshot_indices = torch.as_tensor(
         lengths, device=device, dtype=torch.long
     ).sub(1).clamp_min(0)[:, None]
@@ -2390,6 +2443,10 @@ def _hawkes_law_evaluation(
                         "regime_id": regime_id,
                         "anchor_index": anchor_index,
                         "events": int(len(event_times)),
+                        "grid_samples": int(grid_row.size),
+                        "grid_start": float(grid_row[0]),
+                        "grid_end": float(grid_row[-1]),
+                        "history_rule": "event_time < grid_time",
                         "evaluation_scope": scope,
                         "first_seen_task": first_seen_task,
                         "nise": nise_value,
@@ -3396,6 +3453,20 @@ def main() -> None:
     args.data_root = args.data_root.expanduser()
     args.checkpoint_dir = args.checkpoint_dir.expanduser()
     args.output_dir = args.output_dir.expanduser()
+    configured_initial_checkpoint = args.fwt_scratch_checkpoint
+    args.fwt_scratch_checkpoint = _resolve_initial_checkpoint(
+        args.checkpoint_dir,
+        configured_initial_checkpoint,
+    )
+    if (
+        configured_initial_checkpoint is None
+        and args.fwt_scratch_checkpoint is not None
+    ):
+        print(
+            "[CL Eval] auto-discovered C_init checkpoint: "
+            f"{args.fwt_scratch_checkpoint}",
+            flush=True,
+        )
     data_root = _normalise_data_root(args.data_root)
     protocol = CLProtocol.load(data_root)
     task_sets = _discover_task_sets(data_root, protocol)
@@ -3578,7 +3649,7 @@ def main() -> None:
     initial_checkpoint_path: Path | None = None
     initial_pre_evaluated = False
     initial_nll_by_task: dict[int, float | None] = {}
-    configured_initial_checkpoint = getattr(args, "fwt_scratch_checkpoint", None)
+    configured_initial_checkpoint = args.fwt_scratch_checkpoint
     first_protocol_task = protocol_task_ids[0] if protocol_task_ids else None
     if (
         configured_initial_checkpoint is not None

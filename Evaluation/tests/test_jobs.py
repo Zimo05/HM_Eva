@@ -27,6 +27,15 @@ def test_easytpp_continual_entry_points_exist():
             assert f'strategy="{strategy}"' in text
 
 
+def test_fullynn_continual_entry_points_exist():
+    for strategy in ("sequential", "joint", "replay"):
+        path = ROOT / f"evaluate_continual_FullyNN_{strategy}.py"
+        assert path.is_file()
+        text = path.read_text(encoding="utf-8")
+        assert 'model="FullyNN"' in text
+        assert f'strategy="{strategy}"' in text
+
+
 def test_easytpp_prediction_protocol_wiring():
     source = (ROOT.parent / "Models" / "EasyTPP" / "run_experiment.py").read_text(
         encoding="utf-8"

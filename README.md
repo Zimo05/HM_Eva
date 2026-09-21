@@ -278,7 +278,7 @@ python Datasets/CL/generate_continual_hawkes.py --benchmark unified --output Dat
 
 HM 另外在 task 0 的任何 cold-start/optimization 之前保存 `C_init`（`initial_seed*.pt`）。`EvaluateCL` 用 `C_init` 评估 `D_0^test` 作为 task 0 的唯一 `pre` 边界；后续 task 的 `pre` 仍由前一阶段 checkpoint 评估下一 task。RRR 只使用这个 task-0 `C_init` 观测补首次 gain，不把其它 FWT scratch 观测当作 recurrence 的 `pre`。
 
-主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。HM continual 默认每个 task 训练 60 epochs；仍可通过 `--epochs` 显式覆盖，smoke 模式仍固定为 1 epoch。
+主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。RMTPP、THP、S2P2 和 AttNHP 也会在每个 checkpoint × frozen anchor 上用各自原生 conditional intensity 生成统一 256 点时间网格的曲线与 NISE；不会把 neural TPP 解码或拟合成 surrogate Hawkes。聚合结果写入 `intensity_metrics.csv`、`intensity_summary.csv`，曲线、原始点和 manifest 位于 `intensity_curves/checkpoint_task_XX/<regime_id>/`。HM 和四个 baseline 使用相同的 post-first-event 网格，并且都只使用严格历史 `t_j < g`。HM continual 默认每个 task 训练 60 epochs；仍可通过 `--epochs` 显式覆盖，smoke 模式仍固定为 1 epoch。
 
 HM 的训练期 validation 默认用 `--validation-batch-size 64` 对只读的
 `semantic_only` / `full_frozen` 路径做 compact GPU batch，并共享前缀与路由准备；
@@ -300,6 +300,7 @@ Sequential 表示模型按 task 顺序更新，只保留上一阶段模型状态
 
 ```bash
 python evaluate_continual_RMTPP_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
+python evaluate_continual_FullyNN_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_THP_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_S2P2_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_AttNHP_sequential.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
@@ -314,6 +315,7 @@ Joint 在 task `t` 训练时可以访问 task `0..t` 的全部训练数据。它
 
 ```bash
 python evaluate_continual_RMTPP_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
+python evaluate_continual_FullyNN_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_THP_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_S2P2_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
 python evaluate_continual_AttNHP_joint.py --seed 7 --task-start 0 --task-end 9 --device cuda:0
@@ -327,11 +329,12 @@ Replay 不能随意按样本条数设置 buffer。它必须读取同种子 HM �
 
 ```bash
 python evaluate_continual_RMTPP_replay.py --seed 7 --task-start 0 --task-end 9 --device cuda:0 --hm-resource-root results/continual/HM/full/seed_7
+python evaluate_continual_FullyNN_replay.py --seed 7 --task-start 0 --task-end 9 --device cuda:0 --hm-resource-root results/continual/HM/full/seed_7
 ```
 
 结束后检查 `replay_manifest.csv`，其中 `actual_bytes` 必须小于等于 `budget_bytes`。缺少 HM `resource_manifest.json` 时脚本会拒绝运行。
 
-S2P2 和 AttNHP 的 replay 入口分别为 `evaluate_continual_S2P2_replay.py` 和 `evaluate_continual_AttNHP_replay.py`，使用同一份 HM resource manifest 和字节预算。
+FullyNN、THP、S2P2 和 AttNHP 的 replay 入口使用同一份 HM resource manifest 和字节预算。
 
 ### 6.7 从中间 checkpoint 继续
 
@@ -341,7 +344,7 @@ S2P2 和 AttNHP 的 replay 入口分别为 `evaluate_continual_S2P2_replay.py` �
 python evaluate_continual_HM.py --seed 7 --task-start 5 --task-end 9 --checkpoint D:/shared/task_04_best.pt --run-id tasks_05_09 --device cuda:0
 ```
 
-RMTPP、THP、S2P2、AttNHP 和 TPP-LLM continual 入口同样支持这种方式。请保证 checkpoint 的模型、策略、seed 和超参数与前半段一致。
+RMTPP、FullyNN、THP、S2P2、AttNHP 和 TPP-LLM continual 入口同样支持这种方式。请保证 checkpoint 的模型、策略、seed 和超参数与前半段一致。
 
 ## 7. HawkesMemory 消融实验
 

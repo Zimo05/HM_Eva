@@ -201,6 +201,11 @@ class TrainingSleepMixin:
                     "split_route_loss_weight",
                     1.0,
                 ),
+                persistence_cycles=getattr(
+                    self.sleep_config,
+                    "split_persistence_cycles",
+                    1,
+                ),
                 hypothesis=hypothesis,
             )
             output["replay_weights"] = (

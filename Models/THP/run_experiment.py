@@ -87,6 +87,12 @@ def parse_args():
     parser.add_argument("--prepared-data-dir", type=Path, default=None)
     parser.add_argument("--initial-checkpoint", type=Path, default=None)
     parser.add_argument("--evaluate-only", action="store_true")
+    parser.add_argument("--intensity-output-dir", type=Path, default=None)
+    parser.add_argument("--intensity-ground-truth-dir", type=Path, default=None)
+    parser.add_argument("--intensity-regime-id", default=None)
+    parser.add_argument("--intensity-checkpoint-task", type=int, default=None)
+    parser.add_argument("--intensity-samples", type=int, default=256)
+    parser.add_argument("--intensity-plot-anchors", type=int, default=2)
     return parser.parse_args()
 
 
@@ -119,6 +125,23 @@ def validate_args(args):
             args.time_loss_weight,
             args.grad_clip) < 0:
         raise ValueError("loss weights and --grad-clip cannot be negative")
+    if args.intensity_samples < 2:
+        raise ValueError("--intensity-samples must be at least two")
+    if args.intensity_plot_anchors < 0:
+        raise ValueError("--intensity-plot-anchors must be non-negative")
+    intensity_values = (
+        args.intensity_output_dir,
+        args.intensity_ground_truth_dir,
+        args.intensity_regime_id,
+        args.intensity_checkpoint_task,
+    )
+    if any(value is not None for value in intensity_values) and not all(
+        value is not None for value in intensity_values
+    ):
+        raise ValueError(
+            "intensity evaluation requires output dir, ground truth dir, "
+            "regime ID, and checkpoint task together"
+        )
 
 
 def prepare_paths(args):
@@ -245,6 +268,15 @@ def training_command(args, paths, adapted_dir, device):
         command += ["-load", str(args.initial_checkpoint)]
     if args.evaluate_only:
         command += ["-evaluate_only"]
+    if args.intensity_output_dir is not None:
+        command += [
+            "-intensity_output_dir", str(args.intensity_output_dir),
+            "-intensity_ground_truth_dir", str(args.intensity_ground_truth_dir),
+            "-intensity_regime_id", str(args.intensity_regime_id),
+            "-intensity_checkpoint_task", str(args.intensity_checkpoint_task),
+            "-intensity_samples", str(args.intensity_samples),
+            "-intensity_plot_anchors", str(args.intensity_plot_anchors),
+        ]
     return command
 
 

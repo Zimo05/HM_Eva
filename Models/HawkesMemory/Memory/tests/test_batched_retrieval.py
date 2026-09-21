@@ -110,6 +110,30 @@ class MaskedEntmaxTests(unittest.TestCase):
                 rtol=1e-6,
             ))
 
+    def test_usage_credit_rejects_bank_larger_than_snapshot_capacity(self):
+        memory = TreeEpisodicMemory(
+            key_dim=3,
+            num_event_types=2,
+            num_basis=1,
+            capacity_per_node=5,
+            device="cpu",
+        )
+        for _ in range(2):
+            memory.add_memory(
+                "root",
+                torch.randn(3),
+                torch.randn(memory.param_dim),
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "memory bank changed after retrieval snapshot before usage commit",
+        ):
+            memory.apply_cycle_usage_credit(
+                torch.zeros(1, 1),
+                ("root",),
+            )
+
     def test_packed_bank_mirror_is_reused_and_invalidated_by_write(self):
         torch.manual_seed(89)
         memory = TreeEpisodicMemory(

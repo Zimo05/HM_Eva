@@ -1459,8 +1459,21 @@ class TreeEpisodicMemory(nn.Module):
         for node_index, node_id in enumerate(node_ids):
             bank = self.banks.get(node_id)
             if bank is not None and len(bank) > 0:
+                bank_size = len(bank)
+                credit_capacity = node_credit.size(1)
+                if bank_size > credit_capacity:
+                    raise RuntimeError(
+                        "memory bank changed after retrieval snapshot before "
+                        "usage commit: "
+                        f"node_id={node_id}, "
+                        f"bank_size={bank_size}, "
+                        f"credit_capacity={credit_capacity}"
+                    )
                 bank.cycle_usage.add_(
-                    node_credit[node_index, : len(bank)].to(bank.device)
+                    node_credit[node_index, :bank_size].to(
+                        device=bank.device,
+                        dtype=bank.cycle_usage.dtype,
+                    )
                 )
 
     def retrieve_path(

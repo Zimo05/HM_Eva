@@ -60,6 +60,20 @@ def test_engine_fwt_and_rrr_are_protocol_driven():
     assert rrr["rows"][0]["rrr"] == 0.5
 
 
+def test_rrr_recovers_task_zero_c_init_from_fwt_scratch():
+    engine = CLMetricEngine(FakeProtocol())
+    boundaries = [
+        TaskBoundaryRecord(0, None, 3.0, 5.0),
+        TaskBoundaryRecord(2, 4.0, 3.5, 8.0),
+    ]
+
+    rrr = engine.rrr(boundaries)
+
+    assert rrr["status"] == "available"
+    assert rrr["rows"][0]["first_pre_nll"] == 5.0
+    assert rrr["rows"][0]["rrr"] == 0.5
+
+
 def test_adaptation_auc_uses_k_span_and_requires_zero():
     engine = CLMetricEngine(FakeProtocol())
     report = engine.adaptation([

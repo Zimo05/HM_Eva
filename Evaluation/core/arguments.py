@@ -153,6 +153,15 @@ def continual_args(*, replay: bool = False) -> argparse.Namespace:
     parser = common_parser("Run one continual-learning evaluation cell")
     parser.add_argument("--task-start", type=int, default=0)
     parser.add_argument(
+        "--memory-capacity-per-node",
+        type=int,
+        default=None,
+        help=(
+            "HM episodic rows per node. Set from the Stage A storage-match "
+            "recommendation before starting a flat_memory run."
+        ),
+    )
+    parser.add_argument(
         "--task-end",
         type=int,
         default=None,
@@ -182,6 +191,8 @@ def continual_args(*, replay: bool = False) -> argparse.Namespace:
     if replay:
         parser.add_argument("--hm-resource-root", type=Path, required=True)
     args = _parse(parser)
+    if args.memory_capacity_per_node is not None and args.memory_capacity_per_node <= 0:
+        parser.error("--memory-capacity-per-node must be positive")
     if args.event_prediction_scope is None:
         args.event_prediction_scope = (
             "all" if args.save_event_predictions else "none"

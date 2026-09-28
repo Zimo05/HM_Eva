@@ -346,8 +346,7 @@ class TrainingWakeMixin:
             else:
                 with torch.no_grad():
                     projected_z_cache = (
-                        self.tree.router_compat.project_z(precomputed_z)
-                        if precomputed_projected_z is None
+                        precomputed_z if precomputed_projected_z is None
                         else precomputed_projected_z
                     )
                     memory_query_cache = (
@@ -1374,8 +1373,7 @@ class TrainingWakeMixin:
 
         with torch.no_grad():
             projected_flat = (
-                self.tree.router_compat.project_z(z_flat)
-                if precomputed_projected_z is None
+                z_flat if precomputed_projected_z is None
                 else precomputed_projected_z.to(self.device)
             )
             query_flat = (

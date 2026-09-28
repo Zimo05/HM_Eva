@@ -52,6 +52,7 @@ from Evaluation.core.intensity_eval import (  # noqa: E402
     EasyTPPIntensityAdapter,
     evaluate_intensity_curves,
 )
+from Evaluation.core.dws_intensity import evaluate_dws_intensity_curves  # noqa: E402
 
 
 MODEL_CLASSES = {"S2P2": S2P2, "AttNHP": AttNHP}
@@ -75,7 +76,10 @@ DEFAULT_BATCH_SIZE_BY_MODEL = {"S2P2": 128, "AttNHP": DEFAULT_BATCH_SIZE}
 DEFAULT_LEARNING_RATE_BY_MODEL = {"S2P2": 5e-3, "AttNHP": 1e-3}
 DEFAULT_EARLY_STOP_PATIENCE = 25
 DEFAULT_THINNING = {
-    "num_sample": 1,
+    # TorchBaseModel uses this grid for deterministic trapezoidal one-step
+    # prediction, which requires at least two points.  Twenty matches the
+    # standalone FullyNN baseline and keeps evaluation memory bounded.
+    "num_sample": 20,
     "num_exp": 50,
     "over_sample_rate": 5,
     "patience_counter": 5,
@@ -85,7 +89,7 @@ DEFAULT_THINNING = {
 THINNING_BY_MODEL = {
     # S2P2 prediction sampling profile from the requested configuration.
     "S2P2": {**DEFAULT_THINNING, "num_sample": 10, "num_exp": 200},
-    # Preserve the existing sampling profile for AttNHP.
+    # AttNHP uses the shared prediction grid above.
     "AttNHP": {**DEFAULT_THINNING},
 }
 
@@ -273,6 +277,12 @@ def _load_pickle_split(path: Path, split: str, expected_dim: int | None = None) 
     streams = payload.get(split)
     if not isinstance(streams, (list, tuple)) or not streams:
         raise ValueError(f"{path} has no non-empty {split} split")
+    source_indices = payload.get("source_index_by_seq")
+    if source_indices is not None and (
+        not isinstance(source_indices, (list, tuple))
+        or len(source_indices) != len(streams)
+    ):
+        raise ValueError(f"{path} source_index_by_seq is not aligned with {split}")
 
     records: list[dict[str, Any]] = []
     for sequence_index, stream in enumerate(streams):
@@ -306,6 +316,11 @@ def _load_pickle_split(path: Path, split: str, expected_dim: int | None = None) 
         records.append(
             {
                 "seq_idx": sequence_index,
+                "source_index": int(
+                    source_indices[sequence_index]
+                    if source_indices is not None
+                    else sequence_index
+                ),
                 "time_since_start": times,
                 "time_since_last_event": deltas,
                 "type_event": types,
@@ -387,18 +402,39 @@ def compute_training_dtime_max(records: Iterable[Mapping[str, Any]]) -> float:
     return max(1e-6, 1.2 * max(values))
 
 
-def _make_model_config(model: str, dim_process: int, dtime_max: float, gpu: int) -> _ModelConfig:
+def _make_model_config(
+    model: str,
+    dim_process: int,
+    dtime_max: float,
+    gpu: int,
+    checkpoint_model_config: Mapping[str, Any] | None = None,
+) -> _ModelConfig:
     thinning = THINNING_BY_MODEL[model]
+    saved = dict(checkpoint_model_config or {})
     if model == "S2P2":
+        saved_specs = dict(saved.get("model_specs") or {})
+        s2p2_specs = {
+            "P": int(saved_specs.get("P", 128)),
+            "dropout_rate": float(saved_specs.get("dropout_rate", 0.1)),
+            "act_func": saved_specs.get("act_func", "gelu"),
+            "for_loop": bool(saved_specs.get("for_loop", True)),
+            "pre_norm": bool(saved_specs.get("pre_norm", False)),
+            "post_norm": bool(saved_specs.get("post_norm", True)),
+            "int_forward_variant": bool(saved_specs.get("int_forward_variant", False)),
+            "int_backward_variant": bool(saved_specs.get("int_backward_variant", True)),
+            "relative_time": bool(saved_specs.get("relative_time", True)),
+        }
         return _ModelConfig(
-            # Requested S2P2 architecture: H=128, P=128, L=2.
-            hidden_size=128,
-            time_emb_size=16,
-            num_layers=2,
-            num_heads=2,
+            # Reuse checkpoint metadata when evaluating an existing run.  The
+            # historical DWS S2P2 checkpoint uses H=128, P=16, L=4, while
+            # newly trained runs retain the defaults below.
+            hidden_size=int(saved.get("hidden_size", 128)),
+            time_emb_size=int(saved.get("time_emb_size", 16)),
+            num_layers=int(saved.get("num_layers", 2)),
+            num_heads=int(saved.get("num_heads", 2)),
             use_mc_samples=True,
             loss_integral_num_sample_per_step=10,
-            dropout_rate=0.1,
+            dropout_rate=float(saved.get("dropout_rate", 0.1)),
             use_ln=False,
             thinning=_ThinningConfig(dtime_max=dtime_max, **thinning),
             num_event_types_pad=dim_process + 1,
@@ -406,23 +442,13 @@ def _make_model_config(model: str, dim_process: int, dtime_max: float, gpu: int)
             pad_token_id=dim_process,
             model_id=model,
             gpu=gpu,
-            model_specs={
-                "P": 128,
-                "dropout_rate": 0.1,
-                "act_func": "gelu",
-                "for_loop": True,
-                "pre_norm": False,
-                "post_norm": True,
-                "int_forward_variant": False,
-                "int_backward_variant": True,
-                "relative_time": True,
-            },
+            model_specs=s2p2_specs,
         )
     return _ModelConfig(
-        hidden_size=16,
-        time_emb_size=4,
-        num_layers=2,
-        num_heads=2,
+        hidden_size=int(saved.get("hidden_size", 16)),
+        time_emb_size=int(saved.get("time_emb_size", 4)),
+        num_layers=int(saved.get("num_layers", 2)),
+        num_heads=int(saved.get("num_heads", 2)),
         use_mc_samples=True,
         loss_integral_num_sample_per_step=10,
         dropout_rate=0.0,
@@ -669,6 +695,21 @@ def _load_checkpoint(model: torch.nn.Module, path: Path, device: torch.device) -
         raise ValueError(f"{path} does not contain a model state dict")
     model.load_state_dict(state, strict=True)
     return metadata
+
+
+def _peek_checkpoint_model_config(path: Path) -> dict[str, Any]:
+    """Read architecture metadata before constructing an evaluate-only model."""
+
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, Mapping):
+        return {}
+    config = payload.get("model_config")
+    return dict(config) if isinstance(config, Mapping) else {}
 
 
 def _save_checkpoint(
@@ -1018,6 +1059,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--intensity-checkpoint-task", type=int, default=None)
     parser.add_argument("--intensity-samples", type=int, default=256)
     parser.add_argument("--intensity-plot-anchors", type=int, default=2)
+    parser.add_argument("--dws-intensity-output-dir", type=Path, default=None)
+    parser.add_argument("--dws-intensity-horizon", type=float, default=10.0)
+    parser.add_argument("--dws-intensity-samples", type=int, default=200)
+    parser.add_argument("--dws-intensity-anchors-per-law", type=int, default=20)
     return parser
 
 
@@ -1046,6 +1091,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--intensity-samples must be at least two")
     if args.intensity_plot_anchors < 0:
         raise ValueError("--intensity-plot-anchors must be non-negative")
+    if args.dws_intensity_samples < 2:
+        raise ValueError("--dws-intensity-samples must be at least two")
+    if args.dws_intensity_horizon <= 0.0:
+        raise ValueError("--dws-intensity-horizon must be positive")
+    if args.dws_intensity_anchors_per_law < 1:
+        raise ValueError("--dws-intensity-anchors-per-law must be positive")
     intensity_values = (
         args.intensity_output_dir,
         args.intensity_ground_truth_dir,
@@ -1072,6 +1123,8 @@ def main(argv: list[str] | None = None) -> int:
     resolved_variant = args.variant
     if resolved_variant is None and args.dataset.startswith("dws_"):
         resolved_variant = args.dataset.removeprefix("dws_")
+    if args.dws_intensity_output_dir is not None and resolved_variant is None:
+        raise ValueError("DWS intensity evaluation requires a dws_<variant> dataset")
     prepared = args.prepared_data_dir.expanduser().resolve() if args.prepared_data_dir else output / "prepared"
     if args.prepared_data_dir is None:
         _prepare_raw_dataset(args.dataset, resolved_variant, args.seed, prepared)
@@ -1081,7 +1134,23 @@ def main(argv: list[str] | None = None) -> int:
         max_events_per_sequence=args.max_events_per_sequence,
     )
     dtime_max = compute_training_dtime_max(records["train"])
-    config = _make_model_config(args.model, dim_process, dtime_max, gpu)
+    initial_checkpoint = (
+        args.initial_checkpoint.expanduser().resolve()
+        if args.initial_checkpoint is not None
+        else None
+    )
+    checkpoint_model_config = (
+        _peek_checkpoint_model_config(initial_checkpoint)
+        if initial_checkpoint is not None
+        else None
+    )
+    config = _make_model_config(
+        args.model,
+        dim_process,
+        dtime_max,
+        gpu,
+        checkpoint_model_config,
+    )
     model = MODEL_CLASSES[args.model](config)
     # TorchBaseModel calls ``to(device)`` before the concrete model creates
     # its own layers.  Move the fully constructed model once more so CUDA
@@ -1094,11 +1163,6 @@ def main(argv: list[str] | None = None) -> int:
     valid_loader = _make_loader(records["dev"], dim_process, resolved_batch_size, shuffle=False)
     test_loader = _make_loader(records["test"], dim_process, resolved_batch_size, shuffle=False)
 
-    initial_checkpoint = (
-        args.initial_checkpoint.expanduser().resolve()
-        if args.initial_checkpoint is not None
-        else None
-    )
     initial_metadata: dict[str, Any] = {}
     if initial_checkpoint is not None:
         # This must precede both the evaluate-only branch and the training
@@ -1254,6 +1318,26 @@ def main(argv: list[str] | None = None) -> int:
             samples=args.intensity_samples,
             plot_anchors=args.intensity_plot_anchors,
         )
+    dws_intensity_summary = None
+    if args.dws_intensity_output_dir is not None:
+        tree_root = PROJECT_ROOT / "Datasets" / "DWS" / f"tree_{resolved_variant}"
+        intensity_adapter = EasyTPPIntensityAdapter(
+            model,
+            dim_process,
+            model_name=args.model,
+        )
+        _dws_rows, dws_intensity_summary = evaluate_dws_intensity_curves(
+            intensity_adapter,
+            records["test"],
+            output_dir=args.dws_intensity_output_dir,
+            parameters_path=tree_root / f"parameters_{resolved_variant}.json",
+            dataset_path=tree_root / f"hawkes_dataset_{resolved_variant}.csv",
+            model_name=args.model,
+            variant=resolved_variant,
+            horizon=args.dws_intensity_horizon,
+            samples=args.dws_intensity_samples,
+            anchors_per_law=args.dws_intensity_anchors_per_law,
+        )
     test_row = {
         "Epoch": best_epoch,
         "Split": "test",
@@ -1296,6 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
             "validation_loglike": None if args.evaluate_only else best_validation,
             "test": test_metrics,
             "intensity": intensity_summary,
+            "dws_intensity": dws_intensity_summary,
             "artifacts": {
                 "checkpoint": str(checkpoint) if checkpoint.is_file() else None,
                 "epoch_metrics": str(output / "csv" / "epoch_metrics.csv"),

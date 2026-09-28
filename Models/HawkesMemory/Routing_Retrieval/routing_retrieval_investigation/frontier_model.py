@@ -1,9 +1,9 @@
-"""Active-frontier routing, retrieval, and Hawkes parameter composition."""
+"""Flat prototype routing, path retrieval, and Hawkes composition."""
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field, fields
+import hashlib
+from dataclasses import dataclass, fields
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 import torch
@@ -16,37 +16,20 @@ from .prototype_store import NodePrototypeStore
 
 
 @dataclass
-class BranchDecision:
-    """Diagnostics for one locally evaluated internal node."""
-
-    node_id: str
-    child_ids: tuple[str, str]
-    semantic_score: Tensor
-    data_score: Tensor
-    log_prior: Tensor
-    total_score: Tensor
-    probability: Tensor
-    entropy: Tensor
-    priority: Optional[Tensor] = None
-
-
-@dataclass
 class FrontierSample:
-    """One sample's ragged active frontier."""
+    """One sample's selected leaves and retrieved path union."""
 
     node_ids: tuple[str, ...]
     mass: Tensor
     visited_node_ids: tuple[str, ...]
     expanded_node_ids: tuple[str, ...]
-    decisions: Dict[str, BranchDecision] = field(default_factory=dict)
 
 
 @dataclass
 class PackedFrontierBatch:
-    """Fixed-width active-frontier state for a batch of causal prefixes.
+    """Fixed-width selected-leaf state for a batch of causal prefixes.
 
-    Posterior and training responsibility live on these slots. They are never
-    projected onto leaves that did not participate in the computation.
+    Posterior and training responsibility live on selected leaf slots.
     """
 
     node_indices: Tensor
@@ -137,17 +120,14 @@ class FrontierStaticCache:
 
 
 class FrontierRoutingRetrieval(nn.Module):
-    """Budgeted coarse-to-fine adapter around the current ``HawkesTree``.
+    """Flat Top-K leaf routing with hierarchical path retrieval.
 
     The wrapped tree remains the owner of topology, semantic parameters,
     memory banks, query network, and sparse retriever. This module changes
     only the computational construction used by one prediction:
 
-    1. start from ``{root}``;
-    2. score only children of active internal frontier nodes;
-    3. expand best-first until the frontier budget is reached;
-    4. retrieve the union of the selected frontier paths once;
-    5. mix semantic + episodic frontier experts and add working memory.
+    Score every leaf prototype once, select Top-K leaves, and retrieve the
+    union of their complete root-to-leaf paths. The tree itself stays intact.
     """
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -199,89 +179,12 @@ class FrontierRoutingRetrieval(nn.Module):
             device=tree._device_anchor.device,
         )
         self._topology_signature = tuple(tree.all_node_ids)
-        self._validated_frontiers: set[tuple[str, ...]] = set()
-        self.expansion_gain: Dict[str, float] = {}
-        self.expansion_visits: Dict[str, int] = {}
-        # Expansion gains are mutable training state, so unlike topology
-        # tensors they cannot be frozen until Sleep.  The tensor is the hot-
-        # path source of truth; the legacy dictionary is materialized only at
-        # explicit API/checkpoint boundaries.
-        self.register_buffer(
-            "_expansion_gain_tensor",
-            torch.empty(
-                0,
-                device=tree._device_anchor.device,
-                dtype=torch.float32,
-            ),
-            persistent=False,
-        )
-        self._gain_topology_signature: Optional[tuple[str, ...]] = None
-        # Training-only, p_expand-independent coverage state for Regional
-        # Probe. Counts are keyed by actual leaves and survive checkpoints.
+        # Retained for loading historical checkpoints and for Sleep probes.
         self.probe_leaf_visits: Dict[str, int] = {}
         self._topology_tensors: Dict[str, Tensor] = {}
         self._target_leaf_mass_by_id: Dict[str, float] = {}
         self._pending_target_leaf_mass: Optional[tuple[float, ...]] = None
         self._reset_target_leaf_mass_from_config()
-
-    def _sync_gain_tensor(self) -> None:
-        """Initialize or migrate the device gain vector after topology changes."""
-        node_ids = tuple(self.tree.all_node_ids)
-        if (
-            self._gain_topology_signature == node_ids
-            and self._expansion_gain_tensor.numel() == len(node_ids)
-        ):
-            return
-
-        device = self.tree._device_anchor.device
-        previous_ids = self._gain_topology_signature
-        previous = self._expansion_gain_tensor
-        if previous_ids is None or previous.numel() != len(previous_ids):
-            # Initial construction and checkpoint restoration originate from
-            # the compatibility dictionary.
-            migrated = torch.as_tensor(
-                [
-                    self.expansion_gain.get(
-                        node_id,
-                        self.config.default_expansion_gain,
-                    )
-                    for node_id in node_ids
-                ],
-                device=device,
-                dtype=torch.float32,
-            )
-        else:
-            # Sleep may split, merge, or prune nodes.  Preserve every surviving
-            # value entirely on-device and initialize only genuinely new nodes.
-            migrated = torch.full(
-                (len(node_ids),),
-                float(self.config.default_expansion_gain),
-                device=device,
-                dtype=torch.float32,
-            )
-            previous_lookup = {
-                node_id: index for index, node_id in enumerate(previous_ids)
-            }
-            surviving = [
-                (new_index, previous_lookup[node_id])
-                for new_index, node_id in enumerate(node_ids)
-                if node_id in previous_lookup
-            ]
-            if surviving:
-                new_indices, old_indices = zip(*surviving)
-                new_index = torch.tensor(
-                    new_indices, device=device, dtype=torch.long
-                )
-                old_index = torch.tensor(
-                    old_indices, device=previous.device, dtype=torch.long
-                )
-                migrated.index_copy_(
-                    0,
-                    new_index,
-                    previous.index_select(0, old_index).to(migrated),
-                )
-        self._expansion_gain_tensor = migrated
-        self._gain_topology_signature = node_ids
 
     @staticmethod
     def _is_descendant(node_id: str, ancestor_id: str) -> bool:
@@ -434,26 +337,13 @@ class FrontierRoutingRetrieval(nn.Module):
             return
         self.prototypes.sync_nodes(node_ids)
         active = set(node_ids)
-        self.expansion_gain = {
-            node_id: gain
-            for node_id, gain in self.expansion_gain.items()
-            if node_id in active
-        }
-        self.expansion_visits = {
-            node_id: visits
-            for node_id, visits in self.expansion_visits.items()
-            if node_id in active
-        }
         active_leaves = set(self.tree.leaf_ids)
         self.probe_leaf_visits = {
             leaf_id: visits
             for leaf_id, visits in self.probe_leaf_visits.items()
             if leaf_id in active_leaves
         }
-        # Keep the previous gain signature until _sync_gain_tensor runs.  It
-        # uses that ID order to migrate surviving values fully on-device.
         self._topology_signature = node_ids
-        self._validated_frontiers.clear()
         if not self._apply_pending_target_leaf_mass():
             self._reconcile_target_leaf_mass()
         self._rebuild_topology_tensors()
@@ -481,6 +371,21 @@ class FrontierRoutingRetrieval(nn.Module):
                 child_index[node_index, 1] = index[node.right]
 
         leaf_ids = tuple(self.tree.leaf_ids)
+        leaf_index = torch.tensor(
+            [index[leaf_id] for leaf_id in leaf_ids],
+            dtype=torch.long,
+            device=device,
+        )
+        cold_start = []
+        for leaf_id in leaf_ids:
+            seed = int.from_bytes(
+                hashlib.sha256(leaf_id.encode()).digest()[:8], "big"
+            ) % (2**63 - 1)
+            generator = torch.Generator(device="cpu").manual_seed(seed)
+            cold_start.append(torch.randn(self.tree.z_dim, generator=generator))
+        cold_start_table = F.normalize(
+            torch.stack(cold_start).to(device=device), dim=-1
+        )
         if set(self._target_leaf_mass_by_id) != set(leaf_ids):
             raise RuntimeError(
                 "target leaf mass is stale; synchronize topology before routing"
@@ -494,9 +399,9 @@ class FrontierRoutingRetrieval(nn.Module):
             device=device,
         )
         node_mass = torch.zeros(len(node_ids), device=device)
-        for leaf_index, path in enumerate(self.tree.leaf_paths):
+        for leaf_position, path in enumerate(self.tree.leaf_paths):
             for node_id in path:
-                node_mass[index[node_id]] += leaf_mass[leaf_index]
+                node_mass[index[node_id]] += leaf_mass[leaf_position]
         child_prior = torch.zeros(len(node_ids), 2, device=device)
         valid_internal = internal.nonzero(as_tuple=False).reshape(-1)
         if valid_internal.numel():
@@ -509,6 +414,9 @@ class FrontierRoutingRetrieval(nn.Module):
         self._topology_tensors = {
             "child_index": child_index,
             "internal": internal,
+            "leaf_index": leaf_index,
+            "cold_start_leaf_prototype": cold_start_table,
+            "max_path_length": max(len(path) for path in self.tree.leaf_paths),
             "leaf_mass": leaf_mass,
             "node_mass": node_mass,
             "child_prior": child_prior,
@@ -524,12 +432,9 @@ class FrontierRoutingRetrieval(nn.Module):
         """Build the node/semantic tables shared by a frozen Wake sequence."""
         self._sync_topology()
         node_embedding_table = self.tree._node_embedding_table()
-        # Router losses may train the compatibility network, but must not move
-        # the semantic node geometry.  Prediction still consumes the live
-        # table below through ``semantic_theta_table``.
-        normalized_node_table = self.tree.router_compat.normalize_nodes(
-            node_embedding_table.detach()
-        )
+        # The compatibility table remains in the cache schema for historical
+        # callers; flat routing scores empirical z-space prototypes instead.
+        normalized_node_table = node_embedding_table.detach()
         semantic_theta_table = self.tree.semantic_theta_table(
             node_embedding_table
         )
@@ -574,293 +479,6 @@ class FrontierRoutingRetrieval(nn.Module):
         ):
             raise ValueError("frontier static cache is on the wrong device")
 
-    @torch.no_grad()
-    def set_expansion_gain(self, node_id: str, gain: float) -> None:
-        if node_id not in self.tree.nodes:
-            raise KeyError(f"unknown tree node: {node_id}")
-        if gain < 0.0:
-            raise ValueError("expansion gain must be non-negative")
-        self.expansion_gain[node_id] = float(gain)
-        self._sync_gain_tensor()
-        index = tuple(self.tree.all_node_ids).index(node_id)
-        self._expansion_gain_tensor[index] = float(gain)
-
-    @torch.no_grad()
-    def update_expansion_gain(
-        self,
-        node_indices: Tensor,
-        observed_gain: Tensor,
-        mask: Tensor,
-    ) -> None:
-        """EMA-update historical refinement value after targets are observed."""
-        if (
-            node_indices.shape != observed_gain.shape
-            or mask.shape != node_indices.shape
-        ):
-            raise ValueError("expansion gain tensors must have the same shape")
-        decay = self.config.expansion_gain_decay
-        self._sync_gain_tensor()
-        selected_nodes = node_indices.masked_select(mask)
-        selected_values = observed_gain.masked_select(mask).clamp_min(0.0)
-        if selected_nodes.numel() == 0:
-            return
-        sums = selected_values.new_zeros(self._expansion_gain_tensor.shape)
-        counts = selected_values.new_zeros(self._expansion_gain_tensor.shape)
-        sums.scatter_add_(0, selected_nodes, selected_values)
-        counts.scatter_add_(
-            0,
-            selected_nodes,
-            torch.ones_like(selected_values),
-        )
-        self.update_expansion_gain_sufficient_statistics(sums, counts)
-
-    @torch.no_grad()
-    def update_expansion_gain_sufficient_statistics(
-        self,
-        sums: Tensor,
-        counts: Tensor,
-    ) -> None:
-        """Apply an EMA update from per-node gain sums and visit counts.
-
-        The distributed Global path all-reduces these compact sufficient
-        statistics so every rank applies the same gain update without
-        gathering rank-local event rows.
-        """
-        self._sync_gain_tensor()
-        if (
-            sums.ndim != 1
-            or counts.ndim != 1
-            or sums.shape != self._expansion_gain_tensor.shape
-            or counts.shape != self._expansion_gain_tensor.shape
-        ):
-            raise ValueError("gain sufficient statistics must have shape [N]")
-        if sums.device != self._expansion_gain_tensor.device:
-            raise ValueError("gain statistics must share the frontier device")
-        decay = self.config.expansion_gain_decay
-        old = self._expansion_gain_tensor.to(sums)
-        updated = decay * old + (1.0 - decay) * (
-            sums / counts.clamp_min(1.0)
-        )
-        active = counts > 0.0
-        self._expansion_gain_tensor.copy_(torch.where(active, updated, old))
-
-    def _child_ids(self, node_id: str) -> tuple[str, str]:
-        node = self.tree.nodes[node_id]
-        if node.left is None or node.right is None:
-            raise ValueError(f"node is not expandable: {node_id}")
-        return node.left, node.right
-
-    def _tempered_child_prior(
-        self,
-        child_ids: Sequence[str],
-        reference: Tensor,
-    ) -> Tensor:
-        node_index = {
-            node_id: index
-            for index, node_id in enumerate(self.tree.all_node_ids)
-        }
-        parent_id = self.tree.nodes[child_ids[0]].parent
-        if parent_id is None:
-            raise RuntimeError("child prior requested for root")
-        return self._topology_tensors["child_prior"][
-            node_index[parent_id]
-        ].to(reference)
-
-    def _branch_distribution(
-        self,
-        node_id: str,
-        z: Tensor,
-        projected_z: Tensor,
-        normalized_node_table: Tensor,
-        node_index: Mapping[str, int],
-    ) -> BranchDecision:
-        child_ids = self._child_ids(node_id)
-        child_indices = torch.tensor(
-            [node_index[child_id] for child_id in child_ids],
-            device=normalized_node_table.device,
-            dtype=torch.long,
-        )
-        child_normalized = normalized_node_table.index_select(
-            0,
-            child_indices,
-        )
-        semantic_score = self.tree.router_compat.score_normalized(
-            projected_z.unsqueeze(0),
-            child_normalized,
-        ).squeeze(0)
-        # Data-dependent evidence is introduced only after observing the
-        # target through the frontier posterior. Search itself remains a
-        # strictly causal cheap semantic router.
-        data_score = torch.zeros_like(semantic_score)
-        prior = self._tempered_child_prior(
-            child_ids,
-            semantic_score,
-        )
-        log_prior = prior.clamp_min(1e-12).log()
-
-        total_score = (
-            self.config.semantic_weight
-            * semantic_score
-            / self.config.routing_temperature
-            + log_prior
-        )
-        probability = F.softmax(total_score, dim=-1)
-        entropy = -(
-            probability * probability.clamp_min(1e-12).log()
-        ).sum()
-        return BranchDecision(
-            node_id=node_id,
-            child_ids=child_ids,
-            semantic_score=semantic_score,
-            data_score=data_score,
-            log_prior=log_prior,
-            total_score=total_score,
-            probability=probability,
-            entropy=entropy,
-        )
-
-    def _priority(
-        self,
-        node_id: str,
-        mass: Tensor,
-        decision: BranchDecision,
-    ) -> Tensor:
-        self._sync_gain_tensor()
-        node_index = tuple(self.tree.all_node_ids).index(node_id)
-        gain = self._expansion_gain_tensor[node_index].to(mass)
-        confidence = (
-            1.0
-            - decision.entropy.detach()
-            / math.log(2.0)
-        ).clamp(0.0, 1.0)
-        priority = (
-            mass.detach()
-            * (
-                gain
-                + self.config.confidence_weight * confidence
-            )
-            - self.config.expansion_compute_cost
-        )
-        return priority
-
-    def _route_one(
-        self,
-        z: Tensor,
-        projected_z: Tensor,
-        normalized_node_table: Tensor,
-        node_index: Mapping[str, int],
-        *,
-        update_search_state: bool,
-    ) -> FrontierSample:
-        frontier_ids = ["root"]
-        frontier_mass = [z.new_ones(())]
-        decisions: Dict[str, BranchDecision] = {}
-        expanded: list[str] = []
-
-        while len(frontier_ids) < self.config.frontier_budget:
-            candidates: list[tuple[Tensor, int, str]] = []
-            for index, (node_id, mass) in enumerate(
-                zip(frontier_ids, frontier_mass)
-            ):
-                if self.tree.nodes[node_id].is_leaf:
-                    continue
-                if node_id not in decisions:
-                    decisions[node_id] = self._branch_distribution(
-                        node_id,
-                        z,
-                        projected_z,
-                        normalized_node_table,
-                        node_index,
-                    )
-                priority = self._priority(
-                    node_id,
-                    mass,
-                    decisions[node_id],
-                )
-                candidates.append((priority, index, node_id))
-            if not candidates:
-                break
-
-            # One device-to-host synchronization per expansion. The previous
-            # Python ``max(float(priority.cpu()))`` synchronized once for
-            # every candidate and left the GPU idle between tiny kernels.
-            candidate_priority = torch.stack(
-                [item[0] for item in candidates]
-            )
-            selected = int(candidate_priority.argmax().item())
-            _, frontier_index, node_id = candidates[selected]
-            parent_mass = frontier_mass[frontier_index]
-            decision = decisions[node_id]
-            decision.priority = candidate_priority[selected].detach()
-            child_mass = parent_mass * decision.probability
-            left_id, right_id = decision.child_ids
-            frontier_ids[frontier_index:frontier_index + 1] = [
-                left_id,
-                right_id,
-            ]
-            frontier_mass[frontier_index:frontier_index + 1] = [
-                child_mass[0],
-                child_mass[1],
-            ]
-            expanded.append(node_id)
-            if update_search_state:
-                self.expansion_visits[node_id] = (
-                    self.expansion_visits.get(node_id, 0) + 1
-                )
-
-        mass = torch.stack(frontier_mass)
-        # Numerical drift is tiny, but this keeps the partition invariant
-        # exact enough for long trees and mixed precision.
-        mass = mass / mass.sum().clamp_min(1e-12)
-        visited = tuple(dict.fromkeys(
-            path_node
-            for frontier_node in frontier_ids
-            for path_node in self.tree.path_to_node(frontier_node)
-        ))
-        result = FrontierSample(
-            node_ids=tuple(frontier_ids),
-            mass=mass,
-            visited_node_ids=visited,
-            expanded_node_ids=tuple(expanded),
-            decisions=decisions,
-        )
-        self._validate_frontier(result)
-        return result
-
-    def _validate_frontier(self, sample: FrontierSample) -> None:
-        signature = sample.node_ids
-        if signature in self._validated_frontiers:
-            return
-        if len(sample.node_ids) > self.config.frontier_budget:
-            raise RuntimeError("frontier exceeds configured budget")
-        if not torch.allclose(
-            sample.mass.sum(),
-            sample.mass.new_ones(()),
-            atol=1e-6,
-            rtol=1e-6,
-        ):
-            raise RuntimeError("frontier mass does not sum to one")
-        paths = {
-            node_id: set(self.tree.node_paths[node_id])
-            for node_id in sample.node_ids
-        }
-        for left_index, left_id in enumerate(sample.node_ids):
-            for right_id in sample.node_ids[left_index + 1:]:
-                if left_id in paths[right_id] or right_id in paths[left_id]:
-                    raise RuntimeError(
-                        "frontier is not an ancestor-free antichain"
-                    )
-        for leaf_path in self.tree.leaf_paths:
-            coverage = sum(
-                node_id in leaf_path
-                for node_id in sample.node_ids
-            )
-            if coverage != 1:
-                raise RuntimeError(
-                    "frontier does not partition all stored leaves"
-                )
-        self._validated_frontiers.add(signature)
-
     def route_packed(
         self,
         z_t: Tensor,
@@ -870,195 +488,45 @@ class FrontierRoutingRetrieval(nn.Module):
         normalized_node_table: Optional[Tensor] = None,
         projected_z: Optional[Tensor] = None,
     ) -> PackedFrontierBatch:
-        """Run at most ``K_max-1`` masked expansion rounds on fixed tensors."""
+        """Select leaf experts by cosine similarity and fixed leaf prior."""
         if z_t.ndim != 2 or z_t.size(-1) != self.tree.z_dim:
             raise ValueError(
                 f"z_t must have shape [B, {self.tree.z_dim}]"
             )
         self._sync_topology()
-        if node_embedding_table is None:
-            node_embedding_table = self.tree._node_embedding_table()
-        if normalized_node_table is None:
-            normalized_node_table = self.tree.router_compat.normalize_nodes(
-                node_embedding_table
-            )
-        if projected_z is None:
-            projected_z = self.tree.router_compat.project_z(z_t)
-        self._sync_gain_tensor()
-
         batch = z_t.size(0)
         width = self.config.frontier_budget
-        rounds = max(width - 1, 0)
         device = z_t.device
-        node_indices = torch.full(
-            (batch, width), -1, dtype=torch.long, device=device
-        )
-        mass = z_t.new_zeros(batch, width)
-        mask = torch.zeros(batch, width, dtype=torch.bool, device=device)
-        node_indices[:, 0] = 0
-        mass[:, 0] = 1.0
-        mask[:, 0] = True
-
-        expanded_node = torch.full(
-            (batch, rounds), -1, dtype=torch.long, device=device
-        )
-        expanded_children = torch.full(
-            (batch, rounds, 2), -1, dtype=torch.long, device=device
-        )
-        expanded_probability = z_t.new_zeros(batch, rounds, 2)
-        expanded_semantic = z_t.new_zeros(batch, rounds, 2)
-        expanded_mask = torch.zeros(
-            batch, rounds, dtype=torch.bool, device=device
-        )
-        expansion_utility = z_t.new_full((batch, rounds), -torch.inf)
-
         topology = self._topology_tensors
-        child_table = topology["child_index"]
-        internal_table = topology["internal"]
-        prior_table = topology["child_prior"].to(z_t)
-        gain_table = self._expansion_gain_tensor.to(
-            device=device,
-            dtype=z_t.dtype,
+        leaf_index = topology["leaf_index"]
+        leaf_count = leaf_index.numel()
+        selected_count = min(width, leaf_count)
+        leaf_mean = self.prototypes.mean.index_select(0, leaf_index).to(z_t)
+        leaf_count_seen = self.prototypes.count.index_select(0, leaf_index)
+        # A fixed, ID-derived direction breaks the all-zero prototype tie.
+        # It is replaced by the empirical mean at the first assignment.
+        cold_start = topology["cold_start_leaf_prototype"].to(z_t)
+        has_prototype = (leaf_count_seen > 0) & (
+            leaf_mean.norm(dim=-1) > 1e-12
         )
-
-        for round_index in range(rounds):
-            safe_nodes = node_indices.clamp_min(0)
-            candidate_internal = (
-                mask & internal_table.index_select(
-                    0, safe_nodes.reshape(-1)
-                ).reshape(batch, width)
-            )
-            children = child_table.index_select(
-                0, safe_nodes.reshape(-1)
-            ).reshape(batch, width, 2)
-            safe_children = children.clamp_min(0)
-            child_embedding = normalized_node_table.index_select(
-                0, safe_children.reshape(-1)
-            ).reshape(batch, width, 2, -1)
-            z_for_children = projected_z[:, None, None, :].expand(
-                -1, width, 2, -1
-            )
-            semantic_score = self.tree.router_compat.score_normalized(
-                z_for_children.reshape(batch, width * 2, -1),
-                child_embedding.reshape(batch, width * 2, -1),
-            ).reshape(batch, width, 2)
-            prior = prior_table.index_select(
-                0, safe_nodes.reshape(-1)
-            ).reshape(batch, width, 2)
-            total_score = (
-                self.config.semantic_weight
-                * semantic_score
-                / self.config.routing_temperature
-                + prior.clamp_min(1e-12).log()
-            )
-            probability = F.softmax(total_score, dim=-1)
-            entropy = -(
-                probability * probability.clamp_min(1e-12).log()
-            ).sum(dim=-1)
-            confidence = (
-                1.0 - entropy / math.log(2.0)
-            ).clamp(0.0, 1.0)
-            gain = gain_table.index_select(
-                0, safe_nodes.reshape(-1)
-            ).reshape(batch, width)
-            utility = (
-                mass.detach()
-                * (gain + self.config.confidence_weight * confidence.detach())
-                - self.config.expansion_compute_cost
-            ).masked_fill(~candidate_internal, -torch.inf)
-            selected_utility, selected_slot = utility.max(dim=-1)
-            count = mask.sum(dim=-1)
-            must_expand = count < self.config.frontier_min_experts
-            active = candidate_internal.any(dim=-1) & (
-                must_expand | (selected_utility > 0.0)
-            )
-            if round_index == 0:
-                # The root is forced whenever it is expandable.
-                active = candidate_internal[:, 0]
-                selected_slot = torch.zeros_like(selected_slot)
-                selected_utility = utility[:, 0]
-
-            selected_node = node_indices.gather(
-                1, selected_slot.unsqueeze(1)
-            ).squeeze(1)
-            selected_children = children.gather(
-                1,
-                selected_slot[:, None, None].expand(-1, 1, 2),
-            ).squeeze(1)
-            selected_probability = probability.gather(
-                1,
-                selected_slot[:, None, None].expand(-1, 1, 2),
-            ).squeeze(1)
-            selected_semantic = semantic_score.gather(
-                1,
-                selected_slot[:, None, None].expand(-1, 1, 2),
-            ).squeeze(1)
-            parent_mass = mass.gather(
-                1, selected_slot.unsqueeze(1)
-            ).squeeze(1)
-            new_mass = parent_mass.unsqueeze(-1) * selected_probability
-
-            expanded_mask[:, round_index] = active
-            expanded_node[:, round_index] = torch.where(
-                active, selected_node, expanded_node[:, round_index]
-            )
-            expanded_children[:, round_index] = torch.where(
-                active[:, None],
-                selected_children,
-                expanded_children[:, round_index],
-            )
-            expanded_probability[:, round_index] = torch.where(
-                active[:, None],
-                selected_probability,
-                expanded_probability[:, round_index],
-            )
-            expanded_semantic[:, round_index] = torch.where(
-                active[:, None],
-                selected_semantic,
-                expanded_semantic[:, round_index],
-            )
-            expansion_utility[:, round_index] = torch.where(
-                active,
-                selected_utility,
-                expansion_utility[:, round_index],
-            )
-
-            # Replace the selected parent by its left child and append the
-            # right child into the first free slot. Keep the mass update
-            # functional: later rounds need earlier mass values for gradient
-            # computation, so mutating the same tensor would invalidate
-            # autograd's saved versions.
-            free_slot = (~mask).to(torch.int64).argmax(dim=-1)
-            selected_one_hot = F.one_hot(
-                selected_slot, num_classes=width
-            ).bool() & active.unsqueeze(-1)
-            free_one_hot = F.one_hot(
-                free_slot, num_classes=width
-            ).bool() & active.unsqueeze(-1)
-            node_indices = torch.where(
-                selected_one_hot,
-                selected_children[:, 0].unsqueeze(-1),
-                node_indices,
-            )
-            node_indices = torch.where(
-                free_one_hot,
-                selected_children[:, 1].unsqueeze(-1),
-                node_indices,
-            )
-            mass = torch.where(
-                selected_one_hot,
-                new_mass[:, 0].unsqueeze(-1),
-                mass,
-            )
-            mass = torch.where(
-                free_one_hot,
-                new_mass[:, 1].unsqueeze(-1),
-                mass,
-            )
-            mask = mask | free_one_hot
-
-        mass = mass * mask.to(mass.dtype)
-        mass = mass / mass.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        prototype = torch.where(
+            has_prototype.unsqueeze(-1), leaf_mean, cold_start
+        )
+        cosine = F.normalize(z_t, dim=-1) @ F.normalize(prototype, dim=-1).T
+        score = (
+            cosine / self.config.routing_temperature
+            + self.config.prior_weight
+            * topology["leaf_mass"].to(z_t).clamp_min(1e-12).log()
+        )
+        selected_score, selected_leaf = score.topk(selected_count, dim=-1)
+        node_indices = leaf_index[selected_leaf]
+        mass = F.softmax(selected_score, dim=-1)
+        if selected_count < width:
+            node_indices = F.pad(node_indices, (0, width-selected_count), value=-1)
+            mass = F.pad(mass, (0, width-selected_count))
+        mask = (
+            torch.arange(width, device=device)[None, :] < selected_count
+        ).expand(batch, -1)
 
         safe_frontier = node_indices.clamp_min(0)
         frontier_paths = topology["path_mask"].index_select(
@@ -1066,7 +534,10 @@ class FrontierRoutingRetrieval(nn.Module):
         ).reshape(batch, width, -1)
         frontier_paths = frontier_paths & mask.unsqueeze(-1)
         visited_all = frontier_paths.any(dim=1)
-        max_visited = 2 * width - 1
+        max_visited = min(
+            len(self.tree.all_node_ids),
+            width * topology["max_path_length"],
+        )
         all_index = torch.arange(
             len(self.tree.all_node_ids), device=device
         ).expand(batch, -1)
@@ -1087,21 +558,6 @@ class FrontierRoutingRetrieval(nn.Module):
             & visited_mask.unsqueeze(1)
         )
 
-        if update_search_state:
-            with torch.no_grad():
-                flat = expanded_node[expanded_mask]
-                if flat.numel():
-                    counts = torch.bincount(
-                        flat,
-                        minlength=len(self.tree.all_node_ids),
-                    ).cpu().tolist()
-                    for node_id, value in zip(self.tree.all_node_ids, counts):
-                        if value:
-                            self.expansion_visits[node_id] = (
-                                self.expansion_visits.get(node_id, 0)
-                                + int(value)
-                            )
-
         return PackedFrontierBatch(
             node_indices=node_indices,
             mass=mass,
@@ -1109,12 +565,12 @@ class FrontierRoutingRetrieval(nn.Module):
             visited_indices=visited_indices,
             visited_mask=visited_mask,
             path_incidence=path_incidence,
-            expanded_node_indices=expanded_node,
-            expanded_child_indices=expanded_children,
-            expanded_probability=expanded_probability,
-            expanded_semantic_score=expanded_semantic,
-            expanded_mask=expanded_mask,
-            expansion_utility=expansion_utility,
+            expanded_node_indices=torch.empty(batch, 0, dtype=torch.long, device=device),
+            expanded_child_indices=torch.empty(batch, 0, 2, dtype=torch.long, device=device),
+            expanded_probability=z_t.new_empty(batch, 0, 2),
+            expanded_semantic_score=z_t.new_empty(batch, 0, 2),
+            expanded_mask=torch.empty(batch, 0, dtype=torch.bool, device=device),
+            expansion_utility=z_t.new_empty(batch, 0),
         )
 
     def route(
@@ -1155,7 +611,6 @@ class FrontierRoutingRetrieval(nn.Module):
                 mass=packed.mass[batch_index, active],
                 visited_node_ids=tuple(node_ids[index] for index in visited),
                 expanded_node_ids=tuple(node_ids[index] for index in expanded),
-                decisions={},
             ))
         return tuple(result)
 
@@ -1483,7 +938,6 @@ class FrontierRoutingRetrieval(nn.Module):
                     expanded_node_ids=tuple(
                         all_node_ids[index] for index in expanded
                     ),
-                    decisions={},
                 ))
                 memory_info.append({
                     all_node_ids[node_index]: {
@@ -1560,17 +1014,7 @@ class FrontierRoutingRetrieval(nn.Module):
         )
 
     def get_extra_state(self) -> Dict[str, Any]:
-        # Checkpointing is the synchronization boundary for the legacy mapping.
-        # Global routing/update never pays this device-to-host transfer.
-        self._sync_gain_tensor()
-        gain_values = self._expansion_gain_tensor.detach().cpu().tolist()
-        self.expansion_gain = {
-            node_id: float(value)
-            for node_id, value in zip(self.tree.all_node_ids, gain_values)
-        }
         return {
-            "expansion_gain": dict(self.expansion_gain),
-            "expansion_visits": dict(self.expansion_visits),
             "probe_leaf_visits": dict(self.probe_leaf_visits),
             "target_leaf_mass_by_id": dict(
                 self._target_leaf_mass_by_id
@@ -1578,19 +1022,6 @@ class FrontierRoutingRetrieval(nn.Module):
         }
 
     def set_extra_state(self, state: Mapping[str, Any]) -> None:
-        self.expansion_gain = {
-            str(key): float(value)
-            for key, value in state.get(
-                "expansion_gain", {}
-            ).items()
-        }
-        self._gain_topology_signature = None
-        self.expansion_visits = {
-            str(key): int(value)
-            for key, value in state.get(
-                "expansion_visits", {}
-            ).items()
-        }
         self.probe_leaf_visits = {
             str(key): int(value)
             for key, value in state.get(

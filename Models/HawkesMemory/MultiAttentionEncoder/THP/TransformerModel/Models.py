@@ -127,8 +127,8 @@ class MultiAttenEncoder(nn.Module):
 
     def __init__(
             self,
-            num_types, d_model=256, d_rnn=128, d_inner=1024,
-            n_layers=4, n_head=4, d_k=64, d_v=64, dropout=0.1,
+            num_types, d_model=128, d_rnn=128, d_inner=256,
+            n_layers=4, n_head=2, d_k=64, d_v=64, dropout=0.1,
             use_time_gap=True):
         super().__init__()
 

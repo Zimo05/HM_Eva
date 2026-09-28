@@ -278,10 +278,10 @@ class MultiAttentionEncoderPipeline:
         tree_csv_path: str,
         checkpoint_path: str,
         summary_csv_path: Optional[str] = None,
-        d_model: int = 64,
-        num_heads: int = 4,
-        d_rnn: int = 256,
-        d_inner_hid: int = 128,
+        d_model: int = 128,
+        num_heads: int = 2,
+        d_rnn: int = 128,
+        d_inner_hid: int = 256,
         d_k: int = 16,
         d_v: int = 16,
         n_layers: int = 4,
@@ -1341,10 +1341,10 @@ if __name__ == "__main__":
     )
 
     # Model hyperparameters
-    parser.add_argument("--d_model", type=int, default=64)
-    parser.add_argument("--num_heads", type=int, default=4)
-    parser.add_argument("--d_rnn", type=int, default=256)
-    parser.add_argument("--d_inner_hid", type=int, default=128)
+    parser.add_argument("--d_model", type=int, default=128)
+    parser.add_argument("--num_heads", type=int, default=2)
+    parser.add_argument("--d_rnn", type=int, default=128)
+    parser.add_argument("--d_inner_hid", type=int, default=256)
     parser.add_argument("--d_k", type=int, default=16)
     parser.add_argument("--d_v", type=int, default=16)
     parser.add_argument("--n_layers", type=int, default=4)

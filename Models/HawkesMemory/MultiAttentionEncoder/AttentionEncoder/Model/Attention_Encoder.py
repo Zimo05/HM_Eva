@@ -24,7 +24,7 @@ class MLP(nn.Module):
 class RelationBias(nn.Module):
     def __init__(
         self,
-        num_heads: int = 4,
+        num_heads: int = 2,
         max_distance: int = 2,
         max_lca_depth: int = 3,
     ):

@@ -108,6 +108,7 @@ _PERSISTENT_CONFIG_DESTS = frozenset({
     "z_dim",
     "node_dim",
     "memory_key_dim",
+    "memory_capacity_per_node",
     "frontier_budget",
     "frontier_min_experts",
     "frontier_routing_temperature",
@@ -284,6 +285,8 @@ def _checkpoint_config_value(payload: Mapping, dest: str):
         "decays", "semantic_blend",
     }:
         return model.get(dest)
+    if dest == "memory_capacity_per_node":
+        return model.get(dest)
     if dest == "retrieval_visit_chunk_size":
         return wake.get(dest)
     if dest in _FRONTIER_ARG_TO_CHECKPOINT:
@@ -396,6 +399,9 @@ def _cl_config_value(payload: Mapping, dest: str):
     }:
         model = payload.get("model", {})
         return model.get(dest) if isinstance(model, Mapping) else None
+    if dest == "memory_capacity_per_node":
+        model = payload.get("model", {})
+        return model.get(dest) if isinstance(model, Mapping) else None
     if dest in _FRONTIER_ARG_TO_CHECKPOINT:
         frontier = payload.get("frontier", {})
         if not isinstance(frontier, Mapping):
@@ -470,7 +476,7 @@ def _resolve_cli_values(
         )
         if args.cold_start_epochs is None:
             args.cold_start_epochs = parser_defaults.get(
-                "cold_start_epochs", 5
+                "cold_start_epochs", 15
             )
     if args.seed is None:
         args.seed = parser_defaults.get("seed", 0)
@@ -678,6 +684,7 @@ def _parse_args(argv=None):
         choices=(
             "full", "no_working", "no_episodic", "fixed_topology",
             "no_sleep", "heuristic_controller", "no_merge_prune",
+            "flat_memory",
         ),
         default="full",
         help="Native HM training ablation used by an independently dispatched run.",
@@ -689,7 +696,7 @@ def _parse_args(argv=None):
         default="auto",
         help="AdamW implementation: auto, standard, foreach, or fused.",
     )
-    parser.add_argument("--cold-start-epochs", type=int, default=5)
+    parser.add_argument("--cold-start-epochs", type=int, default=15)
     parser.add_argument(
         "--stability-constrained-cold-start",
         action="store_true",
@@ -847,11 +854,8 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--route-probe-weight",
         type=float,
-        default=0.1,
-        help=(
-            "Weight of the training-only Hawkes probe for unexpanded "
-            "coarse frontier regions; set 0 to disable."
-        ),
+        default=0.0,
+        help="Deprecated compatibility option; Wake routing ignores it.",
     )
     parser.add_argument(
         "--route-probe-leaves",
@@ -1336,8 +1340,14 @@ def _parse_args(argv=None):
         help="Optional smoke-test prefix length for each loaded sequence.",
     )
     parser.add_argument("--z-dim", type=int, default=50)
-    parser.add_argument("--node-dim", type=int, default=64)
+    parser.add_argument("--node-dim", type=int, default=128)
     parser.add_argument("--memory-key-dim", type=int, default=64)
+    parser.add_argument(
+        "--memory-capacity-per-node",
+        type=int,
+        default=128,
+        help="Maximum episodic rows stored per node; persisted in checkpoints.",
+    )
     parser.add_argument(
         "--tree-init-depth",
         type=int,
@@ -1375,10 +1385,12 @@ def _parse_args(argv=None):
         ),
     )
     parser.add_argument(
-        "--frontier-confidence-weight", type=float, default=0.25
+        "--frontier-confidence-weight", type=float, default=0.25,
+        help="Deprecated compatibility option; flat Top-K routing ignores it.",
     )
     parser.add_argument(
-        "--frontier-compute-cost", type=float, default=0.05
+        "--frontier-compute-cost", type=float, default=0.05,
+        help="Deprecated compatibility option; flat Top-K routing ignores it.",
     )
     parser.add_argument(
         "--frontier-posterior-temperature", type=float, default=1.0
@@ -1595,6 +1607,19 @@ def _apply_evaluation_ablation(trainer, name: str) -> None:
     elif name == "no_merge_prune":
         trainer.structure_config.prune_warmup_epochs = trainer.training_config.epochs + 1
         trainer.structure_config.merge_kwargs["min_replay"] = 10**12
+    elif name == "flat_memory":
+        _assert_flat_memory_root(trainer.tree)
+        # Keep Light Sleep active so the root's semantic parameters continue
+        # to consolidate.  Only mechanisms that change the semantic topology
+        # are disabled for this baseline.
+        trainer.sleep_config.deep_probe_interval = (
+            trainer.training_config.epochs + 1
+        )
+        trainer.controller.split_enabled.fill_(False)
+        trainer.structure_config.prune_warmup_epochs = (
+            trainer.training_config.epochs + 1
+        )
+        trainer.structure_config.merge_kwargs["min_replay"] = 10**12
     elif name == "heuristic_controller":
         trainer.controller.set_calibration_thresholds(0.5, 0.5, 0.75)
         trainer.controller.exploration_rate = 0.0
@@ -1602,6 +1627,27 @@ def _apply_evaluation_ablation(trainer, name: str) -> None:
             parameter.requires_grad_(False)
     else:
         raise ValueError(f"unknown evaluation ablation: {name}")
+
+
+def _assert_flat_memory_root(tree) -> None:
+    node_ids = set(tree.nodes.keys())
+    if node_ids != {"root"}:
+        raise RuntimeError(
+            "flat_memory requires a root-only tree; found nodes "
+            f"{sorted(node_ids)}. Start this baseline from a fresh task-0 "
+            "checkpoint with --tree-init-depth 0."
+        )
+
+
+def _validate_restored_memory_capacity(trainer, args) -> None:
+    restored = int(trainer.tree.episodic_memory.capacity_per_node)
+    requested = int(args.memory_capacity_per_node)
+    if restored != requested:
+        raise RuntimeError(
+            "--memory-capacity-per-node cannot change after restoring a "
+            f"checkpoint (checkpoint={restored}, requested={requested}); "
+            "set the capacity when creating the initial checkpoint."
+        )
 
 
 def main() -> None:
@@ -1796,6 +1842,8 @@ def main() -> None:
         raise ValueError("--merge-dual-initial must be non-negative")
     if args.sleep_every <= 0:
         raise ValueError("--sleep-every must be positive")
+    if args.memory_capacity_per_node <= 0:
+        raise ValueError("--memory-capacity-per-node must be positive")
     distributed_runtime = DistributedRuntime.from_environment(
         device=args.device,
         backend=args.distributed_backend,
@@ -1814,6 +1862,7 @@ def main() -> None:
         z_dim=args.z_dim,
         node_dim=args.node_dim,
         memory_key_dim=args.memory_key_dim,
+        memory_capacity_per_node=args.memory_capacity_per_node,
         tree_init_depth=tree_init_depth,
         device=distributed_runtime.device,
     )
@@ -1889,6 +1938,7 @@ def main() -> None:
             device=constructor.device,
             distributed_runtime=distributed_runtime,
         )
+        _validate_restored_memory_capacity(trainer, args)
         trainer.wake_config.wake_transaction_mode = args.wake_transaction_mode
         trainer.training_config.epochs = args.epochs
         trainer.training_config.optimizer_impl = args.optimizer_impl
@@ -1965,6 +2015,8 @@ def main() -> None:
         _apply_cl_metadata(trainer, args)
         _apply_evaluation_ablation(trainer, args.evaluation_ablation)
         trainer.train(dataset, validation_dataset=validation_dataset)
+        if args.evaluation_ablation == "flat_memory":
+            _assert_flat_memory_root(trainer.tree)
         return
     if args.controller_v4_fresh and args.resume is not None:
         raise ValueError(
@@ -1976,6 +2028,7 @@ def main() -> None:
             device=constructor.device,
             distributed_runtime=distributed_runtime,
         )
+        _validate_restored_memory_capacity(trainer, args)
         _start_cl_stage(trainer, args, resume_payload)
         trainer.tree.configure_frontier_routing(
             config=FrontierRoutingConfig(
@@ -2178,6 +2231,8 @@ def main() -> None:
         _apply_cl_metadata(trainer, args)
         _apply_evaluation_ablation(trainer, args.evaluation_ablation)
         trainer.train(dataset, validation_dataset=validation_dataset)
+        if args.evaluation_ablation == "flat_memory":
+            _assert_flat_memory_root(trainer.tree)
         return
     if args.hawkes_checkpoint is not None:
         hawkes, cold_start_payload = HawkesFamily.from_cold_start_checkpoint(
@@ -2526,7 +2581,7 @@ def main() -> None:
             f"->{alignment_stats['final_loss']:.6f} "
             f"accuracy={alignment_stats['final_weighted_accuracy']:.4f} "
             f"p_target={alignment_stats['final_target_probability']:.4f} "
-            "updated=encoder+router_compat "
+            "updated=encoder+router_compat+leaf_prototypes "
             "frozen=hawkes+node_emb+semantics+memory"
         )
     else:
@@ -2690,3 +2745,5 @@ def main() -> None:
         )
     _apply_evaluation_ablation(trainer, args.evaluation_ablation)
     trainer.train(dataset, validation_dataset=validation_dataset)
+    if args.evaluation_ablation == "flat_memory":
+        _assert_flat_memory_root(trainer.tree)

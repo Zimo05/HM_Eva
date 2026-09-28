@@ -287,6 +287,9 @@ class MemoryTreeInference:
             init_depth=0,
             temperature=config.get("tree_temperature", 1.0),
             hyper_hidden_dim=config.get("hyper_hidden_dim", 256),
+            router_hidden_dim=config.get(
+                "router_hidden_dim", 2 * int(config["node_dim"])
+            ),
             memory_key_dim=config["memory_key_dim"],
             memory_capacity_per_node=config.get(
                 "memory_capacity_per_node", 128
@@ -626,7 +629,7 @@ class MemoryTreeInference:
                 for moved, length in zip(moved_sequences, lengths)
             ], frontier_static_cache
 
-        projected_flat = self.tree.router_compat.project_z(z_flat)
+        projected_flat = z_flat
         if self.tree.episodic_memory.query_net is None:
             raise RuntimeError("the wrapped tree must construct memory.query_net")
         query_flat = self.tree.episodic_memory.query_net(z_flat)
@@ -925,7 +928,7 @@ class MemoryTreeInference:
         ], dim=0)
         if any(item.get("projected_z") is None for item in prepared):
             with torch.no_grad():
-                projected_flat = self.tree.router_compat.project_z(z_flat)
+                projected_flat = z_flat
         else:
             projected_flat = torch.cat([
                 item["projected_z"][:length]

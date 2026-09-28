@@ -27,13 +27,17 @@ from core.adapters import (
     stationary_command,
 )
 from core.data import prepare_hm_train_sequence_summary
-from core.hm_bootstrap import expected_stationary_hm_upstream
+from core.hm_bootstrap import (
+    expected_stationary_hm_upstream,
+    load_stationary_hm_upstream,
+)
 from core.manifest import compatible
 from core.runner import (
     _baseline_command,
     _baseline_intensity_command_args,
     _continual_cl_config,
     _hm_continual_resume_checkpoint,
+    _resume_stationary_hm_command,
 )
 from core.specs import JobSpec
 
@@ -66,6 +70,19 @@ def _main_argument_defaults(path: Path) -> dict[str, object]:
             if keyword.arg == "default":
                 defaults[node.args[0].value] = ast.literal_eval(keyword.value)
     return defaults
+
+
+def _literal_assignment(path: Path, name: str):
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"literal assignment {name!r} not found in {path}")
 
 
 def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
@@ -194,6 +211,127 @@ def test_hm_continual_propagates_validation_best_state():
     ) == explicit
 
 
+def test_stationary_hm_resume_uses_only_remaining_epoch_budget(tmp_path):
+    checkpoint = tmp_path / "checkpoint" / "model.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.touch()
+    command = [
+        "torchrun",
+        "Train.py",
+        "--checkpoint",
+        str(checkpoint),
+        "--epochs",
+        "60",
+    ]
+
+    with patch("core.runner._checkpoint_completed_epochs", return_value=52):
+        resumed, skip = _resume_stationary_hm_command(
+            command,
+            requested=True,
+        )
+
+    assert not skip
+    assert resumed[resumed.index("--epochs") + 1] == "8"
+    assert resumed[resumed.index("--resume") + 1] == str(checkpoint)
+
+
+def test_stationary_hm_resume_skips_completed_training(tmp_path):
+    checkpoint = tmp_path / "checkpoint" / "model.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.touch()
+    command = [
+        "torchrun",
+        "Train.py",
+        "--checkpoint",
+        str(checkpoint),
+        "--epochs",
+        "60",
+    ]
+
+    with patch("core.runner._checkpoint_completed_epochs", return_value=60):
+        resumed, skip = _resume_stationary_hm_command(
+            command,
+            requested=True,
+        )
+
+    assert skip
+    assert resumed == command
+
+
+def test_stationary_hm_resume_reuses_only_hash_verified_upstream(tmp_path):
+    canonical = tmp_path / "canonical.csv"
+    split_manifest = tmp_path / "split_manifest.json"
+    canonical.write_text("canonical", encoding="utf-8")
+    split_manifest.write_text("{}", encoding="utf-8")
+    upstream = tmp_path / "hm_upstream"
+    upstream.mkdir()
+    h_tree = upstream / "h_tree_train.pt"
+    summary = upstream / "sequence_summary_train.csv"
+    h_tree.write_bytes(b"tree")
+    summary.write_text("summary", encoding="utf-8")
+    checkpoint_dir = upstream / "thp_checkpoints"
+    checkpoint_dir.mkdir()
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    artifact_files = {
+        "all_json": upstream / "thp_train_manifested.json",
+        "train_json": upstream / "thp_train_only.json",
+        "attention_json": upstream / "attention_train_only.json",
+        "attention_manifest": upstream / "attention_train_manifest.json",
+        "thp_checkpoint": upstream / "thp_checkpoint.pt",
+        "encoded_train": upstream / "encoded_train.pt",
+        "attention_encoded_train": upstream / "attention_encoded_train.pt",
+        "global_hawkes": upstream / "global_hawkes.pt",
+        "residual_signatures": upstream / "residual_signatures.pt",
+        "summary": summary,
+        "tree_csv": upstream / "tree_node_sequences.csv",
+        "attention_summary": upstream / "attention_sequence_summary.csv",
+        "attention_tree_csv": upstream / "attention_tree_node_sequences.csv",
+        "attention_weights": upstream / "attention_weights.pt",
+        "h_tree": h_tree,
+    }
+    for name, path in artifact_files.items():
+        if name not in {"summary", "h_tree"}:
+            path.write_bytes(name.encode("utf-8"))
+
+    manifest = {
+        "dataset": "retweet",
+        "upstream_kind": "stationary_discovery",
+        "evaluation_regime": "strict_inductive",
+        "population": "D_train",
+        "canonical_sha256": digest(canonical),
+        "split_manifest_sha256": digest(split_manifest),
+        "node_dim": 128,
+        "artifacts": {
+            "thp_checkpoint_dir": {
+                "path": str(checkpoint_dir),
+                "sha256": None,
+            },
+            **{
+                name: {"path": str(path), "sha256": digest(path)}
+                for name, path in artifact_files.items()
+            },
+        },
+    }
+    (upstream / "hm_upstream_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    loaded = load_stationary_hm_upstream(
+        tmp_path,
+        "retweet",
+        canonical_path=canonical,
+        split_manifest_path=split_manifest,
+    )
+
+    assert loaded.h_tree == h_tree.resolve()
+    assert loaded.sequence_summary == summary.resolve()
+    assert loaded.metadata["resumed"] is True
+
+
 def test_continual_manifest_rejects_results_without_learner_protocol_binding():
     keys = (
         "job_key",
@@ -261,7 +399,7 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
     )
 
     assert command[command.index("--tree-init-depth") + 1] == "0"
-    assert command[command.index("--cold-start-epochs") + 1] == "5"
+    assert command[command.index("--cold-start-epochs") + 1] == "15"
     assert command[command.index("--z-dim") + 1] == "50"
     assert command[command.index("--node-dim") + 1] == "128"
     assert command[command.index("--memory-key-dim") + 1] == "64"
@@ -384,7 +522,17 @@ def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
                 == "snapshot"
             )
             assert command[command.index("--frontier-budget") + 1] == "4"
-            assert command[command.index("--residual-init-rank") + 1] == "2"
+            assert command[command.index("--residual-init-rank") + 1] == "1"
+            assert command[command.index("--prototype-mode-threshold") + 1] == "0.92"
+            assert command[command.index("--prototype-mode-quantile") + 1] == "0.90"
+            assert command[command.index("--prototype-duplicate-threshold") + 1] == "0.96"
+            assert command[command.index("--route-probe-weight") + 1] == "0.02"
+            assert command[command.index("--route-encoder-grad-scale") + 1] == "0.03"
+            assert command[command.index("--route-balance-weight") + 1] == "0.02"
+            assert command[command.index("--light-min-gain") + 1] == "0.02"
+            assert command[command.index("--learning-rate") + 1] == "0.0005"
+            assert command[command.index("--grad-clip") + 1] == "3.0"
+            assert "--allow-config-override" not in command
             assert command[command.index("--max-writes-per-sequence") + 1] == "6"
             assert (
                 command[command.index("--prototype-duplicate-threshold") + 1]
@@ -392,7 +540,7 @@ def test_stationary_discovery_hm_uses_one_generic_upstream_contract():
             )
             assert (
                 command[command.index("--prototype-mode-threshold") + 1]
-                == "0.88"
+                == "0.92"
             )
         else:
             assert "--wake-dataset-family" not in command
@@ -577,6 +725,15 @@ def test_rmtpp_defaults_match_shared_training_protocol():
     assert defaults["--learning-rate"] == 5e-4
     assert defaults["--hidden-size"] == 64
     assert defaults["--mc-samples"] == 32
+    assert defaults["--thinning-num-sample"] == 20
     assert defaults["--early-stop-patience"] == 20
     assert defaults["--lr-patience"] == 6
     assert defaults["--lr-factor"] == 0.3
+
+
+def test_attention_baseline_prediction_grid_supports_trapezoidal_evaluation():
+    defaults = _literal_assignment(
+        ROOT / "Models" / "EasyTPP" / "run_experiment.py",
+        "DEFAULT_THINNING",
+    )
+    assert defaults["num_sample"] == 20

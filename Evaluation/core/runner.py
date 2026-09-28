@@ -28,6 +28,7 @@ from .hm_bootstrap import (
     STATIONARY_HM_DATASETS,
     build_stationary_hm_upstream,
     expected_stationary_hm_upstream,
+    load_stationary_hm_upstream,
 )
 from .cl_protocol import CLProtocol
 from .data import (
@@ -56,6 +57,100 @@ DEFAULT_HM_CONTINUAL_EPOCHS = 60
 BASELINE_INTENSITY_MODELS = frozenset(
     {"RMTPP", "FullyNN", "THP", "S2P2", "AttNHP"}
 )
+
+
+def _ensure_hm_module_paths() -> None:
+    """Make legacy top-level HawkesMemory modules importable before unpickling.
+
+    Older HM checkpoints store classes under names such as
+    ``MemoryResiduals.MemoryBank``.  The evaluator normally adds these paths
+    only to the child training environment, but resume bookkeeping loads the
+    checkpoint in this parent process first.
+    """
+
+    import sys
+
+    paths = (
+        PROJECT_ROOT,
+        MODELS_ROOT / "HawkesMemory",
+        MODELS_ROOT / "HawkesMemory" / "Memory",
+        PROJECT_ROOT / "HawkesMemory",
+        PROJECT_ROOT / "HawkesMemory" / "Memory",
+    )
+    for path in reversed(paths):
+        value = str(path)
+        if value not in sys.path:
+            sys.path.insert(0, value)
+
+
+def _checkpoint_completed_epochs(checkpoint: Path) -> int:
+    """Read the completed-epoch counter from a stationary HM checkpoint."""
+
+    _ensure_hm_module_paths()
+    import torch
+
+    try:
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    except TypeError:  # PyTorch < 2.0 has no ``weights_only`` argument.
+        payload = torch.load(checkpoint, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise ValueError(f"HM resume checkpoint must contain a mapping: {checkpoint}")
+    completed = int(payload.get("epoch", payload.get("completed_epochs", 0)) or 0)
+    if completed < 0:
+        raise ValueError(
+            f"HM resume checkpoint has an invalid epoch {completed}: {checkpoint}"
+        )
+    return completed
+
+
+def _resume_stationary_hm_command(
+    command: list[str],
+    *,
+    requested: bool,
+) -> tuple[list[str], bool]:
+    """Continue an interrupted HM run up to its original total epoch count.
+
+    Train.py interprets ``--epochs`` as *additional* epochs when ``--resume``
+    is present.  The evaluation CLI, however, treats ``--epochs`` as the total
+    benchmark budget.  Translate between those contracts here so rerunning an
+    interrupted evaluation with ``--resume`` neither starts over nor trains
+    (for example) epoch 52 through epoch 112.
+    """
+
+    if (
+        not requested
+        or "--checkpoint" not in command
+        or "--epochs" not in command
+    ):
+        return command, False
+    checkpoint = Path(command[command.index("--checkpoint") + 1])
+    if not checkpoint.is_file():
+        return command, False
+
+    completed = _checkpoint_completed_epochs(checkpoint)
+    total = int(command[command.index("--epochs") + 1])
+    if completed > total:
+        raise RuntimeError(
+            "HM checkpoint is beyond the requested evaluation budget: "
+            f"checkpoint_epoch={completed}, requested_epochs={total}, "
+            f"checkpoint={checkpoint}"
+        )
+    if completed == total:
+        print(
+            f"HM checkpoint already reached epoch {total}; "
+            "skipping training and continuing evaluation."
+        )
+        return command, True
+
+    resumed = list(command)
+    resumed[resumed.index("--epochs") + 1] = str(total - completed)
+    resumed += ["--resume", str(checkpoint)]
+    print(
+        "Resuming stationary HM training: "
+        f"checkpoint_epoch={completed}, remaining_epochs={total - completed}, "
+        f"checkpoint={checkpoint}"
+    )
+    return resumed, False
 
 
 def _mark_hm_phase(target: Path, dataset: str, phase: str) -> None:
@@ -144,24 +239,37 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
                 raise RuntimeError(
                     f"{dataset} HM upstream requires a prepared dataset"
                 )
-            hm_upstream = build_stationary_hm_upstream(
-                dataset=dataset,
-                canonical_path=prepared / "canonical.csv",
-                split_manifest_path=prepared / "split_manifest.json",
-                output_dir=prepared / "hm_upstream",
-                seed=int(args.seed),
-                device=resolved_device(args.device),
-                python_executable=python_for(args),
-                batch_size=(
-                    getattr(args, "batch_size", None)
-                    or getattr(args, "eval_batch_size", 64)
-                ),
-                attention_num_gpus=int(
-                    getattr(args, "attention_num_gpus", 1) or 1
-                ),
-                epochs=getattr(args, "epochs", None),
-                smoke=bool(getattr(args, "smoke", False)),
-            )
+            resume_checkpoint = target / "checkpoint" / "model.pt"
+            if bool(args.resume) and resume_checkpoint.is_file():
+                hm_upstream = load_stationary_hm_upstream(
+                    prepared,
+                    dataset,
+                    canonical_path=prepared / "canonical.csv",
+                    split_manifest_path=prepared / "split_manifest.json",
+                )
+                print(
+                    "Reusing verified stationary HM upstream for resume: "
+                    f"{hm_upstream.h_tree}"
+                )
+            else:
+                hm_upstream = build_stationary_hm_upstream(
+                    dataset=dataset,
+                    canonical_path=prepared / "canonical.csv",
+                    split_manifest_path=prepared / "split_manifest.json",
+                    output_dir=prepared / "hm_upstream",
+                    seed=int(args.seed),
+                    device=resolved_device(args.device),
+                    python_executable=python_for(args),
+                    batch_size=(
+                        getattr(args, "batch_size", None)
+                        or getattr(args, "eval_batch_size", 64)
+                    ),
+                    attention_num_gpus=int(
+                        getattr(args, "attention_num_gpus", 1) or 1
+                    ),
+                    epochs=getattr(args, "epochs", None),
+                    smoke=bool(getattr(args, "smoke", False)),
+                )
             inputs.extend(hm_upstream.input_paths)
 
         command, cwd, env = stationary_command(
@@ -171,6 +279,12 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
             prepared=prepared,
             hm_upstream=hm_upstream,
         )
+        skip_training = False
+        if model == "HM":
+            command, skip_training = _resume_stationary_hm_command(
+                command,
+                requested=bool(args.resume),
+            )
         if args.checkpoint is not None:
             inputs.append(args.checkpoint)
         manifest = build_manifest(spec, args, inputs, command)
@@ -187,7 +301,8 @@ def run_stationary_job(*, dataset: str, model: str, args, condition: str = "full
             return target
         if model == "HM" and dataset in STATIONARY_HM_DATASETS:
             _mark_hm_phase(target, dataset, "memory_training")
-        run_command(command, cwd, env, target / "logs" / "train.log")
+        if not skip_training:
+            run_command(command, cwd, env, target / "logs" / "train.log")
         copy_checkpoint_contract(target)
         if model == "HM":
             evaluate_hm(spec, args, target, env)
@@ -282,6 +397,13 @@ def _continual_hm_command(
             "--cl-previous-checkpoint",
             str(previous),
         ]
+    memory_capacity_per_node = int(
+        getattr(args, "memory_capacity_per_node", None) or 128
+    )
+    command += [
+        "--memory-capacity-per-node",
+        str(memory_capacity_per_node),
+    ]
     if strategy in {
         "no_working",
         "no_episodic",
@@ -289,6 +411,7 @@ def _continual_hm_command(
         "no_sleep",
         "heuristic_controller",
         "no_merge_prune",
+        "flat_memory",
     }:
         command += ["--evaluation-ablation", strategy]
     if args.smoke:
@@ -365,6 +488,9 @@ def _continual_cl_config(args, protocol: CLProtocol, strategy: str) -> dict[str,
             "z_dim": 50,
             "node_dim": 64,
             "memory_key_dim": 64,
+            "memory_capacity_per_node": int(
+                getattr(args, "memory_capacity_per_node", None) or 128
+            ),
             "num_basis": 2,
             "decays": [0.5, 1.5],
             "semantic_blend": 0.1,

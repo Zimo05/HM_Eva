@@ -175,6 +175,37 @@ prune/merge `12/12`、Deep prior `0.10`、topology inertia `0.03`、semantic ble
 root-only 初始化。smoke 模式只验证 H-tree 加载，因为截断数据不能覆盖全部叶子，故不
 运行 alignment/residual signature 初始化。
 
+#### DWS conditional-intensity curves
+
+DWS 使用独立于 CL 的 intensity 评测协议，入口为
+`Evaluation/evaluate_dws_intensity.py`，核心实现位于
+`Evaluation/core/dws_intensity.py`。每个 model-native wrapper 在加载 `best.pt` 后可通过
+`--dws-intensity-output-dir`、`--dws-intensity-horizon`、
+`--dws-intensity-samples` 和 `--dws-intensity-anchors-per-law` 输出冻结 checkpoint 的
+`intensity_points.csv`、`intensity_metrics.csv` 和 `intensity_summary.csv`；不重新训练，且
+DWS 的 law/cluster 只在 test 后用于固定 anchor 与 ground truth 诊断。raw CSV 同时保存
+`event_type=-1` 的 total intensity 和逐 event-type intensity。
+
+所有模型输出完成后，用同一入口生成一张统一图：
+
+```bash
+python Evaluation/evaluate_dws_intensity.py \
+  --variant 13 --seed 42 \
+  --points \
+    Evaluation/results/dws/HM/full/variant_13/seed_42/intensity/intensity_points.csv \
+    Evaluation/results/dws/FullyNN/full/variant_13/seed_42/intensity/intensity_points.csv \
+    Evaluation/results/dws/RMTPP/full/variant_13/seed_42/intensity/intensity_points.csv \
+    Evaluation/results/dws/THP/full/variant_13/seed_42/intensity/intensity_points.csv \
+  --output-dir Evaluation/results/dws/intensity/variant_13/seed_42
+```
+
+聚合器会先验证所有模型使用完全相同的 `(law, anchor, tau)` 和 ground truth，再对 anchors
+求均值。图片按模型分层写入 `intensity_curves/<model>/`：每个模型有一张包含 13 个 cluster
+子图的 `overview.pdf`，以及 `cluster_01.pdf` 到 `cluster_13.pdf` 共 13 张单独图，因此每个
+模型恰好有 14 张 canonical PDF。另写 `overview.png` 作为快速预览。所有图片只显示 total
+intensity；GT 使用黑色点线，当前模型的 estimated curve 使用彩色实线，不在同一张图中叠加
+多个模型。完整文件清单写入 `intensity_figure_manifest.json`。
+
 ### 5.3 DWS-8/13/20：HM scaling
 
 Scaling 实验观察真实 regime 数量增加时，HM 的预测、树规模、visited frontier nodes 和资源开销如何变化。

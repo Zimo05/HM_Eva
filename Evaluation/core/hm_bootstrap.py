@@ -120,6 +120,153 @@ def expected_stationary_hm_upstream(
     )
 
 
+def load_stationary_hm_upstream(
+    prepared_dir: Path,
+    dataset: str,
+    *,
+    canonical_path: Path,
+    split_manifest_path: Path,
+) -> HMUpstreamArtifacts:
+    """Load and verify a completed train-only upstream for an HM resume."""
+
+    expected = expected_stationary_hm_upstream(prepared_dir, dataset)
+    manifest_path = expected.manifest_path
+    if manifest_path is None or not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"stationary HM upstream manifest is missing: {manifest_path}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"stationary HM upstream manifest is invalid: {manifest_path}"
+        ) from error
+    if not isinstance(manifest, Mapping):
+        raise ValueError(
+            f"stationary HM upstream manifest must contain a mapping: {manifest_path}"
+        )
+
+    canonical_path = Path(canonical_path).expanduser().resolve()
+    split_manifest_path = Path(split_manifest_path).expanduser().resolve()
+    required_identity = {
+        "dataset": _validate_stationary_dataset(dataset),
+        "canonical_sha256": sha256(canonical_path),
+        "split_manifest_sha256": sha256(split_manifest_path),
+    }
+    mismatches = {
+        key: (manifest.get(key), expected_value)
+        for key, expected_value in required_identity.items()
+        if manifest.get(key) != expected_value
+    }
+    if mismatches:
+        raise ValueError(
+            "stationary HM upstream does not match the prepared resume input: "
+            f"{mismatches}"
+        )
+
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise ValueError(
+            f"stationary HM upstream manifest has no artifact map: {manifest_path}"
+        )
+    h_tree_record = artifacts.get("h_tree")
+    if not isinstance(h_tree_record, Mapping) or not h_tree_record.get("path"):
+        raise ValueError(
+            f"stationary HM upstream manifest has no h_tree path: {manifest_path}"
+        )
+    recorded_root = Path(str(h_tree_record["path"])).expanduser().parent
+    current_root = manifest_path.parent.resolve()
+    verified: dict[str, Path] = {}
+    for name, record in artifacts.items():
+        if not isinstance(record, Mapping) or not record.get("path"):
+            raise ValueError(f"invalid stationary HM upstream artifact: {name}")
+        recorded_path = Path(str(record["path"])).expanduser()
+        path = recorded_path.resolve()
+        if not path.exists():
+            try:
+                relative_path = recorded_path.relative_to(recorded_root)
+            except ValueError:
+                relative_path = None
+            if relative_path is not None:
+                relocated = (current_root / relative_path).resolve()
+                try:
+                    relocated.relative_to(current_root)
+                except ValueError:
+                    relocated = path
+                path = relocated
+        recorded_hash = record.get("sha256")
+        # The producer records its checkpoint directory in the artifact map
+        # for provenance, but only regular files have content hashes and are
+        # part of the resume input contract.
+        if recorded_hash is None and path.is_dir():
+            continue
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"stationary HM upstream artifact is missing: {path}"
+            )
+        if recorded_hash is None:
+            raise ValueError(
+                "stationary HM upstream artifact has no recorded hash: "
+                f"name={name}, path={path}"
+            )
+        actual_hash = sha256(path)
+        if recorded_hash != actual_hash:
+            raise ValueError(
+                "stationary HM upstream artifact hash mismatch: "
+                f"name={name}, path={path}, "
+                f"manifest={recorded_hash}, actual={actual_hash}"
+            )
+        verified[str(name)] = path
+    for required in ("h_tree", "summary"):
+        if required not in verified:
+            raise ValueError(
+                f"stationary HM upstream manifest is missing artifact {required!r}"
+            )
+
+    input_names = (
+        "all_json",
+        "train_json",
+        "attention_json",
+        "attention_manifest",
+        "thp_checkpoint",
+        "encoded_train",
+        "attention_encoded_train",
+        "global_hawkes",
+        "residual_signatures",
+        "summary",
+        "tree_csv",
+        "attention_summary",
+        "attention_tree_csv",
+        "attention_weights",
+        "h_tree",
+    )
+    missing_inputs = [name for name in input_names if name not in verified]
+    if missing_inputs:
+        raise ValueError(
+            "stationary HM upstream manifest is missing resume inputs: "
+            f"{missing_inputs}"
+        )
+
+    return HMUpstreamArtifacts(
+        h_tree=verified["h_tree"],
+        sequence_summary=verified["summary"],
+        node_dim=int(manifest.get("node_dim", DEFAULT_NODE_DIM)),
+        input_paths=(manifest_path, *(verified[name] for name in input_names)),
+        manifest_path=manifest_path,
+        metadata={
+            "dataset": dataset,
+            "upstream_kind": manifest.get("upstream_kind"),
+            "evaluation_regime": manifest.get("evaluation_regime"),
+            "population": manifest.get("population"),
+            "cluster_selection": manifest.get("cluster_selection", {}),
+            "bootstrap_protocol": manifest.get("bootstrap_protocol", {}),
+            "attention_training": manifest.get("attention_training", {}),
+            "upstream_manifest_path": str(manifest_path),
+            "resumed": True,
+        },
+    )
+
+
 def _load_train_records(
     canonical_path: Path,
     split_manifest_path: Path,

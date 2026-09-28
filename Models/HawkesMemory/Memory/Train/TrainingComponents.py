@@ -194,10 +194,9 @@ class WakeObjectiveConfig:
     route_encoder_grad_scale: float = 0.1
     route_encoder_reliability_decay: float = 0.9
     route_teacher_temperature: float = 1.0
-    # Counterfactual training-only probe for final-frontier internal nodes.
-    # Wake's active frontier stays fixed; a small round-robin leaf subset is
-    # evaluated with the true Hawkes objective to supervise refinement.
-    lambda_route_probe: float = 0.1
+    # Historical Wake probe weight retained for checkpoint compatibility.
+    # Structural probing is separate from flat leaf routing.
+    lambda_route_probe: float = 0.0
     # Deprecated compatibility field. Kp is now computed independently for
     # each region as ceil(number of descendant leaves / 2).
     route_probe_leaves: int = 2

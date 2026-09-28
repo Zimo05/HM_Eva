@@ -405,6 +405,7 @@ def stationary_command(
         # byte compatible with their existing command.
         taobao_tuning = spec.dataset == "taobao"
         route_encoder_grad_scale = "0.08"
+        route_balance_weight = "0.10"
         frontier_routing_temperature = "1.10"
         deep_prior_probability = "0.10"
         topology_inertia_tau = "3.0"
@@ -420,15 +421,17 @@ def stationary_command(
             residual_init_rank = "4"
             max_writes_per_sequence = "8"
         elif spec.dataset == "retweet":
-            # Retweet's law space is small.  Use a narrower frontier and a
-            # lower-rank residual, and cap redundant online writes without
-            # changing the contracts for DWS, Taobao, or StackOverflow.
+            # Retweet has its own compact-law tuning contract. Keep these
+            # values local to Retweet so the other stationary datasets retain
+            # their established optimizer/router behavior.
             hm_default_epochs = 60
             frontier_budget = "4"
             frontier_routing_temperature = "1.10"
             residual_init_scale = "0.08"
-            residual_init_rank = "2"
+            residual_init_rank = "1"
             max_writes_per_sequence = "6"
+            route_encoder_grad_scale = "0.03"
+            route_balance_weight = "0.02"
         else:
             hm_default_epochs = 60
             frontier_budget = "7"
@@ -445,13 +448,13 @@ def stationary_command(
             topology_inertia_tau = "4.0"
             alignment_lr = "0.0005"
         if spec.dataset == "retweet":
-            # Broaden both cosine-distance gates for the compact Retweet law
-            # space: duplicate radius 0.04 and initial mode radius 0.12.
+            # Dedicated Retweet prototype gates/quantiles from the tuning
+            # sheet; keep them isolated from the other stationary datasets.
             prototype_duplicate_threshold = "0.96"
-            prototype_mode_threshold = "0.88"
+            prototype_mode_threshold = "0.92"
             prototype_mode_capacity = "12"
             prototype_duplicate_quantile = "0.85"
-            prototype_mode_quantile = "0.95"
+            prototype_mode_quantile = "0.90"
         elif spec.dataset in {"taobao", "stackoverflow"}:
             prototype_duplicate_threshold = "0.97"
             prototype_mode_threshold = "0.92"
@@ -533,7 +536,7 @@ def stationary_command(
                 "--route-mi-weight",
                 "0.15",
                 "--route-balance-weight",
-                "0.10",
+                route_balance_weight,
                 "--route-energy-temperature",
                 "1.0",
                 "--route-encoder-warmup-epochs",
@@ -639,6 +642,24 @@ def stationary_command(
                 "--merge-dual-lr",
                 "0.000001",
             ]
+        if spec.dataset == "retweet":
+            # Retweet-only optimizer/probe tuning from the dedicated sweep.
+            command += [
+                "--route-probe-weight",
+                "0.02",
+                "--light-min-gain",
+                "0.02",
+                "--learning-rate",
+                "0.0005",
+                "--grad-clip",
+                "3.0",
+            ]
+            if getattr(args, "resume", False):
+                # The dedicated Retweet sweep intentionally changes several
+                # persistent learner values relative to older checkpoints.
+                # Permit those explicit, dataset-scoped overrides only when
+                # resuming Retweet; fresh runs do not need this switch.
+                command += ["--allow-config-override"]
         if prototype_duplicate_threshold is not None:
             # Dataset-specific prototype policy. DWS and datasets not listed
             # above keep the checkpoint/TrainingCLI defaults unchanged.
@@ -682,6 +703,8 @@ def stationary_command(
             cold_start_epochs = 40
         elif spec.dataset in STATIONARY_HM_DATASETS:
             cold_start_epochs = 20
+        elif spec.dataset == "dws":
+            cold_start_epochs = 15
         else:
             cold_start_epochs = 5
         command += [
@@ -713,8 +736,19 @@ def stationary_command(
 
 def run_command(command: list[str], cwd: Path, env: dict[str, str], log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as log:
-        process = subprocess.run(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, text=True)
+    resume = "--resume" in command
+    with log_path.open("a" if resume else "w", encoding="utf-8") as log:
+        if resume:
+            log.write("\n\n=== Resuming interrupted command ===\n")
+            log.flush()
+        process = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
     if process.returncode:
         raise RuntimeError(f"command failed with exit code {process.returncode}; see {log_path}")
 

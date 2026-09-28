@@ -62,37 +62,72 @@ def build_manifest(spec, args, inputs: list[Path], command: list[str] | None) ->
     }
 
 
-def compatible(existing: dict[str, Any], current: dict[str, Any]) -> bool:
-    keys = ("job_key", "dataset", "model", "condition", "seed", "variant", "rank", "task_start", "task_end", "inputs")
-    if not all(existing.get(key) == current.get(key) for key in keys):
-        return False
+_COMPATIBILITY_KEYS = (
+    "job_key",
+    "dataset",
+    "model",
+    "condition",
+    "seed",
+    "variant",
+    "rank",
+    "task_start",
+    "task_end",
+    "inputs",
+)
+
+
+def _comparable_arguments(payload: dict[str, Any]) -> dict[str, Any]:
+    ignored = {"resume", "dry_run", "output_root", "run_id", "eval_batch_size"}
+    result = {
+        key: value for key, value in payload.items() if key not in ignored
+    }
+    # Manifests written before the scope API have neither field. Treat them as
+    # the default no-event-output mode so --resume remains usable after the
+    # evaluator upgrade. Explicit scope changes remain incompatible.
+    if "event_prediction_scope" not in result:
+        result["event_prediction_scope"] = (
+            "all" if result.get("save_event_predictions", False) else "none"
+        )
+    result.pop("save_event_predictions", None)
+    # ``attention_num_gpus`` was added after the first stationary HM runs.
+    # Its historical behavior was exactly one process, so a missing field is
+    # equivalent only to the default value 1, never to a multi-GPU override.
+    result.setdefault("attention_num_gpus", 1)
+    return result
+
+
+def compatibility_differences(
+    existing: dict[str, Any],
+    current: dict[str, Any],
+) -> list[str]:
+    """Return concise protocol differences that make a resume unsafe."""
+
+    differences = [
+        key
+        for key in _COMPATIBILITY_KEYS
+        if existing.get(key) != current.get(key)
+    ]
     # HM continual jobs bind the learner protocol into the top-level manifest
     # as well as the stage manifest. A missing/different binding means that an
     # old result (for example one created before a new Wake setting was added)
     # must not be silently reused as if it had been produced by the current
     # protocol.
     if existing.get("learner_config") != current.get("learner_config"):
-        return False
-    ignored = {"resume", "dry_run", "output_root", "run_id", "eval_batch_size"}
+        differences.append("learner_config")
 
-    def comparable_arguments(payload: dict[str, Any]) -> dict[str, Any]:
-        result = {
-            key: value for key, value in payload.items() if key not in ignored
-        }
-        # Manifests written before the scope API have neither field. Treat
-        # them as the default no-event-output mode so --resume remains usable
-        # after the evaluator upgrade. Explicit scope changes still remain
-        # incompatible, because they change the requested artifact contract.
-        if "event_prediction_scope" not in result:
-            result["event_prediction_scope"] = (
-                "all" if result.get("save_event_predictions", False) else "none"
+    old_args = _comparable_arguments(existing.get("arguments", {}))
+    new_args = _comparable_arguments(current.get("arguments", {}))
+    for key in sorted(set(old_args) | set(new_args)):
+        if old_args.get(key) != new_args.get(key):
+            differences.append(
+                f"arguments.{key} "
+                f"(existing={old_args.get(key)!r}, current={new_args.get(key)!r})"
             )
-        result.pop("save_event_predictions", None)
-        return result
+    return differences
 
-    old_args = comparable_arguments(existing.get("arguments", {}))
-    new_args = comparable_arguments(current.get("arguments", {}))
-    return old_args == new_args
+
+def compatible(existing: dict[str, Any], current: dict[str, Any]) -> bool:
+    return not compatibility_differences(existing, current)
 
 
 def begin(result_dir: Path, manifest: dict[str, Any], resume: bool) -> bool:
@@ -101,8 +136,12 @@ def begin(result_dir: Path, manifest: dict[str, Any], resume: bool) -> bool:
     status_path = result_dir / "status.json"
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if not compatible(existing, manifest):
-            raise RuntimeError(f"refusing to reuse incompatible result directory: {result_dir}")
+        differences = compatibility_differences(existing, manifest)
+        if differences:
+            raise RuntimeError(
+                f"refusing to reuse incompatible result directory: {result_dir}; "
+                "differences: " + "; ".join(differences)
+            )
         if resume and status_path.exists() and json.loads(status_path.read_text(encoding="utf-8")).get("state") == "complete":
             return False
         if not resume:

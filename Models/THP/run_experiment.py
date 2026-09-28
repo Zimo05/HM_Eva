@@ -93,6 +93,10 @@ def parse_args():
     parser.add_argument("--intensity-checkpoint-task", type=int, default=None)
     parser.add_argument("--intensity-samples", type=int, default=256)
     parser.add_argument("--intensity-plot-anchors", type=int, default=2)
+    parser.add_argument("--dws-intensity-output-dir", type=Path, default=None)
+    parser.add_argument("--dws-intensity-horizon", type=float, default=10.0)
+    parser.add_argument("--dws-intensity-samples", type=int, default=200)
+    parser.add_argument("--dws-intensity-anchors-per-law", type=int, default=20)
     return parser.parse_args()
 
 
@@ -129,6 +133,14 @@ def validate_args(args):
         raise ValueError("--intensity-samples must be at least two")
     if args.intensity_plot_anchors < 0:
         raise ValueError("--intensity-plot-anchors must be non-negative")
+    if args.dws_intensity_samples < 2:
+        raise ValueError("--dws-intensity-samples must be at least two")
+    if args.dws_intensity_horizon <= 0.0:
+        raise ValueError("--dws-intensity-horizon must be positive")
+    if args.dws_intensity_anchors_per_law < 1:
+        raise ValueError("--dws-intensity-anchors-per-law must be positive")
+    if args.dws_intensity_output_dir is not None and not args.dataset.startswith("dws_"):
+        raise ValueError("DWS intensity evaluation requires a dws_<variant> dataset")
     intensity_values = (
         args.intensity_output_dir,
         args.intensity_ground_truth_dir,
@@ -265,17 +277,29 @@ def training_command(args, paths, adapted_dir, device):
         "-save", str(paths["scratch"] / "best_model.pt"),
     ]
     if args.initial_checkpoint is not None:
-        command += ["-load", str(args.initial_checkpoint)]
+        command += ["-load", str(args.initial_checkpoint.expanduser().resolve())]
     if args.evaluate_only:
         command += ["-evaluate_only"]
     if args.intensity_output_dir is not None:
         command += [
-            "-intensity_output_dir", str(args.intensity_output_dir),
-            "-intensity_ground_truth_dir", str(args.intensity_ground_truth_dir),
+            "-intensity_output_dir", str(args.intensity_output_dir.expanduser().resolve()),
+            "-intensity_ground_truth_dir", str(args.intensity_ground_truth_dir.expanduser().resolve()),
             "-intensity_regime_id", str(args.intensity_regime_id),
             "-intensity_checkpoint_task", str(args.intensity_checkpoint_task),
             "-intensity_samples", str(args.intensity_samples),
             "-intensity_plot_anchors", str(args.intensity_plot_anchors),
+        ]
+    if args.dws_intensity_output_dir is not None:
+        variant = args.dataset.split("_", 1)[1]
+        tree_root = PROJECT_ROOT / "Datasets" / "DWS" / f"tree_{variant}"
+        command += [
+            "-dws_intensity_output_dir", str(args.dws_intensity_output_dir.expanduser().resolve()),
+            "-dws_intensity_parameters", str(tree_root / f"parameters_{variant}.json"),
+            "-dws_intensity_dataset", str(tree_root / f"hawkes_dataset_{variant}.csv"),
+            "-dws_intensity_variant", variant,
+            "-dws_intensity_horizon", str(args.dws_intensity_horizon),
+            "-dws_intensity_samples", str(args.dws_intensity_samples),
+            "-dws_intensity_anchors_per_law", str(args.dws_intensity_anchors_per_law),
         ]
     return command
 

@@ -28,6 +28,51 @@ class RegionalProbePlan:
 
 
 class TrainingObjectivesMixin:
+    def _flat_route_reliability(
+        self, posterior: Tensor | None, student: Tensor | None,
+        mask: Tensor | None,
+        distributed_runtime: Any = None,
+    ) -> tuple[float, float, float, float]:
+        """Energy-only Hawkes confidence and leaf-router alignment."""
+        if posterior is None:
+            statistics = torch.zeros(3, device=self.device)
+            if distributed_runtime is not None:
+                distributed_runtime.all_reduce(statistics)
+            confidence = statistics[0] / statistics[2].clamp_min(1.0)
+            js = statistics[1] / statistics[2].clamp_min(1.0)
+            return (
+                float(confidence.item()), float(confidence.item()),
+                float(js.item()),
+                float((1.0 - js / math.log(2.0)).clamp(0.0, 1.0).item()),
+            )
+        q = posterior.detach().masked_fill(~mask, 0.0)
+        p = student.detach().masked_fill(~mask, 0.0)
+        count = mask.sum(dim=-1).clamp_min(1)
+        entropy = -(q * q.clamp_min(1e-12).log()).sum(dim=-1)
+        confidence = torch.where(
+            count > 1,
+            1.0 - entropy / count.to(q).log().clamp_min(1e-12),
+            torch.ones_like(entropy),
+        ).clamp(0.0, 1.0)
+        midpoint = (q + p) * 0.5
+        js = 0.5 * (
+            q * (q.clamp_min(1e-12).log() - midpoint.clamp_min(1e-12).log())
+            + p * (p.clamp_min(1e-12).log() - midpoint.clamp_min(1e-12).log())
+        ).sum(dim=-1).clamp_min(0.0)
+        statistics = torch.stack((
+            confidence.sum(), js.sum(),
+            confidence.new_tensor(float(q.size(0))),
+        ))
+        if distributed_runtime is not None:
+            distributed_runtime.all_reduce(statistics)
+        mean_confidence = statistics[0] / statistics[2].clamp_min(1.0)
+        mean_js = statistics[1] / statistics[2].clamp_min(1.0)
+        return (
+            float(mean_confidence.item()), float(mean_confidence.item()),
+            float(mean_js.item()),
+            float((1.0 - mean_js / math.log(2.0)).clamp(0.0, 1.0).item()),
+        )
+
     @staticmethod
     def _segment_sum(
         values: Tensor,
@@ -183,48 +228,8 @@ class TrainingObjectivesMixin:
         ).clamp_min(0.0)
         prototypes.update_weighted_sufficient_statistics(counts, mean, m2)
 
-        frontier = self.tree.frontier_routing
-        frontier._sync_gain_tensor()
-        gain_dtype = frontier._expansion_gain_tensor.dtype
-
-        def gain_statistics(
-            node_indices: Tensor | None,
-            values: Tensor | None,
-            mask: Tensor | None,
-        ) -> Tensor:
-            if node_indices is None:
-                return torch.zeros(
-                    2 * node_count,
-                    device=self.device,
-                    dtype=gain_dtype,
-                )
-            selected_nodes = node_indices.detach().masked_select(mask.detach())
-            selected_values = values.detach().masked_select(mask.detach()).clamp_min(0.0)
-            sums = torch.zeros(
-                node_count,
-                device=selected_values.device,
-                dtype=gain_dtype,
-            )
-            counts = torch.zeros_like(sums)
-            if selected_nodes.numel():
-                sums.scatter_add_(0, selected_nodes, selected_values.to(gain_dtype))
-                counts.scatter_add_(
-                    0,
-                    selected_nodes,
-                    torch.ones_like(selected_values, dtype=gain_dtype),
-                )
-            return torch.cat((sums, counts))
-
-        for node_indices, values, mask in (
-            (expanded_node_indices, observed_gain, expanded_mask),
-            (regional_node_indices, regional_gain, None if regional_node_indices is None else torch.ones_like(regional_node_indices, dtype=torch.bool)),
-        ):
-            gain_stats = gain_statistics(node_indices, values, mask)
-            distributed_runtime.all_reduce(gain_stats)
-            frontier.update_expansion_gain_sufficient_statistics(
-                gain_stats[:node_count],
-                gain_stats[node_count:],
-            )
+        # Prototype moments are the only persistent routing state in the
+        # flat leaf router. No expansion-gain collective is needed.
 
     def _probe_leaf_local_theta(self, leaf_id: str) -> Tensor:
         """Leaf parameters whose only trainable term is its local offset."""
@@ -483,322 +488,7 @@ class TrainingObjectivesMixin:
                 "probe_leaves": zero.detach(),
             }
 
-        if self.wake_config.lambda_route_probe == 0.0:
-            return empty_result()
-        frontier_nodes = memory_output["frontier_node_indices"]
-        frontier_mask = memory_output["frontier_mask"]
-        if frontier_posterior.shape != frontier_nodes.shape:
-            raise ValueError("frontier posterior and node slots must align")
-
-        node_count = len(self.tree.all_node_ids)
-        event_node_mass = frontier_posterior.detach().new_zeros(
-            frontier_nodes.size(0), node_count
-        )
-        event_node_mass.scatter_add_(
-            1,
-            frontier_nodes.clamp_min(0),
-            frontier_posterior.detach().masked_fill(~frontier_mask, 0.0),
-        )
-        sequence_node_mass, _ = self._segment_mean(
-            event_node_mass, sequence_index, sequence_count
-        )
-        sequence_embedding, _ = self._segment_mean(
-            sequence_event_embeddings, sequence_index, sequence_count
-        )
-        cumulative_node = self.tree._node_embedding_table()
-        probe_plan = self._regional_probe_topology_plan()
-        if probe_plan.coarse_indices.numel() == 0:
-            return empty_result()
-
-        # Select active coarse regions with one vector reduction and one
-        # boundary transfer.  The previous implementation synchronized once
-        # per internal node via ``float(total_weight)``.
-        coarse_weights = sequence_node_mass.index_select(
-            1, probe_plan.coarse_indices
-        ).detach()
-        total_weights = coarse_weights.sum(dim=0)
-        active_position_tensor = torch.nonzero(
-            total_weights > 1e-12,
-            as_tuple=False,
-        ).reshape(-1)
-        active_positions = active_position_tensor.detach().cpu().tolist()
-        if not active_positions:
-            return empty_result()
-
-        # Runtime work is intentionally limited to the stateful least-probed
-        # choice.  Every selected (region, leaf) pair maps into cached CSR
-        # topology, so no node-path parsing or route-row construction occurs
-        # in the Global hot path.
-        selected_pair_rows: list[list[int]] = []
-        selected_by_region: list[list[str]] = []
-        unique_leaf_ids: list[str] = []
-        seen_leaf_ids: set[str] = set()
-        for region_position in active_positions:
-            selected = self._least_probed_leaves(
-                probe_plan.descendant_leaf_ids[region_position]
-            )
-            selected_by_region.append(selected)
-            selected_pair_rows.append([
-                probe_plan.pair_index_by_leaf[region_position][leaf_id]
-                for leaf_id in selected
-            ])
-            for leaf_id in selected:
-                if leaf_id not in seen_leaf_ids:
-                    seen_leaf_ids.add(leaf_id)
-                    unique_leaf_ids.append(leaf_id)
-
-        active_count = len(active_positions)
-        selected_leaf_count = sum(map(len, selected_pair_rows))
-        max_selected = max(map(len, selected_pair_rows))
-        pair_matrix_rows = [
-            row + [-1] * (max_selected - len(row))
-            for row in selected_pair_rows
-        ]
-        selected_pairs = torch.tensor(
-            pair_matrix_rows,
-            device=sequence_node_mass.device,
-            dtype=torch.long,
-        )
-        selected_mask = selected_pairs >= 0
-        safe_pairs = selected_pairs.clamp_min(0)
-
-        # Every selected coarse/leaf candidate shares the same flattened
-        # event statistics.  Evaluate all unique candidates once, then gather
-        # the columns needed by each region.  The leaf columns retain their
-        # gradients; coarse columns remain the detached stop teacher.
-        candidate_ids = [
-            probe_plan.coarse_ids[position] for position in active_positions
-        ] + unique_leaf_ids
-        candidate_theta = torch.stack([
-            self.tree.semantic_theta(candidate_id).detach()
-            if index < active_count
-            else self._probe_leaf_local_theta(candidate_id)
-            for index, candidate_id in enumerate(candidate_ids)
-        ]).unsqueeze(0).expand(sequence_count, -1, -1)
-        candidate_energy = self._probe_sequence_energy(
-            flat,
-            sequence_index,
-            sequence_count,
-            candidate_theta,
-        )
-        candidate_index = {
-            candidate_id: index
-            for index, candidate_id in enumerate(candidate_ids)
-        }
-        selected_candidate_columns = torch.tensor(
-            [
-                [
-                    candidate_index[leaf_id] if leaf_id else 0
-                    for leaf_id in (
-                        row + [""] * (max_selected - len(row))
-                    )
-                ]
-                for row in selected_by_region
-            ],
-            device=candidate_energy.device,
-            dtype=torch.long,
-        )
-        gathered_energy = candidate_energy.gather(
-            1,
-            selected_candidate_columns.reshape(1, -1).expand(
-                sequence_count, -1
-            ),
-        ).reshape(sequence_count, active_count, max_selected)
-        leaf_energy = gathered_energy.masked_fill(
-            ~selected_mask.unsqueeze(0), 0.0
-        )
-        evidence_leaf_energy = gathered_energy.detach().masked_fill(
-            ~selected_mask.unsqueeze(0), torch.inf
-        )
-        coarse_energy = candidate_energy[:, :active_count]
-        active_coarse_weights = coarse_weights.index_select(
-            1, active_position_tensor
-        )
-        active_total_weights = total_weights.index_select(
-            0, active_position_tensor
-        )
-        leaf_prior = probe_plan.pair_leaf_priors.to(candidate_energy).index_select(
-            0, safe_pairs.reshape(-1)
-        ).reshape(active_count, max_selected).masked_fill(~selected_mask, 0.0)
-
-        # Batched, masked form of counterfactual_energy_probe.  It is
-        # algebraically identical for each region, including variable Kp,
-        # while avoiding one Python call and several host checks per region.
-        teacher_temperature = float(
-            self.wake_config.route_probe_residual_temperature
-        )
-        gain_temperature = float(
-            self.wake_config.route_probe_gain_temperature
-        )
-        leaf_smoothing = float(self.wake_config.route_probe_leaf_smoothing)
-        with torch.no_grad():
-            all_energy = torch.cat(
-                (coarse_energy.detach().unsqueeze(2), evidence_leaf_energy),
-                dim=2,
-            )
-            teacher = F.softmax(
-                -all_energy / teacher_temperature, dim=2
-            )
-            expand_target = 1.0 - teacher[:, :, 0]
-            conditional_leaf_credit = F.softmax(
-                -evidence_leaf_energy / teacher_temperature, dim=2
-            ).masked_fill(~selected_mask.unsqueeze(0), 0.0)
-            leaf_counts = selected_mask.sum(dim=1).clamp_min(1)
-            smoothed_leaf_credit = (
-                (1.0 - leaf_smoothing) * conditional_leaf_credit
-                + selected_mask.unsqueeze(0).to(candidate_energy)
-                * (leaf_smoothing / leaf_counts.to(candidate_energy))[None, :, None]
-            )
-            entropy = -(
-                conditional_leaf_credit.clamp_min(1e-12)
-                * conditional_leaf_credit.clamp_min(1e-12).log()
-                * selected_mask.unsqueeze(0)
-            ).sum(dim=2)
-            assignment_confidence = torch.where(
-                leaf_counts.unsqueeze(0) == 1,
-                torch.ones_like(entropy),
-                (
-                    1.0
-                    - entropy
-                    / leaf_counts.to(candidate_energy).log().unsqueeze(0)
-                ).clamp(0.0, 1.0),
-            )
-            normalized_prior = leaf_prior / leaf_prior.sum(
-                dim=1, keepdim=True
-            ).clamp_min(1e-12)
-            fine_energy = -gain_temperature * torch.logsumexp(
-                normalized_prior.clamp_min(1e-12).log().unsqueeze(0)
-                - evidence_leaf_energy / gain_temperature,
-                dim=2,
-            )
-            observed_gain = (
-                active_coarse_weights
-                * (coarse_energy.detach() - fine_energy).clamp_min(0.0)
-            ).sum(dim=0) / active_total_weights.clamp_min(1e-12)
-
-        active_coarse_indices = probe_plan.coarse_indices.index_select(
-            0, active_position_tensor
-        )
-        active_node_embedding = cumulative_node.index_select(
-            0, active_coarse_indices
-        ).detach()
-        expanded_sequence = sequence_embedding.detach()[:, None, :].expand(
-            -1, active_count, -1
-        ).reshape(-1, sequence_embedding.size(1))
-        expanded_node = active_node_embedding[None, :, :].expand(
-            sequence_count, -1, -1
-        ).reshape(-1, active_node_embedding.size(1))
-        expansion_logit = self.tree.expansion_predictor(
-            expanded_sequence, expanded_node
-        ).reshape(sequence_count, active_count)
-        expansion_loss = (
-            active_coarse_weights
-            * F.binary_cross_entropy_with_logits(
-                expansion_logit, expand_target, reduction="none"
-            )
-        ).sum(dim=0) / active_total_weights.clamp_min(1e-12)
-        expand_loss = expansion_loss.mean()
-        leaf_loss = (
-            active_coarse_weights
-            * (smoothed_leaf_credit * leaf_energy).sum(dim=2)
-        ).sum(dim=0) / active_total_weights.clamp_min(1e-12)
-        leaf_loss = leaf_loss.mean()
-
-        pooling_weight = (
-            active_coarse_weights.unsqueeze(2) * teacher[:, :, 1:]
-        )
-        leaf_mass = pooling_weight.sum(dim=0)
-        pooled_query = torch.einsum(
-            "sak,sz->akz", pooling_weight, sequence_embedding
-        ) / leaf_mass.clamp_min(1e-12).unsqueeze(2)
-        leaf_fraction = leaf_mass / leaf_mass.sum(
-            dim=1, keepdim=True
-        ).clamp_min(1e-12)
-
-        # Expand selected CSR pairs into router rows on-device.  The rectangular
-        # step grid preserves region, selected-leaf, and path order exactly.
-        selected_pair_flat = selected_pairs.masked_select(selected_mask)
-        selected_slot = torch.nonzero(
-            selected_mask.reshape(-1), as_tuple=False
-        ).reshape(-1)
-        path_start = probe_plan.pair_path_offsets.index_select(
-            0, selected_pair_flat
-        )
-        path_end = probe_plan.pair_path_offsets.index_select(
-            0, selected_pair_flat + 1
-        )
-        path_length = path_end - path_start
-        path_grid = path_start[:, None] + probe_plan.path_steps[None, :]
-        path_mask = probe_plan.path_steps[None, :] < path_length[:, None]
-        path_indices = path_grid.masked_select(path_mask)
-        query_owner = selected_slot[:, None].expand_as(path_grid).masked_select(
-            path_mask
-        )
-        query = pooled_query.reshape(
-            active_count * max_selected, -1
-        ).index_select(0, query_owner)
-        weights = leaf_fraction.detach().reshape(-1).index_select(
-            0, query_owner
-        )
-        router_nodes = probe_plan.path_router_nodes.index_select(
-            0, path_indices
-        )
-        targets = probe_plan.path_targets.index_select(0, path_indices)
-        child_index = self.tree.frontier_routing._topology_tensors[
-            "child_index"
-        ].index_select(0, router_nodes)
-        normalized_node = self.tree.router_compat.normalize_nodes(
-            cumulative_node.detach()
-        )
-        child_embedding = normalized_node.index_select(
-            0, child_index.reshape(-1)
-        ).reshape(query.size(0), 2, -1)
-        semantic_score = self.tree.router_compat.score_normalized(
-            self.tree.router_compat.project_z(query), child_embedding
-        )
-        child_prior = self.tree.frontier_routing._topology_tensors[
-            "child_prior"
-        ].to(semantic_score).index_select(0, router_nodes)
-        logits = (
-            self.tree.frontier_routing.config.semantic_weight
-            * semantic_score
-            / self.tree.frontier_routing.config.routing_temperature
-            + child_prior.clamp_min(1e-12).log()
-        )
-        router_loss = (
-            weights * F.cross_entropy(logits, targets, reduction="none")
-        ).sum() / max(active_count, 1)
-        loss = (
-            self.wake_config.route_probe_router_weight * router_loss
-            + self.wake_config.route_probe_expand_weight * expand_loss
-            + self.wake_config.route_probe_leaf_weight * leaf_loss
-        )
-        return {
-            "loss": loss,
-            "router_loss": router_loss,
-            "expand_loss": expand_loss,
-            "leaf_loss": leaf_loss,
-            "node_indices": active_coarse_indices,
-            "refinement_gain": observed_gain,
-            "expand_probability": (
-                active_coarse_weights * expansion_logit.sigmoid().detach()
-            ).sum(dim=0) / active_total_weights.clamp_min(1e-12),
-            "expand_target": (
-                active_coarse_weights * expand_target
-            ).sum(dim=0) / active_total_weights.clamp_min(1e-12),
-            "stop_distortion": (
-                active_coarse_weights * coarse_energy.detach()
-            ).sum(dim=0) / active_total_weights.clamp_min(1e-12),
-            "leaf_distortion": (
-                active_coarse_weights * fine_energy
-            ).sum(dim=0) / active_total_weights.clamp_min(1e-12),
-            "assignment_confidence": (
-                active_coarse_weights * assignment_confidence
-            ).sum(dim=0) / active_total_weights.clamp_min(1e-12),
-            "regions": loss.new_tensor(float(active_count)).detach(),
-            "router_rows": loss.new_tensor(float(query.size(0))).detach(),
-            "probe_leaves": loss.new_tensor(float(selected_leaf_count)).detach(),
-        }
+        return empty_result()
 
     def _batched_local_frontier_objective(
         self,
@@ -806,6 +496,7 @@ class TrainingObjectivesMixin:
         child_energy: Tensor,
         sequence_index: Tensor,
         sequence_count: int,
+        posterior: Tensor | None = None,
     ) -> Dict[str, Tensor]:
         """Local teacher/MI loss with exact sequence and node normalization.
 
@@ -813,6 +504,36 @@ class TrainingObjectivesMixin:
         nodes within each sequence, then averaged sequences. Two-level segment
         reductions reproduce that weighting without a Python node loop.
         """
+        if posterior is not None:
+            # Global prediction detaches routing weights to protect expert
+            # updates. Distillation must use the live Top-K softmax instead.
+            student = memory_output["frontier_mass"]
+            mask = memory_output["frontier_mask"]
+            target = posterior.detach().masked_fill(~mask, 0.0)
+            row_kl = (
+                target * (
+                    target.clamp_min(1e-12).log()
+                    - student.clamp_min(1e-12).log()
+                )
+            ).sum(dim=-1)
+            per_sequence, _ = self._segment_mean(
+                row_kl, sequence_index, sequence_count
+            )
+            zero = student.sum() * 0.0
+            empty_pair = student.new_empty(student.size(0), 0, 2)
+            empty_row = student.new_empty(student.size(0), 0)
+            return {
+                "distill": per_sequence.mean(),
+                "mutual_information": zero,
+                "balance_kl": zero,
+                "conditional_entropy": zero,
+                "marginal_entropy": zero,
+                "observed_gain": empty_row,
+                "teacher": empty_pair,
+                "energy_teacher": empty_pair,
+                "student": empty_pair,
+                "reliability": empty_row,
+            }
         probability = memory_output["expanded_probability"]
         expanded_mask = memory_output["expanded_mask"]
         expanded_nodes = memory_output["expanded_node_indices"]
@@ -1335,12 +1056,11 @@ class TrainingObjectivesMixin:
                     self.optimizer.step()
                     if distributed_global:
                         observed_reliability = (
-                            self._distributed_reliability_statistics(
+                            self._flat_route_reliability(
                                 None,
                                 None,
                                 None,
-                                None,
-                                distributed_runtime=distributed_runtime,
+                                distributed_runtime,
                             )
                         )
                         if not self.training_config.controller_only_finetune:
@@ -1381,19 +1101,16 @@ class TrainingObjectivesMixin:
                 reliability=self.encoder_routing_reliability,
                 alpha_max=self.wake_config.route_encoder_grad_scale,
             )
-            projected_routed_z = self.tree.router_compat.project_z(
-                routed_z
-            )
             memory_query = self.tree.episodic_memory.query_net(z_all)
             memory_output = self.tree(
-                z_t=z_all,
+                z_t=routed_z,
                 working_delta=torch.zeros(
                     self.tree.param_dim,
                     device=self.device,
                     dtype=z_all.dtype,
                 ),
                 decays=self.hawkes.decays,
-                frontier_projected_z=projected_routed_z,
+                frontier_projected_z=None,
                 frontier_query=memory_query,
                 update_memory_state=False,
                 update_search_state=False,
@@ -1682,6 +1399,7 @@ class TrainingObjectivesMixin:
                 child_energy,
                 sequence_index,
                 sequence_count,
+                posterior=posterior,
             )
             regional = self._regional_probe_objective(
                 memory_output,
@@ -1832,31 +1550,17 @@ class TrainingObjectivesMixin:
             )
             max_gradient_norm = max(max_gradient_norm, gradient_norm)
             self.optimizer.step()
-            if distributed_global:
-                # Controller reliability, prototype moments, and frontier
-                # gains are persistent Global state too; synchronize their
-                # sufficient statistics before the next rank-local batch.
-                reliability_status = self._distributed_reliability_statistics(
-                    local["energy_teacher"],
-                    local["student"],
-                    memory_output["expanded_node_indices"].detach(),
-                    memory_output["expanded_mask"].detach(),
-                    distributed_runtime=distributed_runtime,
-                )
-            else:
-                reliability = child_teacher_reliability(
-                    local["energy_teacher"],
-                    local["student"],
-                    memory_output["expanded_node_indices"].detach(),
-                    memory_output["expanded_mask"].detach(),
-                    node_count=len(self.tree.all_node_ids),
-                )
-                reliability_status = torch.stack((
-                    reliability["reliability"],
-                    reliability["teacher_confidence"],
-                    reliability["teacher_student_js"],
-                    reliability["teacher_student_alignment"],
-                )).detach().cpu().tolist()
+            energy_teacher = F.softmax(
+                (-frontier_terms / self.wake_config.route_teacher_temperature)
+                .masked_fill(~frontier_mask, -torch.inf),
+                dim=-1,
+            ).masked_fill(~frontier_mask, 0.0)
+            reliability_status = self._flat_route_reliability(
+                energy_teacher,
+                memory_output["r"],
+                frontier_mask,
+                distributed_runtime if distributed_global else None,
+            )
             (
                 observed_reliability,
                 observed_teacher_confidence,
@@ -1905,20 +1609,6 @@ class TrainingObjectivesMixin:
                         posterior.detach(),
                         frontier_mask.detach(),
                     )
-                    self.tree.frontier_routing.update_expansion_gain(
-                        memory_output["expanded_node_indices"].detach(),
-                        local["observed_gain"],
-                        memory_output["expanded_mask"].detach(),
-                    )
-                    if regional["node_indices"].numel():
-                        regional_mask = torch.ones_like(
-                            regional["node_indices"], dtype=torch.bool
-                        )
-                        self.tree.frontier_routing.update_expansion_gain(
-                            regional["node_indices"].detach(),
-                            regional["refinement_gain"].clamp_min(0.0).detach(),
-                            regional_mask,
-                        )
             optimizer_steps += 1
             total_encoder_grad_scale += encoder_grad_scale
 

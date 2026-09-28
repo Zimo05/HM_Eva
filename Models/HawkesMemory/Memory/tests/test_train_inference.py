@@ -434,17 +434,28 @@ class TrainInferenceTests(unittest.TestCase):
             float(ambiguous_info["mutual_information"]),
         )
 
-    def test_router_explicitly_depends_on_node_semantics(self):
+    def test_router_explicitly_depends_on_leaf_prototypes(self):
         torch.manual_seed(171)
         tree = HawkesTree(3, 4, 2, 1, init_depth=1, memory_key_dim=3)
-        tree.initialize_router_weights(gain=0.2, seed=17)
-        z_t = torch.randn(5, tree.z_dim)
-        route_before = tree.route(z_t).responsibility.detach().clone()
+        z_t = torch.tensor([[1.0, 0.0, 0.0]])
+        prototype = tree.frontier_routing.prototypes
         with torch.no_grad():
-            tree.node_emb["root_L"].add_(
-                3.0 * torch.randn_like(tree.node_emb["root_L"])
-            )
-        route_after = tree.route(z_t).responsibility.detach()
+            prototype.mean[prototype.node_index["root_L"]] = z_t[0]
+            prototype.mean[prototype.node_index["root_R"]] = torch.tensor([0.0, 1.0, 0.0])
+            prototype.count[prototype.node_index["root_L"]] = 1.0
+            prototype.count[prototype.node_index["root_R"]] = 1.0
+        before = tree.route(z_t)
+        with torch.no_grad():
+            prototype.mean[prototype.node_index["root_L"]] = -z_t[0]
+        after = tree.route(z_t)
+        route_before = torch.zeros(len(tree.all_node_ids)).scatter_add_(
+            0, before.frontier_node_indices[0].clamp_min(0),
+            before.responsibility[0].detach(),
+        )
+        route_after = torch.zeros(len(tree.all_node_ids)).scatter_add_(
+            0, after.frontier_node_indices[0].clamp_min(0),
+            after.responsibility[0].detach(),
+        )
         self.assertGreater(
             float((route_after - route_before).abs().max()),
             1e-6,
@@ -830,6 +841,7 @@ class TrainInferenceTests(unittest.TestCase):
         tree = HawkesTree(3, 4, 2, 1, init_depth=1, memory_key_dim=3)
         encoder = CausalPrefixEncoder(2, 3, type_dim=4, hidden_dim=8)
         trainer = MemoryTreeTrainer(tree, hawkes, encoder, device="cpu")
+        tree.configure_frontier_routing(config=FrontierRoutingConfig(frontier_budget=2))
         output = tree(
             torch.randn(3, tree.z_dim, requires_grad=True),
             decays=hawkes.decays,
@@ -837,17 +849,18 @@ class TrainInferenceTests(unittest.TestCase):
             update_search_state=False,
             materialize_diagnostics=False,
         )
-        child_energy = torch.tensor([
-            [[0.0, 2.0]],
-            [[2.0, 0.0]],
-            [[0.0, 1.0]],
-        ])
-        local = trainer._local_frontier_objective(output, child_energy)
+        target = torch.tensor([[0.2, 0.8], [0.8, 0.2], [0.3, 0.7]])
+        local = trainer._batched_local_frontier_objective(
+            output,
+            torch.empty(3, 0, 2),
+            torch.tensor([0, 0, 0]),
+            1,
+            posterior=target,
+        )
         local["distill"].backward()
 
-        self.assertTrue(any(
-            parameter.grad is not None
-            and float(parameter.grad.abs().sum()) > 0.0
+        self.assertTrue(all(
+            parameter.grad is None
             for parameter in tree.router_compat.parameters()
         ))
         self.assertTrue(all(
@@ -1191,16 +1204,10 @@ class TrainInferenceTests(unittest.TestCase):
             moved,
             encoder_grad_scale=0.0,
         )
-        active_index = int(route.detach().argmax())
-        route[active_index].backward()
+        self.assertFalse(route.requires_grad)
         self.assertTrue(all(
             parameter.grad is None
             for parameter in encoder.parameters()
-        ))
-        self.assertTrue(any(
-            parameter.grad is not None
-            and float(parameter.grad.abs().sum()) > 0.0
-            for parameter in tree.router_compat.parameters()
         ))
 
         trainer.optimizer.zero_grad(set_to_none=True)
@@ -1208,6 +1215,7 @@ class TrainInferenceTests(unittest.TestCase):
             moved,
             encoder_grad_scale=0.1,
         )
+        active_index = int(route.detach().argmax())
         route[active_index].backward()
         self.assertTrue(any(
             parameter.grad is not None
@@ -1340,7 +1348,7 @@ class TrainInferenceTests(unittest.TestCase):
         }
         router_ids = {
             id(parameter)
-            for module in (tree.router_compat, tree.expansion_predictor)
+            for module in (tree.router_compat,)
             for parameter in module.parameters()
         }
         self.assertEqual(

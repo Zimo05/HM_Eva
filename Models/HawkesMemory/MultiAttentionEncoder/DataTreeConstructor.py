@@ -86,7 +86,7 @@ class NodeSequenceEncoder:
         d_inner_hid: int = 128,
         d_k: int = 16,
         d_v: int = 16,
-        n_head: int = 4,
+        n_head: int = 2,
         n_layers: int = 4,
         dropout: float = 0.1,
         checkpoint: Optional[str] = None,
@@ -330,7 +330,7 @@ if __name__ == "__main__":
     parser.add_argument("--d-inner-hid", type=int, default=128)
     parser.add_argument("--d-k", type=int, default=16)
     parser.add_argument("--d-v", type=int, default=16)
-    parser.add_argument("--n-head", type=int, default=4)
+    parser.add_argument("--n-head", type=int, default=2)
     parser.add_argument("--n-layers", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--checkpoint", type=str, default=None,

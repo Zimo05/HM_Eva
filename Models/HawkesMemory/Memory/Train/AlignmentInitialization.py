@@ -4,10 +4,11 @@ The initialization objective aligns *routing decisions*, not representations:
 
     full-leaf q^(0) -> local binary q_off -> semantic compatibility p_sem.
 
-Only ``CausalPrefixEncoder`` and ``tree.router_compat`` are optimized. Hawkes
-parameters, node embeddings, semantic experts, and all Memory modules remain
-fixed. The phase runs before Wake/Sleep training and never uses topology priors,
-Hawkes energy, episodic retrieval, or future-window features.
+Only ``CausalPrefixEncoder`` and ``tree.router_compat`` are optimized. The
+resulting encoder states also initialize the empirical leaf prototypes. Hawkes
+parameters, node embeddings, and semantic experts remain fixed. The phase
+runs before Wake/Sleep training and never uses topology priors, Hawkes energy,
+episodic retrieval, or future-window features.
 """
 
 from __future__ import annotations
@@ -590,6 +591,30 @@ def run_membership_alignment(
             batch_size=batch_size,
             temperature=temperature,
         )
+
+        # The deployed router uses empirical leaf means. Seed those means
+        # from the aligned encoder and the same offline leaf memberships so
+        # optional H-tree alignment helps the flat router at cold start.
+        with torch.no_grad():
+            encoder.eval()
+            for start in range(0, len(dataset), batch_size):
+                stop = min(start + batch_size, len(dataset))
+                times, types, valid = _pad_sequence_batch(
+                    dataset[start:stop], device,
+                )
+                z_prefix, prefix_mask = encoder.forward_padded_prefix(
+                    times, types, valid,
+                )
+                responsibility = leaf_membership[start:stop].to(device)
+                weights = responsibility[:, None, :].expand(
+                    -1, z_prefix.size(1), -1
+                )
+                tree.frontier_routing.prototypes.update_leaf_responsibility(
+                    z_prefix[prefix_mask],
+                    tree.leaf_ids,
+                    tree.leaf_paths,
+                    weights[prefix_mask],
+                )
 
     encoder.train(encoder_was_training)
     tree.router_compat.train(router_was_training)

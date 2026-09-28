@@ -543,7 +543,6 @@ class TrainingLifecycleMixin:
     def _is_router_parameter(name: str) -> bool:
         return name.startswith((
             "tree.router_compat.",
-            "tree.expansion_predictor.",
         ))
 
     @contextmanager
@@ -805,6 +804,9 @@ class TrainingLifecycleMixin:
             init_depth=0,
             temperature=config.get("tree_temperature", 1.0),
             hyper_hidden_dim=config.get("hyper_hidden_dim", 256),
+            router_hidden_dim=config.get(
+                "router_hidden_dim", 2 * int(config["node_dim"])
+            ),
             memory_key_dim=config["memory_key_dim"],
             memory_capacity_per_node=config.get("memory_capacity_per_node", 128),
             working_rho=config.get("working_rho", 0.8),
@@ -839,7 +841,6 @@ class TrainingLifecycleMixin:
             for key in incompatible.missing_keys
             if key.startswith((
                 "frontier_routing.prototypes.",
-                "expansion_predictor.",
             ))
         }
         if set(incompatible.missing_keys).difference(legacy_missing):

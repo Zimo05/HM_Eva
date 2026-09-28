@@ -24,6 +24,7 @@ from Evaluation.core.intensity_eval import (  # noqa: E402
     THPIntensityAdapter,
     evaluate_intensity_curves,
 )
+from Evaluation.core.dws_intensity import evaluate_dws_intensity_curves  # noqa: E402
 
 
 def _merge_target_stats(total, update):
@@ -99,8 +100,11 @@ def _load_intensity_records(data_root):
     with path.open('rb') as handle:
         payload = pickle.load(handle, encoding='latin-1')
     streams = payload.get('test')
+    source_indices = payload.get('source_index_by_seq')
     if not isinstance(streams, (list, tuple)) or not streams:
         raise ValueError('{} has no non-empty test split'.format(path))
+    if source_indices is not None and len(source_indices) != len(streams):
+        raise ValueError('{} has misaligned source_index_by_seq'.format(path))
     records = []
     for sequence_index, stream in enumerate(streams):
         times = [float(event['time_since_start']) for event in stream]
@@ -112,6 +116,10 @@ def _load_intensity_records(data_root):
         records.append({
             'time_since_start': times,
             'type_event': types,
+            'source_index': (
+                int(source_indices[sequence_index])
+                if source_indices is not None else sequence_index
+            ),
         })
     return records
 
@@ -514,6 +522,13 @@ def main():
     parser.add_argument('-intensity_checkpoint_task', type=int, default=None)
     parser.add_argument('-intensity_samples', type=int, default=256)
     parser.add_argument('-intensity_plot_anchors', type=int, default=2)
+    parser.add_argument('-dws_intensity_output_dir', type=Path, default=None)
+    parser.add_argument('-dws_intensity_parameters', type=Path, default=None)
+    parser.add_argument('-dws_intensity_dataset', type=Path, default=None)
+    parser.add_argument('-dws_intensity_variant', default=None)
+    parser.add_argument('-dws_intensity_horizon', type=float, default=10.0)
+    parser.add_argument('-dws_intensity_samples', type=int, default=200)
+    parser.add_argument('-dws_intensity_anchors_per_law', type=int, default=20)
     parser.add_argument(
         '-selection_metric', choices=('ll', 'accuracy', 'rmse'), default='ll'
     )
@@ -547,6 +562,24 @@ def main():
         )
     if opt.intensity_samples < 2 or opt.intensity_plot_anchors < 0:
         raise ValueError('invalid intensity sample/plot count')
+    dws_intensity_values = (
+        opt.dws_intensity_output_dir,
+        opt.dws_intensity_parameters,
+        opt.dws_intensity_dataset,
+        opt.dws_intensity_variant,
+    )
+    if any(value is not None for value in dws_intensity_values) and not all(
+            value is not None for value in dws_intensity_values):
+        raise ValueError(
+            'DWS intensity evaluation requires output, parameters, dataset, '
+            'and variant together'
+        )
+    if (
+        opt.dws_intensity_samples < 2
+        or opt.dws_intensity_horizon <= 0.0
+        or opt.dws_intensity_anchors_per_law < 1
+    ):
+        raise ValueError('invalid DWS intensity horizon/sample/anchor count')
 
     log_path = Path(opt.log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -692,6 +725,20 @@ def main():
             checkpoint_task=opt.intensity_checkpoint_task,
             samples=opt.intensity_samples,
             plot_anchors=opt.intensity_plot_anchors,
+        )
+    if opt.dws_intensity_output_dir is not None:
+        intensity_adapter = THPIntensityAdapter(model, num_types)
+        evaluate_dws_intensity_curves(
+            intensity_adapter,
+            _load_intensity_records(opt.data),
+            output_dir=opt.dws_intensity_output_dir,
+            parameters_path=opt.dws_intensity_parameters,
+            dataset_path=opt.dws_intensity_dataset,
+            model_name='THP',
+            variant=opt.dws_intensity_variant,
+            horizon=opt.dws_intensity_horizon,
+            samples=opt.dws_intensity_samples,
+            anchors_per_law=opt.dws_intensity_anchors_per_law,
         )
     print('[Info] Final test metrics saved to {}'.format(opt.test_log))
 

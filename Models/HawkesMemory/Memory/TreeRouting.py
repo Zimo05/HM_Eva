@@ -1,4 +1,4 @@
-"""Active-frontier routing for the dynamic Hawkes tree."""
+"""Routing compatibility interfaces for the dynamic Hawkes tree."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import torch.nn as nn
 
 
 class FrontierRoutingOutput(NamedTuple):
-    """Responsibility on the actually computed frontier slots."""
+    """Responsibility on the selected leaf slots."""
 
     responsibility: torch.Tensor
     log_responsibility: torch.Tensor
@@ -22,19 +22,27 @@ class FrontierRoutingOutput(NamedTuple):
 
 
 class NodeSemanticCompatibility(nn.Module):
-    """Shared ``Compat(z_t, u_n)`` scorer used for local child decisions."""
+    """Historical local scorer retained for optional offline alignment."""
 
-    def __init__(self, z_dim: int, node_dim: int) -> None:
+    def __init__(
+        self,
+        z_dim: int,
+        node_dim: int,
+        hidden_dim: int = 64,
+    ) -> None:
         super().__init__()
         self.z_dim = int(z_dim)
         self.node_dim = int(node_dim)
+        self.hidden_dim = int(hidden_dim)
+        if self.hidden_dim <= 0:
+            raise ValueError("router hidden_dim must be positive")
         self.z_projection = nn.Linear(self.z_dim, self.node_dim)
         self.z_norm = nn.LayerNorm(self.node_dim)
         self.node_norm = nn.LayerNorm(self.node_dim)
         self.score_mlp = nn.Sequential(
-            nn.Linear(4 * self.node_dim, 2 * self.node_dim),
+            nn.Linear(4 * self.node_dim, self.hidden_dim),
             nn.GELU(),
-            nn.Linear(2 * self.node_dim, 1),
+            nn.Linear(self.hidden_dim, 1),
         )
         nn.init.xavier_normal_(self.score_mlp[-1].weight, gain=1)
         nn.init.zeros_(self.score_mlp[-1].bias)
@@ -160,58 +168,8 @@ class NodeSemanticCompatibility(nn.Module):
         return self.score_mlp(interaction).squeeze(-1)
 
 
-class ExpansionEvidencePredictor(nn.Module):
-    """Predict whether a coarse node should be refined for one sequence.
-
-    This head is deliberately separate from the branch Router.  The Regional
-    Probe supervises it from counterfactual Hawkes energies, so its prediction
-    cannot gate the evidence that is needed to train it.
-    """
-
-    def __init__(self, z_dim: int, node_dim: int) -> None:
-        super().__init__()
-        hidden_dim = max(int(node_dim), 16)
-        self.z_dim = int(z_dim)
-        self.node_dim = int(node_dim)
-        self.network = nn.Sequential(
-            nn.Linear(self.z_dim + self.node_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 1),
-        )
-        nn.init.xavier_normal_(self.network[0].weight)
-        nn.init.zeros_(self.network[0].bias)
-        nn.init.xavier_normal_(self.network[-1].weight, gain=0.1)
-        nn.init.zeros_(self.network[-1].bias)
-
-    def forward(
-        self,
-        sequence_embedding: torch.Tensor,
-        node_embedding: torch.Tensor,
-    ) -> torch.Tensor:
-        if (
-            sequence_embedding.ndim != 2
-            or sequence_embedding.size(-1) != self.z_dim
-        ):
-            raise ValueError("sequence_embedding must have shape [B, z_dim]")
-        if node_embedding.ndim == 1:
-            node_embedding = node_embedding.unsqueeze(0).expand(
-                sequence_embedding.size(0), -1
-            )
-        if (
-            node_embedding.ndim != 2
-            or node_embedding.shape
-            != (sequence_embedding.size(0), self.node_dim)
-        ):
-            raise ValueError(
-                "node_embedding must have shape [node_dim] or [B, node_dim]"
-            )
-        return self.network(
-            torch.cat((sequence_embedding, node_embedding), dim=-1)
-        ).squeeze(-1)
-
-
 class TreeRoutingMixin:
-    """Active-frontier methods mixed into ``HawkesTree``."""
+    """Routing compatibility methods mixed into ``HawkesTree``."""
 
     @torch.no_grad()
     def initialize_router_weights(
@@ -236,7 +194,7 @@ class TreeRoutingMixin:
         self,
         z: torch.Tensor,
     ) -> FrontierRoutingOutput:
-        """Return responsibility on the actual computed frontier."""
+        """Return responsibility on selected leaves."""
         return self.frontier_route(
             z,
             update_search_state=False,
@@ -244,7 +202,6 @@ class TreeRoutingMixin:
 
 
 __all__ = [
-    "ExpansionEvidencePredictor",
     "FrontierRoutingOutput",
     "NodeSemanticCompatibility",
     "TreeRoutingMixin",

@@ -336,6 +336,7 @@ class TrainingCheckpointMixin:
                 ),
                 "tree_temperature": self.tree.temperature,
                 "router_kind": "posterior_frontier_v2",
+                "router_hidden_dim": self.tree.router_compat.hidden_dim,
                 "frontier_routing_config": asdict(
                     self.tree.frontier_routing.config
                 ),

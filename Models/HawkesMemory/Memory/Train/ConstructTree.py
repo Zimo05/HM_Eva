@@ -25,8 +25,9 @@ class ConstructMemoryTree:
         seed: int = 0,
         device: Optional[str] = None,
         z_dim: int = 50,
-        node_dim: int = 64,
+        node_dim: int = 128,
         memory_key_dim: int = 64,
+        memory_capacity_per_node: int = 128,
         tree_init_depth: int = 1,
     ):
         self.data_path = Path(data_path)
@@ -41,6 +42,9 @@ class ConstructMemoryTree:
         self.z_dim = z_dim
         self.node_dim = node_dim
         self.memory_key_dim = memory_key_dim
+        if memory_capacity_per_node <= 0:
+            raise ValueError("memory_capacity_per_node must be positive")
+        self.memory_capacity_per_node = int(memory_capacity_per_node)
         self.tree_init_depth = tree_init_depth
 
         if len(self.decays) != self.num_basis:
@@ -199,6 +203,7 @@ class ConstructMemoryTree:
             num_basis=self.num_basis,
             init_depth=self.tree_init_depth,
             memory_key_dim=self.memory_key_dim,
+            memory_capacity_per_node=self.memory_capacity_per_node,
         ).to(self.device)
         return self.hawkes_tree
 

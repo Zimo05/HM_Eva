@@ -33,7 +33,7 @@ class HawkesHyperNet(nn.Module):
         embed_dim: int,
         num_event_types: int,
         num_basis: int,
-        hidden_dim: int = 256,
+        hidden_dim: int = 128,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim

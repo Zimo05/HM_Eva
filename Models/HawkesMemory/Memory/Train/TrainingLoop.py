@@ -888,7 +888,9 @@ class TrainingLoopMixin:
                         sequences=len(sequences),
                     )
                     profiler.start("query_projection")
-                projected_flat = self.tree.router_compat.project_z(z_flat)
+                # Flat routing consumes z directly; preserve the cache slot
+                # for the packed Wake interface without an unused MLP pass.
+                projected_flat = z_flat
                 query_flat = self.tree.episodic_memory.query_net(z_flat)
                 if profiler is not None:
                     profiler.stop("query_projection")

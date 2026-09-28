@@ -141,7 +141,7 @@ case "$ACTION" in
         -batch_size "$THP_BATCH_SIZE" \
         -num_workers "$THP_NUM_WORKERS" \
         -data_parallel "$THP_DATA_PARALLEL" \
-        -n_head 4 \
+        -n_head 2 \
         -n_layers 3 \
         -d_model 128 \
         -d_rnn 128 \
@@ -212,7 +212,7 @@ case "$ACTION" in
       --checkpoint "$BEST_CHECKPOINT"
       --weights_out "$ATTENTION_WEIGHTS"
       --d_model 128
-      --num_heads 4
+      --num_heads 2
       --d_rnn 128
       --d_inner_hid 256
       --d_k 32
@@ -297,7 +297,7 @@ case "$ACTION" in
         ${ATTENTION_EMBEDDING_ARGS[@]+"${ATTENTION_EMBEDDING_ARGS[@]}"} \
         --output "$FINAL_OUTPUT" \
         --d_model 128 \
-        --num_heads 4 \
+        --num_heads 2 \
         --d_rnn 128 \
         --d_inner_hid 256 \
         --d_k 32 \

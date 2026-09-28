@@ -523,7 +523,7 @@ def main():
     parser.add_argument("-d_inner_hid", type=int, default=256)
     parser.add_argument("-d_k", type=int, default=32)
     parser.add_argument("-d_v", type=int, default=32)
-    parser.add_argument("-n_head", type=int, default=4)
+    parser.add_argument("-n_head", type=int, default=2)
     parser.add_argument("-n_layers", type=int, default=4)
     parser.add_argument("-dropout", type=float, default=0.2)
 

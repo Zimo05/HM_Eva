@@ -59,11 +59,14 @@ class FrontierRoutingRetrievalTests(unittest.TestCase):
                 torch.tensor(1.0),
                 atol=1e-6,
             ))
-            for leaf_path in self.tree.leaf_paths:
-                self.assertEqual(
-                    sum(node_id in leaf_path for node_id in sample.node_ids),
-                    1,
-                )
+            self.assertTrue(set(sample.node_ids).issubset(set(self.tree.leaf_ids)))
+            self.assertEqual(
+                set(sample.visited_node_ids),
+                set().union(*(
+                    set(self.tree.path_to_node(leaf))
+                    for leaf in sample.node_ids
+                )),
+            )
             for left_index, left_id in enumerate(sample.node_ids):
                 for right_id in sample.node_ids[left_index + 1:]:
                     self.assertNotIn(
@@ -84,11 +87,7 @@ class FrontierRoutingRetrievalTests(unittest.TestCase):
             update_search_state=False,
         )[0]
         self.assertLessEqual(len(sample.node_ids), 4)
-        for leaf_path in self.tree.leaf_paths:
-            self.assertEqual(
-                sum(node_id in leaf_path for node_id in sample.node_ids),
-                1,
-            )
+        self.assertTrue(set(sample.node_ids).issubset(set(self.tree.leaf_ids)))
         self.assertEqual(
             self.model.prototypes.node_ids,
             tuple(self.tree.all_node_ids),
@@ -99,22 +98,15 @@ class FrontierRoutingRetrievalTests(unittest.TestCase):
             torch.randn(1, self.tree.z_dim),
             update_search_state=False,
         )
-        branch_count = int(packed.expanded_mask[0].sum())
-        self.assertGreaterEqual(branch_count, 1)
-        self.assertLess(branch_count, len(self.tree.internal_ids))
-        self.assertEqual(
-            tuple(packed.expanded_probability.shape[-1:]), (2,)
-        )
-        self.assertTrue(torch.allclose(
-            packed.expanded_probability.sum(dim=-1)[
-                packed.expanded_mask
-            ],
-            torch.ones(branch_count),
-        ))
+        self.assertEqual(packed.expanded_mask.numel(), 0)
+        leaf_indices = {
+            self.tree.all_node_ids.index(leaf) for leaf in self.tree.leaf_ids
+        }
+        self.assertTrue(set(packed.node_indices[0].tolist()) <= leaf_indices)
 
     def test_irregular_tree_uses_descendant_mass_neutral_prior(self) -> None:
         # Make the left child a shallow leaf while the right child retains
-        # four leaves. Uniform leaf target mass must yield root prior 1:4,
+        # three leaves. Uniform leaf target mass must yield root prior 1:3,
         # instead of the depth-biased 1:1 prior that caused Leaf-0 collapse.
         tree = HawkesTree(
             z_dim=4,
@@ -133,7 +125,7 @@ class FrontierRoutingRetrievalTests(unittest.TestCase):
                 frontier_budget=4,
                 # Legacy knobs are intentionally ignored by the exact
                 # fixed-prior route distribution.
-                prior_weight=0.0,
+                prior_weight=1.0,
                 exploration_epsilon=1.0,
             ),
         )
@@ -145,16 +137,24 @@ class FrontierRoutingRetrievalTests(unittest.TestCase):
         expected = torch.tensor(descendant_counts, dtype=root_prior.dtype)
         expected /= expected.sum()
         self.assertTrue(torch.allclose(root_prior, expected))
+        model.set_target_leaf_mass(
+            torch.tensor([0.4, 0.3, 0.2, 0.1]),
+            leaf_ids=tree.leaf_ids,
+        )
         with torch.no_grad():
-            for parameter in tree.router_compat.score_mlp.parameters():
-                parameter.zero_()
+            for leaf in tree.leaf_ids:
+                index = model.prototypes.node_index[leaf]
+                model.prototypes.mean[index] = torch.tensor([1.0, 0.0, 0.0, 0.0])
+                model.prototypes.count[index] = 1.0
         packed = model.route_packed(
-            torch.randn(1, tree.z_dim),
+            torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
             update_search_state=False,
         )
+        expected_mass = torch.tensor([0.4, 0.3, 0.2, 0.1])
+        expected_mass /= expected_mass.sum()
         self.assertTrue(torch.allclose(
-            packed.expanded_probability[0, 0],
-            expected,
+            packed.mass[0],
+            expected_mass,
             atol=1e-6,
         ))
 
@@ -164,16 +164,10 @@ class FrontierRoutingRetrievalTests(unittest.TestCase):
             z_t,
             update_search_state=True,
         )
-        visits_after_forward = dict(self.model.expansion_visits)
-        self.model.expansion_visits.clear()
         reverse = self.model.route(
             z_t.flip(0),
             update_search_state=True,
         )[::-1]
-        self.assertEqual(
-            self.model.expansion_visits,
-            visits_after_forward,
-        )
         for left, right in zip(forward, reverse):
             self.assertEqual(left.node_ids, right.node_ids)
             self.assertTrue(torch.allclose(left.mass, right.mass))
@@ -307,23 +301,16 @@ class FrontierRoutingRetrievalTests(unittest.TestCase):
         ))
 
     def test_router_receives_gradient_through_selected_frontier(self) -> None:
+        query = torch.randn(3, self.tree.z_dim, requires_grad=True)
         output = self.model(
-            torch.randn(3, self.tree.z_dim),
+            query,
             working_delta=torch.zeros(self.tree.param_dim),
             update_memory_state=False,
             update_search_state=False,
         )
         output.effective_params.theta.square().mean().backward()
-        gradients = [
-            parameter.grad
-            for parameter in self.tree.router_compat.parameters()
-            if parameter.grad is not None
-        ]
-        self.assertTrue(gradients)
-        self.assertTrue(any(
-            bool((gradient.abs() > 0.0).any())
-            for gradient in gradients
-        ))
+        self.assertIsNotNone(query.grad)
+        self.assertGreater(float(query.grad.norm()), 0.0)
 
 
 if __name__ == "__main__":

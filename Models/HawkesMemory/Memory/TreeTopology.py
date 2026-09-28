@@ -98,7 +98,10 @@ class TreeTopologyMixin:
         # internal node. Ignore those tensors during the one-way migration to
         # active-frontier routing.
         for key in tuple(state_dict):
-            if key.startswith(prefix + "routers."):
+            if key.startswith((
+                prefix + "routers.",
+                prefix + "expansion_predictor.",
+            )):
                 state_dict.pop(key)
 
     def set_extra_state(self, state) -> None:

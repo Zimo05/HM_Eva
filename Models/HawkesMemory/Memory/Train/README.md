@@ -455,7 +455,7 @@ Every dataset item must contain:
 python -m Train.Train \
   --data-path data.csv \
   --epochs 20 \
-  --cold-start-epochs 5 \
+  --cold-start-epochs 15 \
   --checkpoint checkpoints/memory_tree.pt \
   --num-basis 2 \
   --decays 0.5 1.5

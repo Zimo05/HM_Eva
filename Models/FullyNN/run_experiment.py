@@ -138,6 +138,15 @@ def parse_args():
     parser.add_argument("--intensity-checkpoint-task", type=int, default=None)
     parser.add_argument("--intensity-samples", type=int, default=256)
     parser.add_argument("--intensity-plot-anchors", type=int, default=2)
+    parser.add_argument(
+        "--dws-intensity-output-dir",
+        type=Path,
+        default=None,
+        help="Write the stationary DWS fixed-anchor intensity protocol here.",
+    )
+    parser.add_argument("--dws-intensity-horizon", type=float, default=10.0)
+    parser.add_argument("--dws-intensity-samples", type=int, default=200)
+    parser.add_argument("--dws-intensity-anchors-per-law", type=int, default=20)
     return parser.parse_args()
 
 
@@ -570,6 +579,34 @@ def evaluate_native_intensity(
     return summary
 
 
+def evaluate_dws_native_intensity(args, runner, adapted_dir, num_event_types):
+    if args.dws_intensity_output_dir is None:
+        return None
+    if args.dataset != "dws":
+        raise ValueError("--dws-intensity-output-dir is only valid for --dataset dws")
+    from Evaluation.core.dws_intensity import evaluate_dws_intensity_curves
+
+    tree_root = PROJECT_ROOT / "Datasets" / "DWS" / f"tree_{args.variant}"
+    adapter = EasyTPPIntensityAdapter(
+        runner.model_wrapper.model,
+        num_event_types,
+        model_name="FullyNN",
+    )
+    _rows, summary = evaluate_dws_intensity_curves(
+        adapter,
+        load_records(Path(adapted_dir) / "test.json"),
+        output_dir=args.dws_intensity_output_dir,
+        parameters_path=tree_root / f"parameters_{args.variant}.json",
+        dataset_path=tree_root / f"hawkes_dataset_{args.variant}.csv",
+        model_name="FullyNN",
+        variant=args.variant,
+        horizon=args.dws_intensity_horizon,
+        samples=args.dws_intensity_samples,
+        anchors_per_law=args.dws_intensity_anchors_per_law,
+    )
+    return summary
+
+
 def train_and_test(
     args, paths, config_path, adapted_dir, num_event_types
 ):
@@ -618,7 +655,7 @@ def train_and_test(
             write_metrics(metrics_path, rows)
             logger.info(
                 "[Epoch %d/%d] lr=%.2e | train LL=%.6f | valid LL=%.6f "
-                "(time=%.6f, mark=%.6f), RMSE=%.6f, accuracy=%.6f",
+                "(time=%.6f, mark=%.6f), RMSE=%.6f, MAE=%.6f, accuracy=%.6f",
                 epoch,
                 args.epochs,
                 current_lr,
@@ -627,6 +664,7 @@ def train_and_test(
                 valid_metrics.get("time_loglike", float("nan")),
                 valid_metrics.get("mark_loglike", float("nan")),
                 valid_metrics["rmse"],
+                valid_metrics.get("mae", float("nan")),
                 valid_metrics["acc"],
             )
             if "target_51_accuracy" in valid_metrics:
@@ -688,6 +726,9 @@ def train_and_test(
         paths["output"] / "predictions.jsonl.gz",
     )
     evaluate_native_intensity(
+        args, runner, adapted_dir, num_event_types
+    )
+    evaluate_dws_native_intensity(
         args, runner, adapted_dir, num_event_types
     )
     runner.model_wrapper.close_summary()
@@ -1037,6 +1078,14 @@ def main():
         raise ValueError("--intensity-samples must be at least two")
     if args.intensity_plot_anchors < 0:
         raise ValueError("--intensity-plot-anchors must be non-negative")
+    if args.dws_intensity_samples < 2:
+        raise ValueError("--dws-intensity-samples must be at least two")
+    if args.dws_intensity_horizon <= 0.0:
+        raise ValueError("--dws-intensity-horizon must be positive")
+    if args.dws_intensity_anchors_per_law < 1:
+        raise ValueError("--dws-intensity-anchors-per-law must be positive")
+    if args.dws_intensity_output_dir is not None and args.dataset != "dws":
+        raise ValueError("DWS intensity evaluation requires --dataset dws")
     intensity_values = (
         args.intensity_output_dir,
         args.intensity_ground_truth_dir,

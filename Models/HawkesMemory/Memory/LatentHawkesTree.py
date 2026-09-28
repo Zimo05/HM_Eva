@@ -3,7 +3,7 @@
 Responsibilities are intentionally split across:
 
 * ``TreeTopology``: dynamic nodes, paths, masks, and checkpoint topology;
-* ``TreeRouting``: local active-frontier child compatibility;
+* ``TreeRouting``: compatibility with historical routing checkpoints;
 * ``TreeSemantics``: HyperNet parameters and semantic offsets;
 * this module: component construction, Encoder alignment, Memory, and forward.
 
@@ -21,7 +21,6 @@ import torch.nn as nn
 from Config import TreeNode
 from MemoryResiduals import TreeEpisodicMemory, WorkingMemoryAdapter
 from TreeRouting import (
-    ExpansionEvidencePredictor,
     FrontierRoutingOutput,
     NodeSemanticCompatibility,
     TreeRoutingMixin,
@@ -71,7 +70,8 @@ class HawkesTree(
         num_basis: int,
         init_depth: int = 1,
         temperature: float = 1.0,
-        hyper_hidden_dim: int = 256,
+        hyper_hidden_dim: int = 128,
+        router_hidden_dim: int = 64,
         memory_key_dim: Optional[int] = None,
         memory_capacity_per_node: int = 128,
         working_rho: float = 0.8,
@@ -104,10 +104,7 @@ class HawkesTree(
         self.router_compat = NodeSemanticCompatibility(
             z_dim,
             node_dim,
-        )
-        self.expansion_predictor = ExpansionEvidencePredictor(
-            z_dim,
-            node_dim,
+            hidden_dim=router_hidden_dim,
         )
         self.semantic_blend = 0.0
         self.initialization_metadata: Dict[str, object] = {}
@@ -240,39 +237,6 @@ class HawkesTree(
         self.frontier_routing.config = config
         self.frontier_routing._reset_target_leaf_mass_from_config()
 
-    def _frontier_router_logits(
-        self,
-        samples,
-        reference: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        rows = []
-        masks = []
-        for sample in samples:
-            values = []
-            evaluated = []
-            for node_id in self.internal_ids:
-                decision = sample.decisions.get(node_id)
-                if decision is None:
-                    values.append(reference.new_zeros(()))
-                    evaluated.append(False)
-                else:
-                    values.append(
-                        decision.total_score[0]
-                        - decision.total_score[1]
-                    )
-                    evaluated.append(True)
-            rows.append(
-                torch.stack(values)
-                if values
-                else reference.new_empty(0)
-            )
-            masks.append(torch.tensor(
-                evaluated,
-                device=reference.device,
-                dtype=torch.bool,
-            ))
-        return torch.stack(rows), torch.stack(masks)
-
     def frontier_route(
         self,
         z_t: torch.Tensor,
@@ -286,11 +250,9 @@ class HawkesTree(
         responsibility = (
             frontier.mass * frontier.mask.to(frontier.mass.dtype)
         )
-        probabilities = frontier.expanded_probability.clamp_min(1e-12)
-        logits = (
-            probabilities[..., 0].log()
-            - probabilities[..., 1].log()
-        ).masked_fill(~frontier.expanded_mask, 0.0)
+        logits = responsibility.clamp_min(1e-12).log().masked_fill(
+            ~frontier.mask, 0.0
+        )
         return FrontierRoutingOutput(
             responsibility=responsibility,
             log_responsibility=responsibility.clamp_min(1e-12).log(),
@@ -302,8 +264,7 @@ class HawkesTree(
             expanded_mask=frontier.expanded_mask,
         )
 
-    # Checkpoint-era compatibility name. The return value is an actual
-    # frontier and is never projected to leaves.
+    # Checkpoint-era compatibility name. The return value contains leaves.
     frontier_route_as_leaves = frontier_route
 
     def _forward_frontier(
@@ -359,14 +320,10 @@ class HawkesTree(
             if detach_routing
             else responsibility
         )
-        expanded_probability = (
-            output.frontier.expanded_probability.clamp_min(1e-12)
+        logits = frontier_mass.clamp_min(1e-12).log().masked_fill(
+            ~frontier_mask, 0.0
         )
-        logits = (
-            expanded_probability[..., 0].log()
-            - expanded_probability[..., 1].log()
-        ).masked_fill(~output.frontier.expanded_mask, 0.0)
-        evaluated_mask = output.frontier.expanded_mask
+        evaluated_mask = frontier_mask
         semantic_mix_theta = (
             frontier_mass.unsqueeze(-1) * semantic
         ).sum(dim=1)

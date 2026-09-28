@@ -1,48 +1,17 @@
+"""Regional structural evidence is separate from Wake leaf routing."""
+
 import unittest
 
 import torch
 
 from HawkesBackbone import HawkesFamily
 from LatentHawkesTree import HawkesTree
-from Routing_Retrieval_Investigation.routing_retrieval_investigation import (
-    FrontierRoutingConfig,
-)
-from Train.RegionalProbe import (
-    counterfactual_energy_probe,
-    counterfactual_energy_probe_batched,
-)
-from Train.Train import (
-    CausalPrefixEncoder,
-    MemoryTreeTrainer,
-    WakeObjectiveConfig,
-)
+from Train.RegionalProbe import counterfactual_energy_probe
+from Train.Train import CausalPrefixEncoder, MemoryTreeTrainer, WakeObjectiveConfig
 
 
 class RegionalProbeTests(unittest.TestCase):
-    def _trainer(self, *, depth: int = 3) -> MemoryTreeTrainer:
-        tree = HawkesTree(3, 5, 2, 1, init_depth=depth, memory_key_dim=3)
-        tree.configure_frontier_routing(
-            config=FrontierRoutingConfig(
-                frontier_budget=2,
-                frontier_min_experts=2,
-            )
-        )
-        return MemoryTreeTrainer(
-            tree,
-            HawkesFamily(2, 1, decays=torch.tensor([1.0])),
-            CausalPrefixEncoder(2, 3, type_dim=4, hidden_dim=6),
-            wake=WakeObjectiveConfig(
-                lambda_route_probe=1.0,
-                # Deliberately inconsistent: the fixed option is deprecated
-                # and each four-leaf coarse region must still select two.
-                route_probe_leaves=99,
-                route_probe_leaf_smoothing=0.05,
-                route_balance_batch_size=2,
-            ),
-            device="cpu",
-        )
-
-    def test_counterfactual_teacher_uses_stop_and_leaf_hawkes_energy(self):
+    def test_counterfactual_energy_helper_remains_available_for_sleep(self):
         probe = counterfactual_energy_probe(
             coarse_energy=torch.tensor([2.0, 1.0]),
             leaf_energy=torch.tensor([[0.2, 3.0], [2.0, 3.0]]),
@@ -54,192 +23,49 @@ class RegionalProbeTests(unittest.TestCase):
         )
         self.assertGreater(float(probe.expand_target[0]), 0.99)
         self.assertLess(float(probe.expand_target[1]), 0.01)
-        self.assertTrue(torch.allclose(
-            probe.smoothed_leaf_credit.sum(dim=1), torch.ones(2)
-        ))
-        self.assertGreater(float(probe.observed_gain), 0.0)
         self.assertFalse(probe.teacher.requires_grad)
 
-    def test_batched_counterfactual_probe_matches_independent_regions(self):
-        torch.manual_seed(809)
-        sequence_count, region_count, max_leaves = 4, 2, 3
-        coarse = torch.rand(sequence_count, region_count) + 0.5
-        leaves = torch.rand(sequence_count, region_count, max_leaves) + 0.1
-        weight = torch.rand(sequence_count, region_count) + 0.2
-        mask = torch.tensor([[True, True, False], [True, True, True]])
-        prior = torch.tensor([[0.4, 0.6, 0.0], [0.2, 0.3, 0.5]])
-        batched = counterfactual_energy_probe_batched(
-            coarse,
-            leaves,
-            weight,
-            prior,
-            mask,
-            teacher_temperature=0.3,
-            gain_temperature=0.4,
-            leaf_smoothing=0.05,
+    def test_wake_probe_does_not_train_or_change_flat_router(self):
+        tree = HawkesTree(3, 5, 2, 1, init_depth=2, memory_key_dim=3)
+        trainer = MemoryTreeTrainer(
+            tree,
+            HawkesFamily(2, 1, decays=torch.tensor([1.0])),
+            CausalPrefixEncoder(2, 3, type_dim=4, hidden_dim=6),
+            wake=WakeObjectiveConfig(lambda_route_probe=1.0),
+            device="cpu",
         )
-        for region, leaf_count in enumerate((2, 3)):
-            reference = counterfactual_energy_probe(
-                coarse[:, region],
-                leaves[:, region, :leaf_count],
-                weight[:, region],
-                prior[region, :leaf_count],
-                teacher_temperature=0.3,
-                gain_temperature=0.4,
-                leaf_smoothing=0.05,
-            )
-            torch.testing.assert_close(
-                batched.teacher[:, region, :leaf_count + 1],
-                reference.teacher,
-            )
-            for field in (
-                "conditional_leaf_credit",
-                "smoothed_leaf_credit",
-            ):
-                torch.testing.assert_close(
-                    getattr(batched, field)[:, region, :leaf_count],
-                    getattr(reference, field),
-                )
-            for field in (
-                "expand_target", "assignment_confidence", "fine_energy",
-            ):
-                torch.testing.assert_close(
-                    getattr(batched, field)[:, region],
-                    getattr(reference, field),
-                )
-            torch.testing.assert_close(
-                batched.observed_gain[region], reference.observed_gain
-            )
-
-    def test_regional_topology_cache_rebuilds_after_split(self):
-        trainer = self._trainer(depth=2)
-        first = trainer._regional_probe_topology()
-        self.assertIs(first, trainer._regional_probe_topology())
-        trainer.tree.split_leaf(trainer.tree.leaf_ids[0])
-        refreshed = trainer._regional_probe_topology()
-        self.assertIsNot(first, refreshed)
-        self.assertNotEqual(first["signature"], refreshed["signature"])
-
-    def test_probe_covers_leaves_and_only_calibrates_selected_local_offsets(self):
-        torch.manual_seed(811)
-        trainer = self._trainer(depth=3)
-        tree = trainer.tree
-        self.assertEqual(trainer._regional_probe_leaf_count(4), 2)
-        self.assertEqual(trainer._regional_probe_leaf_count(5), 3)
-        sequences = [
-            trainer._move_sequence({
-                "times": torch.tensor([0.2, 0.6, 1.1, 1.7]),
-                "types": torch.tensor([0, 1, 0, 1]),
-            }),
-            trainer._move_sequence({
-                "times": torch.tensor([0.1, 0.5, 0.9, 1.5]),
-                "types": torch.tensor([1, 0, 1, 0]),
-            }),
-        ]
-        z_all, flat = trainer._encode_global_sequence_batch(sequences)
+        z = torch.randn(2, 3)
         output = tree(
-            z_t=z_all,
-            working_delta=torch.zeros(tree.param_dim),
-            decays=trainer.hawkes.decays,
-            frontier_projected_z=tree.router_compat.project_z(z_all),
-            frontier_query=tree.episodic_memory.query_net(z_all),
-            update_memory_state=False,
-            update_search_state=False,
-            detach_routing=True,
+            z, update_memory_state=False, update_search_state=False,
             materialize_diagnostics=False,
         )
-        frontier_before = output["frontier_node_indices"].clone()
-        energy_calls = []
-        original_probe_energy = trainer._probe_sequence_energy
-
-        def counted_probe_energy(*args, **kwargs):
-            energy_calls.append(1)
-            return original_probe_energy(*args, **kwargs)
-
-        trainer._probe_sequence_energy = counted_probe_energy
+        selected_before = output["frontier_node_indices"].clone()
         probe = trainer._regional_probe_objective(
             output,
             output["frontier_mass"].detach(),
-            flat["sequence_index"],
-            len(sequences),
-            z_all,
-            flat,
+            torch.tensor([0, 0]),
+            1,
+            z,
+            {},
         )
-        self.assertEqual(int(probe["regions"]), 2)
-        self.assertEqual(int(probe["probe_leaves"]), 4)
-        self.assertEqual(len(energy_calls), 1)
-        first_selected = {
-            leaf_id
-            for leaf_id, visits in tree.frontier_routing.probe_leaf_visits.items()
-            if visits == 1
-        }
-        self.assertEqual(len(first_selected), 4)
-
-        probe["loss"].backward()
-        for leaf_id in tree.leaf_ids:
-            gradient = tree.semantic_offset[leaf_id].grad
-            if leaf_id in first_selected:
-                self.assertIsNotNone(gradient)
-                self.assertTrue(bool((gradient.abs() > 0).any()))
-            else:
-                self.assertIsNone(gradient)
-        self.assertTrue(all(
-            tree.semantic_offset[node_id].grad is None
-            for node_id in tree.internal_ids
-        ))
-        self.assertTrue(all(
-            parameter.grad is None for parameter in tree.hyper.parameters()
-        ))
-        self.assertTrue(any(
-            parameter.grad is not None
-            and bool((parameter.grad.abs() > 0).any())
-            for parameter in tree.expansion_predictor.parameters()
-        ))
-        self.assertTrue(any(
-            parameter.grad is not None
-            and bool((parameter.grad.abs() > 0).any())
-            for parameter in tree.router_compat.parameters()
-        ))
+        self.assertEqual(float(probe["loss"]), 0.0)
+        self.assertEqual(float(probe["regions"]), 0.0)
+        self.assertFalse(hasattr(tree, "expansion_predictor"))
+        self.assertEqual(tree.frontier_routing.probe_leaf_visits, {})
         self.assertTrue(torch.equal(
-            output["frontier_node_indices"], frontier_before
+            output["frontier_node_indices"], selected_before
         ))
 
-        trainer._regional_probe_objective(
-            output,
-            output["frontier_mass"].detach(),
-            flat["sequence_index"],
-            len(sequences),
-            z_all,
-            flat,
-        )
-        self.assertEqual(
-            set(tree.frontier_routing.probe_leaf_visits), set(tree.leaf_ids)
-        )
-        self.assertTrue(all(
-            visits == 1
-            for visits in tree.frontier_routing.probe_leaf_visits.values()
-        ))
-
-    def test_probe_coverage_and_predictor_survive_checkpoint_restore(self):
+    def test_legacy_probe_coverage_state_survives_checkpoint(self):
         tree = HawkesTree(3, 5, 2, 1, init_depth=2, memory_key_dim=3)
-        tree.frontier_routing.probe_leaf_visits = {
-            tree.leaf_ids[0]: 3,
-            tree.leaf_ids[1]: 1,
-        }
+        tree.frontier_routing.probe_leaf_visits = {tree.leaf_ids[0]: 3}
         state = tree.state_dict()
-
         restored = HawkesTree(3, 5, 2, 1, init_depth=0, memory_key_dim=3)
         restored.load_state_dict(state)
-        self.assertEqual(restored.leaf_ids, tree.leaf_ids)
         self.assertEqual(
             restored.frontier_routing.probe_leaf_visits,
             tree.frontier_routing.probe_leaf_visits,
         )
-        for actual, expected in zip(
-            restored.expansion_predictor.parameters(),
-            tree.expansion_predictor.parameters(),
-        ):
-            self.assertTrue(torch.allclose(actual, expected))
 
 
 if __name__ == "__main__":

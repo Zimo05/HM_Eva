@@ -47,6 +47,7 @@ from Evaluation.core.intensity_eval import (  # noqa: E402
     EasyTPPIntensityAdapter,
     evaluate_intensity_curves,
 )
+from Evaluation.core.dws_intensity import evaluate_dws_intensity_curves  # noqa: E402
 
 
 def parse_args():
@@ -81,7 +82,15 @@ def parse_args():
         "--mc-samples", type=int, default=32,
         help="Monte Carlo samples per interval for training log-likelihood.",
     )
-    parser.add_argument("--thinning-num-sample", type=int, default=1)
+    parser.add_argument(
+        "--thinning-num-sample",
+        type=int,
+        default=20,
+        help=(
+            "Quadrature points used for deterministic one-step time "
+            "prediction; must be at least two."
+        ),
+    )
     parser.add_argument("--thinning-num-exp", type=int, default=500)
     parser.add_argument("--dtime-max", type=float, default=120.0)
     parser.add_argument("--early-stop-patience", type=int, default=20)
@@ -116,6 +125,10 @@ def parse_args():
     parser.add_argument("--intensity-checkpoint-task", type=int, default=None)
     parser.add_argument("--intensity-samples", type=int, default=256)
     parser.add_argument("--intensity-plot-anchors", type=int, default=2)
+    parser.add_argument("--dws-intensity-output-dir", type=Path, default=None)
+    parser.add_argument("--dws-intensity-horizon", type=float, default=10.0)
+    parser.add_argument("--dws-intensity-samples", type=int, default=200)
+    parser.add_argument("--dws-intensity-anchors-per-law", type=int, default=20)
     return parser.parse_args()
 
 
@@ -134,6 +147,10 @@ def validate_args(args):
         raise ValueError(
             "epoch, batch/model sizes, sampling sizes, and patience must be positive"
         )
+    if args.thinning_num_sample < 2:
+        raise ValueError(
+            "--thinning-num-sample must be at least two for trapezoidal prediction"
+        )
     if not 0.0 < args.lr_factor < 1.0:
         raise ValueError("--lr-factor must be between 0 and 1")
     if args.learning_rate <= 0 or args.dtime_max <= 0 or args.min_delta < 0:
@@ -146,6 +163,14 @@ def validate_args(args):
         raise ValueError("--intensity-samples must be at least two")
     if args.intensity_plot_anchors < 0:
         raise ValueError("--intensity-plot-anchors must be non-negative")
+    if args.dws_intensity_samples < 2:
+        raise ValueError("--dws-intensity-samples must be at least two")
+    if args.dws_intensity_horizon <= 0.0:
+        raise ValueError("--dws-intensity-horizon must be positive")
+    if args.dws_intensity_anchors_per_law < 1:
+        raise ValueError("--dws-intensity-anchors-per-law must be positive")
+    if args.dws_intensity_output_dir is not None and args.dataset != "dws":
+        raise ValueError("DWS intensity evaluation requires --dataset dws")
     intensity_values = (
         args.intensity_output_dir,
         args.intensity_ground_truth_dir,
@@ -492,6 +517,32 @@ def _evaluate_native_intensity(args, runner, adapted_dir, num_event_types):
     return summary
 
 
+def _evaluate_dws_native_intensity(args, runner, adapted_dir, num_event_types):
+    if args.dws_intensity_output_dir is None:
+        return None
+    if args.dataset != "dws":
+        raise ValueError("--dws-intensity-output-dir is only valid for --dataset dws")
+    tree_root = PROJECT_ROOT / "Datasets" / "DWS" / f"tree_{args.variant}"
+    adapter = EasyTPPIntensityAdapter(
+        runner.model,
+        num_event_types,
+        model_name="RMTPP",
+    )
+    _rows, summary = evaluate_dws_intensity_curves(
+        adapter,
+        read_records(Path(adapted_dir) / "test.json"),
+        output_dir=args.dws_intensity_output_dir,
+        parameters_path=tree_root / f"parameters_{args.variant}.json",
+        dataset_path=tree_root / f"hawkes_dataset_{args.variant}.csv",
+        model_name="RMTPP",
+        variant=args.variant,
+        horizon=args.dws_intensity_horizon,
+        samples=args.dws_intensity_samples,
+        anchors_per_law=args.dws_intensity_anchors_per_law,
+    )
+    return summary
+
+
 def train_and_test(args, paths, config_path, adapted_dir, num_event_types):
     pipeline = Config.build_from_yaml_file(
         str(config_path), experiment_id="RMTPP_train"
@@ -532,6 +583,9 @@ def train_and_test(args, paths, config_path, adapted_dir, num_event_types):
             writer.writeheader()
             writer.writerow(test_row)
         _evaluate_native_intensity(
+            args, runner, adapted_dir, num_event_types
+        )
+        _evaluate_dws_native_intensity(
             args, runner, adapted_dir, num_event_types
         )
         runner.model_wrapper.close_summary()
@@ -631,6 +685,7 @@ def train_and_test(args, paths, config_path, adapted_dir, num_event_types):
     persistent_checkpoint.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(checkpoint_path, persistent_checkpoint)
     _evaluate_native_intensity(args, runner, adapted_dir, num_event_types)
+    _evaluate_dws_native_intensity(args, runner, adapted_dir, num_event_types)
     runner.model_wrapper.close_summary()
     return rows, test_row
 

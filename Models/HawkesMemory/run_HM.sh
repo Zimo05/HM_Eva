@@ -328,7 +328,7 @@ start_memory() {
       "${cli_output_args[@]}" \
       "${controller_args[@]}" \
       --epochs "$training_epochs" \
-      --cold-start-epochs 5 \
+      --cold-start-epochs 15 \
       --z-dim 50 \
       --node-dim 128 \
       --memory-key-dim 64 \

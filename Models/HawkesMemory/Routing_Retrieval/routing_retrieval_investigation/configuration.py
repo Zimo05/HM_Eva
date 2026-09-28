@@ -8,11 +8,12 @@ from typing import Optional, Tuple
 class FrontierRoutingConfig:
     """Hyperparameters corresponding to the Wake construction equations.
 
-    ``frontier_budget`` limits the number of active experts in one
-    prediction. It does not limit the number of leaves in the stored tree.
+    ``frontier_budget`` is the Top-K leaf count in one prediction. It does
+    not limit the number of leaves in the stored tree.
     """
 
     frontier_budget: int = 4
+    # Historical adaptive-frontier setting; ignored by flat Top-K routing.
     frontier_min_experts: int = 2
     routing_temperature: float = 1.5
     # Deprecated compatibility field.  Search now uses the exact
@@ -21,8 +22,7 @@ class FrontierRoutingConfig:
     exploration_epsilon: float = 0.0
 
     semantic_weight: float = 1.0
-    # Deprecated compatibility field.  The fixed topology prior always has
-    # coefficient one so the Router cannot relearn or temper topology mass.
+    # Coefficient on the fixed leaf-prior log mass in flat Top-K routing.
     prior_weight: float = 1.0
     # Deprecated active-frontier-v1 fields retained for checkpoint loading.
     # They are deliberately ignored by the v2 routing hot path.
@@ -39,7 +39,8 @@ class FrontierRoutingConfig:
     # shallow-leaf advantage.
     target_leaf_mass: Optional[Tuple[float, ...]] = None
 
-    # U(i,n) = stopgrad(m(i,n)) * (G_n + lambda_c C(i,n)) - compute_cost.
+    # Historical expansion settings are accepted for checkpoint/CLI loading;
+    # the flat leaf router does not use them.
     confidence_weight: float = 0.25
     expansion_compute_cost: float = 0.05
     expansion_gain_decay: float = 0.95
@@ -54,12 +55,8 @@ class FrontierRoutingConfig:
     max_writes_per_sequence: int = 8
 
     def validate(self) -> None:
-        if self.frontier_budget < 2:
-            raise ValueError("frontier_budget must be at least 2")
-        if not 2 <= self.frontier_min_experts <= self.frontier_budget:
-            raise ValueError(
-                "frontier_min_experts must lie in [2, frontier_budget]"
-            )
+        if self.frontier_budget < 1:
+            raise ValueError("frontier_budget must be at least 1")
         if self.routing_temperature <= 0.0:
             raise ValueError("routing_temperature must be positive")
         if not 0.0 <= self.exploration_epsilon <= 1.0:

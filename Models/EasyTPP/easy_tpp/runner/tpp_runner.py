@@ -250,6 +250,9 @@ class TPPRunner(Runner):
                 )
                 if 'rmse' in time_metrics:
                     metrics_dict['rmse'] = time_metrics['rmse']
+                if time_mask.any():
+                    time_errors = epoch_pred[0][time_mask] - epoch_label[0][time_mask]
+                    metrics_dict['mae'] = float(np.mean(np.abs(time_errors)))
                 if 'acc' in type_metrics:
                     metrics_dict['acc'] = type_metrics['acc']
                 labels_type = epoch_label[1]

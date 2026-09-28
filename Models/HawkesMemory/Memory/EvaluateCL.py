@@ -501,16 +501,19 @@ def _tree_health(checkpoint: Path) -> dict[str, Any]:
     tree = inference.tree
     leaf_depths = [int(tree.nodes[node_id].depth) for node_id in tree.leaf_ids]
     memory_rows = sum(len(bank) for bank in tree.episodic_memory.banks.values())
-    def serialized_size(value: Any) -> int | None:
-        try:
-            buffer = io.BytesIO()
-            torch.save(value, buffer)
-            return int(buffer.tell())
-        except Exception:
-            return None
-
-    episodic_state = getattr(tree.episodic_memory, "state_dict", lambda: {})()
-    semantic_state = tree.semantic_theta_table()
+    try:
+        from MemoryResiduals.Accounting import persistent_memory_nbytes
+    except ModuleNotFoundError:
+        from Models.HawkesMemory.Memory.MemoryResiduals.Accounting import (
+            persistent_memory_nbytes,
+        )
+    sizes = persistent_memory_nbytes(tree)
+    raw_bytes = int(
+        getattr(tree.episodic_memory, "cumulative_admitted_raw_bytes", 0)
+    )
+    raw_count = int(
+        getattr(tree.episodic_memory, "cumulative_admitted_residuals", 0)
+    )
     return {
         "node_count": len(tree.all_node_ids),
         "leaf_count": len(tree.leaf_ids),
@@ -519,8 +522,17 @@ def _tree_health(checkpoint: Path) -> dict[str, Any]:
         "mean_leaf_depth": _mean(leaf_depths),
         "memory_rows": memory_rows,
         "episodic_rows": memory_rows,
-        "episodic_bytes": serialized_size(episodic_state),
-        "semantic_bytes": serialized_size(semantic_state),
+        **sizes,
+        "episodic_bytes": sizes["episodic_bytes"],
+        "cumulative_admitted_raw_bytes": raw_bytes,
+        "cumulative_admitted_residuals": raw_count,
+        "compression_ratio_bytes": (
+            raw_bytes / sizes["total_memory_bytes"]
+            if sizes["total_memory_bytes"] > 0 and raw_bytes > 0 else None
+        ),
+        "episodic_reduction": (
+            1.0 - memory_rows / raw_count if raw_count > 0 else None
+        ),
     }
 
 
@@ -1336,6 +1348,7 @@ def _hm_state_records(
     checkpoint_tasks: Sequence[int],
     tree_by_checkpoint: Mapping[int, Mapping[str, Any]],
     topology_events: Sequence[Mapping[str, Any]],
+    protocol: CLProtocol,
 ) -> list[HMStateRecord]:
     """Attach cumulative committed topology counts to checkpoint state."""
 
@@ -1347,6 +1360,11 @@ def _hm_state_records(
             and int(row.get("task_id", task_id)) <= int(task_id)
         ]
         tree = tree_by_checkpoint.get(task_id, {})
+        retained_regimes = sum(
+            protocol.first_seen.get(regime_id, 10**9) <= task_id
+            for regime_id in protocol.persistent_regimes
+        )
+        memory_bytes = tree.get("total_memory_bytes")
         rows.append(HMStateRecord(
             task_id=int(task_id),
             node_count=tree.get("node_count"),
@@ -1360,6 +1378,19 @@ def _hm_state_records(
                 row.get("action") == "topology_prune" for row in events
             ),
             nise=None,
+            total_memory_bytes=memory_bytes,
+            cumulative_admitted_raw_bytes=tree.get(
+                "cumulative_admitted_raw_bytes"
+            ),
+            cumulative_admitted_residuals=tree.get(
+                "cumulative_admitted_residuals"
+            ),
+            compression_ratio_bytes=tree.get("compression_ratio_bytes"),
+            bytes_per_retained_regime=(
+                memory_bytes / retained_regimes
+                if memory_bytes is not None and retained_regimes > 0 else None
+            ),
+            episodic_reduction=tree.get("episodic_reduction"),
         ))
     return rows
 
@@ -3035,14 +3066,18 @@ def _write_report(
                 "",
                 "Topology action counts come from committed transaction events; no leaf-count difference is inferred.",
                 "",
-                "| task | nodes | leaves | episodic rows | episodic bytes | semantic bytes | split | merge | prune | NISE |",
-                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+                "| task | nodes | leaves | episodic rows | episodic bytes | semantic bytes | total bytes | raw admitted bytes | byte CR | bytes/regime | split | merge | prune | NISE |",
+                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
             ])
             for row in hm_state:
                 lines.append(
                     f"| {row.get('task_id')} | {row.get('node_count')} | "
                     f"{row.get('leaf_count')} | {row.get('episodic_rows')} | "
                     f"{row.get('episodic_bytes')} | {row.get('semantic_bytes')} | "
+                    f"{row.get('total_memory_bytes')} | "
+                    f"{row.get('cumulative_admitted_raw_bytes')} | "
+                    f"{fmt(row.get('compression_ratio_bytes'), 3)} | "
+                    f"{fmt(row.get('bytes_per_retained_regime'), 1)} | "
                     f"{row.get('split_count')} | {row.get('merge_count')} | "
                     f"{row.get('prune_count')} | {fmt(row.get('nise'), 6)} |"
                 )
@@ -3850,6 +3885,7 @@ def main() -> None:
         selected_ids,
         tree_by_checkpoint,
         topology_events,
+        protocol,
     )
     metric_engine = CLMetricEngine(protocol)
     metric_report = metric_engine.evaluate(
@@ -3938,6 +3974,18 @@ def main() -> None:
             "episodic_rows": hm_state.get("episodic_rows"),
             "episodic_bytes": hm_state.get("episodic_bytes"),
             "semantic_bytes": hm_state.get("semantic_bytes"),
+            "total_memory_bytes": hm_state.get("total_memory_bytes"),
+            "cumulative_admitted_raw_bytes": hm_state.get(
+                "cumulative_admitted_raw_bytes"
+            ),
+            "cumulative_admitted_residuals": hm_state.get(
+                "cumulative_admitted_residuals"
+            ),
+            "compression_ratio_bytes": hm_state.get("compression_ratio_bytes"),
+            "bytes_per_retained_regime": hm_state.get(
+                "bytes_per_retained_regime"
+            ),
+            "episodic_reduction": hm_state.get("episodic_reduction"),
             "split_count": hm_state.get("split_count"),
             "merge_count": hm_state.get("merge_count"),
             "prune_count": hm_state.get("prune_count"),

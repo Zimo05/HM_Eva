@@ -111,6 +111,87 @@ class NodePrototypeStore(nn.Module):
         )
 
     @torch.no_grad()
+    def initialize_from_contexts(
+        self,
+        node_id: str,
+        contexts: Tensor,
+        weights: Tensor | None = None,
+        *,
+        fallback_node_id: str | None = None,
+    ) -> bool:
+        """Seed one node from its assigned episodic context vectors.
+
+        The initialized Welford state represents the weighted empirical
+        context mean.  If no compatible context is available, an optional
+        parent mean is copied as a deterministic routing fallback without
+        counting it as child evidence.
+        """
+        index = self.node_index
+        if node_id not in index:
+            raise KeyError(f"Unknown prototype node: {node_id}")
+        node_index = index[node_id]
+        contexts = torch.as_tensor(
+            contexts,
+            device=self.mean.device,
+            dtype=self.mean.dtype,
+        )
+        if contexts.ndim != 2:
+            raise ValueError("contexts must have shape [R, feature_dim]")
+
+        usable = contexts.size(-1) == self.feature_dim and contexts.size(0) > 0
+        if usable:
+            if weights is None:
+                context_weights = contexts.new_ones(contexts.size(0))
+            else:
+                context_weights = torch.as_tensor(
+                    weights,
+                    device=contexts.device,
+                    dtype=contexts.dtype,
+                ).reshape(-1)
+                if context_weights.shape != (contexts.size(0),):
+                    raise ValueError("weights must have shape [R]")
+            valid = torch.isfinite(contexts).all(dim=-1)
+            valid = valid & torch.isfinite(context_weights)
+            valid = valid & (context_weights > 0.0)
+            if bool(valid.any()):
+                contexts = contexts[valid]
+                context_weights = context_weights[valid]
+                total = context_weights.sum()
+                mean = (contexts * context_weights[:, None]).sum(dim=0) / total
+                centered = contexts - mean
+                m2 = (
+                    context_weights[:, None] * centered.square()
+                ).sum(dim=0)
+                self.count[node_index] = total
+                self.mean[node_index] = mean
+                self.m2[node_index] = m2
+                return True
+
+        if fallback_node_id is not None and fallback_node_id in index:
+            parent_index = index[fallback_node_id]
+            self.count[node_index] = 0.0
+            self.mean[node_index] = self.mean[parent_index]
+            self.m2[node_index].zero_()
+            return False
+
+        self.count[node_index] = 0.0
+        self.mean[node_index].zero_()
+        self.m2[node_index].zero_()
+        return False
+
+    @torch.no_grad()
+    def initialize_from_parent(self, node_id: str, parent_id: str) -> None:
+        """Copy a parent prototype as a no-evidence fallback for a new node."""
+        index = self.node_index
+        if node_id not in index or parent_id not in index:
+            raise KeyError("prototype parent and child must be active nodes")
+        child_index = index[node_id]
+        parent_index = index[parent_id]
+        self.count[child_index] = 0.0
+        self.mean[child_index] = self.mean[parent_index]
+        self.m2[child_index].zero_()
+
+    @torch.no_grad()
     def update_weighted(
         self,
         z: Tensor,

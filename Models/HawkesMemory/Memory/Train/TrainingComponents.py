@@ -182,7 +182,7 @@ class WakeObjectiveConfig:
     lambda_route_posterior: float = 0.0
     lambda_route_distill: float = 1.0
     lambda_route_mi: float = 0.2
-    # Weak local branch-load regularizer against the neutral structural prior.
+    # Weak dense all-leaf gate balance against the current target leaf prior.
     lambda_route_balance: float = 0.05
     lambda_route_mix: float = 0.0
     route_energy_temperature: float = 1.0
@@ -427,6 +427,9 @@ class TrainingConfig:
     sleep_every: int = 1
     evaluation_ablation: str = "full"
     seed: int = 0
+    # Optional global cap over serialized semantic offsets plus persistent
+    # episodic rows.  This is separate from the per-node safety capacity.
+    persistent_memory_budget_bytes: Optional[int] = None
     checkpoint_path: str = "checkpoints/memory_tree.pt"
     best_checkpoint_path: Optional[str] = None
     validation_history_path: Optional[str] = None

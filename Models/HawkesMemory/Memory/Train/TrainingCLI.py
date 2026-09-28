@@ -21,6 +21,7 @@ from DataSplit import file_sha256, load_split_manifest, select_sequences
 # distinguish an omitted option from an explicit override.
 _PERSISTENT_CONFIG_DESTS = frozenset({
     "seed",
+    "persistent_memory_budget_bytes",
     "learning_rate",
     "weight_decay",
     "grad_clip",
@@ -274,6 +275,7 @@ def _checkpoint_config_value(payload: Mapping, dest: str):
         "router_lr_scale",
         "evaluation_ablation",
         "validation_batch_size",
+        "persistent_memory_budget_bytes",
     }:
         return training.get(
             "controller_target_version"
@@ -898,8 +900,8 @@ def _parse_args(argv=None):
         type=float,
         default=0.05,
         help=(
-            "Weak anti-collapse weight for KL(mean sequence routing || "
-            "uniform leaves); set 0 to disable it."
+            "Weak dense gate weight for KL(mean sequence all-leaf routing || "
+            "target leaf prior); set 0 to disable it."
         ),
     )
     parser.add_argument(
@@ -1347,6 +1349,15 @@ def _parse_args(argv=None):
         type=int,
         default=128,
         help="Maximum episodic rows stored per node; persisted in checkpoints.",
+    )
+    parser.add_argument(
+        "--persistent-memory-budget-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Optional global byte cap over persistent semantic and episodic "
+            "memory; after Sleep, the lowest-retention episodic rows are evicted."
+        ),
     )
     parser.add_argument(
         "--tree-init-depth",
@@ -1840,6 +1851,11 @@ def main() -> None:
         raise ValueError("--sleep-every must be positive")
     if args.memory_capacity_per_node <= 0:
         raise ValueError("--memory-capacity-per-node must be positive")
+    if (
+        args.persistent_memory_budget_bytes is not None
+        and args.persistent_memory_budget_bytes <= 0
+    ):
+        raise ValueError("--persistent-memory-budget-bytes must be positive")
     distributed_runtime = DistributedRuntime.from_environment(
         device=args.device,
         backend=args.distributed_backend,
@@ -2698,6 +2714,9 @@ def main() -> None:
             topology_events_path=args.topology_events_path,
             router_lr_scale=args.router_lr_scale,
             seed=args.seed,
+            persistent_memory_budget_bytes=(
+                args.persistent_memory_budget_bytes
+            ),
             plot_after_training=not args.no_training_plots,
             training_metrics_path=args.training_metrics_path,
             training_plot_path=args.training_plot_path,

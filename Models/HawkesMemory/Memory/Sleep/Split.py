@@ -3473,6 +3473,9 @@ def commit_split(
     parameter_ids_before = {id(parameter) for parameter in tree.parameters()}
 
     tree.split_leaf(leaf_id, refresh=True, optimizer=None)
+    frontier_routing = getattr(tree, "frontier_routing", None)
+    if frontier_routing is not None:
+        frontier_routing._sync_topology()
     parent_node = tree.nodes[leaf_id]
     if parent_node.left is None or parent_node.right is None:
         raise RuntimeError("split did not create two children")
@@ -3494,9 +3497,9 @@ def commit_split(
     # The complete source Bank has already been assigned above. Rebase every
     # child group because the split writes new semantic parameters at every
     # affected node; the inherited parent bank is cleared by this partition.
-    if len(source_bank) > 0:
-        from Sleep.Merge import rebase_memory_to_new_leaf
+    from Sleep.Merge import rebase_memory_to_new_leaf
 
+    if len(source_bank) > 0:
         for child_index, child_id in enumerate((left_id, right_id)):
             indices = torch.nonzero(
                 child_assignments == child_index,
@@ -3517,6 +3520,11 @@ def commit_split(
                 node_id=child_id,
             )
 
+    # _sync_topology gives each child a deterministic copy of the parent
+    # prototype. The training owner replaces that fallback with z-space
+    # prototypes from the moved EventWindows after this transaction returns;
+    # Bank query keys are not guaranteed to share the router feature space.
+    if len(source_bank) > 0:
         parent_indices = torch.nonzero(
             parent_memory_mask, as_tuple=False
         ).flatten()

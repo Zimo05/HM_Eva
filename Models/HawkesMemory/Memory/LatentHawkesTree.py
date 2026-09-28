@@ -355,6 +355,9 @@ class HawkesTree(
             "frontier_theta": frontier_theta,
             "frontier_mass": frontier_mass,
             "frontier_mask": frontier_mask,
+            "dense_leaf_probabilities": (
+                output.frontier.dense_leaf_probabilities
+            ),
             "frontier_node_ids": tuple(frontier_ids),
             "frontier_node_indices": output.frontier_node_indices,
             "visited_node_indices": output.visited_node_indices,

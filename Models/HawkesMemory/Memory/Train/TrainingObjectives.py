@@ -498,11 +498,12 @@ class TrainingObjectivesMixin:
         sequence_count: int,
         posterior: Tensor | None = None,
     ) -> Dict[str, Tensor]:
-        """Local teacher/MI loss with exact sequence and node normalization.
+        """Top-K distillation and routing balance with sequence normalization.
 
         The old implementation first averaged rows within each node, averaged
         nodes within each sequence, then averaged sequences. Two-level segment
-        reductions reproduce that weighting without a Python node loop.
+        reductions reproduce that weighting without a Python node loop. The
+        global path also balances the full leaf gate before Top-K selection.
         """
         if posterior is not None:
             # Global prediction detaches routing weights to protect expert
@@ -520,14 +521,40 @@ class TrainingObjectivesMixin:
                 row_kl, sequence_index, sequence_count
             )
             zero = student.sum() * 0.0
+            balance_kl = zero
+            marginal_entropy = zero
+            dense_probability = memory_output.get(
+                "dense_leaf_probabilities"
+            )
+            if (
+                torch.is_tensor(dense_probability)
+                and dense_probability.ndim == 2
+                and dense_probability.size(0) == sequence_index.numel()
+            ):
+                dense_probability = dense_probability.float()
+                mean_probability = dense_probability.mean(dim=0).clamp_min(
+                    1e-12
+                )
+                mean_probability = mean_probability / mean_probability.sum()
+                topology = self.tree.frontier_routing._topology_tensors
+                leaf_prior = topology["leaf_mass"].to(mean_probability)
+                leaf_prior = leaf_prior.clamp_min(1e-12)
+                leaf_prior = leaf_prior / leaf_prior.sum().clamp_min(1e-12)
+                balance_kl = (
+                    mean_probability
+                    * (mean_probability.log() - leaf_prior.log())
+                ).sum()
+                marginal_entropy = -(
+                    mean_probability * mean_probability.log()
+                ).sum()
             empty_pair = student.new_empty(student.size(0), 0, 2)
             empty_row = student.new_empty(student.size(0), 0)
             return {
                 "distill": per_sequence.mean(),
                 "mutual_information": zero,
-                "balance_kl": zero,
+                "balance_kl": balance_kl,
                 "conditional_entropy": zero,
-                "marginal_entropy": zero,
+                "marginal_entropy": marginal_entropy,
                 "observed_gain": empty_row,
                 "teacher": empty_pair,
                 "energy_teacher": empty_pair,

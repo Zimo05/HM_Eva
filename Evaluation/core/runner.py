@@ -446,14 +446,18 @@ def _hm_continual_resume_checkpoint(
 def _hm_state_bytes(checkpoint: Path) -> dict[str, int]:
     result = {"checkpoint_bytes": checkpoint.stat().st_size}
     try:
-        import torch
-        try:
-            payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        except TypeError:
-            payload = torch.load(checkpoint, map_location="cpu")
-        buffer = io.BytesIO()
-        torch.save(payload.get("tree_state_dict", {}), buffer)
-        result["tree_and_episodic_bytes"] = buffer.tell()
+        _ensure_hm_module_paths()
+        from MemoryResiduals.Accounting import persistent_memory_nbytes
+        from Train.Inference import MemoryTreeInference
+
+        inference = MemoryTreeInference.from_checkpoint(
+            checkpoint, device="cpu"
+        )
+        sizes = persistent_memory_nbytes(inference.tree)
+        result.update(sizes)
+        # Keep the field consumed by the existing replay-buffer selector,
+        # while giving it the same canonical persistent-memory budget.
+        result["tree_and_episodic_bytes"] = sizes["total_memory_bytes"]
     except Exception as error:
         result["tree_and_episodic_bytes"] = checkpoint.stat().st_size
         result["measurement_warning"] = str(error)
@@ -478,6 +482,9 @@ def _continual_cl_config(args, protocol: CLProtocol, strategy: str) -> dict[str,
             "grad_clip": 5.0,
             "optimizer_impl": "auto",
             "sleep_every": 1,
+            "persistent_memory_budget_bytes": getattr(
+                args, "persistent_memory_budget_bytes", None
+            ),
             "evaluation_ablation": strategy,
             "controller_target_version": 5,
             "controller_train_heads": ["adapt", "retrieve", "write"],
@@ -1599,10 +1606,42 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
             _validate_continual_stage_manifest(
                 stage_manifest, protocol, config_path
             )
-            resource_manifest = {"format_version": 1, "measurement": "torch serialized tree_state_dict (semantic tree plus episodic buffers)", "stages": {}}
+            resource_manifest = {
+                "format_version": 3,
+                "measurement": (
+                    "persistent semantic-tree (node embeddings and Hawkes offsets) "
+                    "plus episodic tensor bytes; encoder/backbone/shared router/"
+                    "controller excluded"
+                ),
+                "stages": {},
+            }
             existing_resource = target / "resource_manifest.json"
             if existing_resource.exists():
-                resource_manifest = json.loads(existing_resource.read_text(encoding="utf-8"))
+                saved_resource = json.loads(
+                    existing_resource.read_text(encoding="utf-8")
+                )
+                saved_version = int(saved_resource.get("format_version", 1))
+                resource_manifest.update(saved_resource)
+                resource_manifest["format_version"] = 3
+                resource_manifest["measurement"] = (
+                    "persistent semantic-tree (node embeddings and Hawkes offsets) "
+                    "plus episodic tensor bytes; encoder/backbone/shared router/"
+                    "controller excluded"
+                )
+                resource_manifest.setdefault("stages", {})
+                if saved_version < 3:
+                    for prior_task in protocol.task_ids:
+                        prior_checkpoint = (
+                            target / "checkpoint"
+                            / f"task_{prior_task:02d}_best.pt"
+                        )
+                        if not prior_checkpoint.is_file():
+                            continue
+                        resource_manifest["stages"][str(prior_task)] = {
+                            **_hm_state_bytes(prior_checkpoint),
+                            "checkpoint": str(prior_checkpoint.resolve()),
+                            "checkpoint_role": "best",
+                        }
             for task in task_ids:
                 is_initial_task = previous is None
                 command, cwd, env = _continual_hm_command(

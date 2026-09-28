@@ -10,6 +10,7 @@ from Train.TrainingCheckpoint import atomic_torch_save
 from Train.TrainingComponents import *  # noqa: F403
 from Train.TrainingWakeSupport import ResidentSequenceStore
 from Train.DistributedRuntime import WakeTransactionBatch
+from MemoryResiduals.Accounting import project_episodic_memory_budget
 
 
 class _LazyFrontierRows:
@@ -2039,6 +2040,29 @@ class TrainingLoopMixin:
                         sync_payload or {}
                     )
                 distributed_runtime.barrier()
+            persistent_budget = getattr(
+                self.training_config,
+                "persistent_memory_budget_bytes",
+                None,
+            )
+            if (
+                sleep_result is None
+                and persistent_budget is not None
+                and not self.training_config.controller_only_finetune
+            ):
+                # The no_sleep ablation skips the Sleep state machine, but
+                # fixed-budget comparisons still need the same global byte
+                # cap. In distributed mode all ranks have synchronized wake
+                # state here and apply the deterministic projection locally.
+                projection = project_episodic_memory_budget(
+                    self.tree,
+                    int(persistent_budget),
+                )
+                self.sleep_state["last_memory_budget_projection"] = projection
+                self.sleep_state["last_memory_count"] = sum(
+                    len(bank)
+                    for bank in self.tree.episodic_memory.banks.values()
+                )
             utility_rows = self.controller_utility_replay.rows()
             utilities_by_action = []
             for action_index in range(4):

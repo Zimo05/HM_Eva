@@ -2416,6 +2416,7 @@ class MemoryTreeInference:
         precomputed_memory_query: Optional[Tensor] = None,
         compact: bool = False,
         capture_event_predictions: bool = False,
+        capture_memory_components: bool = False,
     ) -> Dict[str, Any]:
         """Process observed events causally using only the wake mechanism.
 
@@ -2792,7 +2793,7 @@ class MemoryTreeInference:
                     )
 
             if materialize_events:
-                outputs.append({
+                event_row = {
                     "event_index": event_index,
                     "nll": event_nll,
                     "predicted_type": predicted_type,
@@ -2876,7 +2877,28 @@ class MemoryTreeInference:
                     "write_promotion_count": 0,
                     "write_retrieved_later": False,
                     "write_beneficial": False,
-                })
+                }
+                if capture_memory_components:
+                    frontier_count = len(memory_output["frontier_node_ids"][0])
+                    routing_weights = memory_output["r"][0, :frontier_count]
+                    semantic_components = memory_output[
+                        "frontier_semantic_theta"
+                    ][0, :frontier_count]
+                    episodic_components = memory_output[
+                        "frontier_episodic_delta"
+                    ][0, :frontier_count]
+                    event_row["semantic_theta_used"] = (
+                        routing_weights.unsqueeze(-1) * semantic_components
+                    ).sum(dim=0).detach().cpu()
+                    event_row["episodic_delta_used"] = (
+                        routing_weights.unsqueeze(-1)
+                        * episodic_components
+                        * action_probabilities[1].detach()
+                    ).sum(dim=0).detach().cpu()
+                    event_row["working_delta_used"] = (
+                        working_delta.detach().reshape(-1).cpu()
+                    )
+                outputs.append(event_row)
             else:
                 # These are the only fields mutated by delayed write/admission
                 # bookkeeping after the event itself has been scored.

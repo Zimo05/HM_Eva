@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -120,6 +120,11 @@ class TreeEpisodicMemory(nn.Module):
         # Logical chronological event counter. Advancing age is O(1); each
         # bank stores the clock at which its age tensor was last materialized.
         self._age_clock = 0
+        # Cumulative evidence admitted over the model lifetime. This is
+        # bookkeeping, not retained memory, and is persisted separately from
+        # the canonical byte count used for the budget.
+        self.cumulative_admitted_raw_bytes = 0
+        self.cumulative_admitted_residuals = 0
         self.register_buffer(
             "_device_anchor",
             torch.empty(0, device=torch.device(device)),
@@ -473,7 +478,7 @@ class TreeEpisodicMemory(nn.Module):
                 )
 
             law_key = law_key_builder(delta_theta)
-        return bank.add(
+        result = bank.add(
             key=key,
             delta_theta=delta_theta,
             window=window,
@@ -484,6 +489,10 @@ class TreeEpisodicMemory(nn.Module):
             law_key=law_key,
             law_key_builder=law_key_builder,
         )
+        self._record_admitted_raw_evidence(
+            result, key, delta_theta, window
+        )
+        return result
 
     def add_memory_batch(
         self,
@@ -518,7 +527,7 @@ class TreeEpisodicMemory(nn.Module):
 
             if law_keys is None:
                 law_keys = law_key_builder(delta_theta)
-        return bank.add_batch(
+        results = bank.add_batch(
             keys=keys,
             delta_theta=delta_theta,
             windows=windows,
@@ -528,6 +537,49 @@ class TreeEpisodicMemory(nn.Module):
             law_keys=law_keys,
             law_key_builder=law_key_builder,
         )
+        if delta_theta.ndim == 1:
+            delta_rows = [delta_theta] * len(results)
+        else:
+            delta_rows = list(delta_theta)
+        for index, result in enumerate(results):
+            window = None if windows is None else windows[index]
+            self._record_admitted_raw_evidence(
+                result, keys[index], delta_rows[index], window
+            )
+        return results
+
+    @staticmethod
+    def _raw_evidence_bytes(key: Tensor, delta_theta: Tensor, window) -> int:
+        total = int(key.numel() * key.element_size())
+        total += int(delta_theta.numel() * delta_theta.element_size())
+        if window is not None:
+            total += sum(
+                int(value.numel() * value.element_size())
+                for value in (
+                    window.times,
+                    window.types,
+                    window.T,
+                    window.event_time_features,
+                    window.hawkes_history_stats,
+                    window.hawkes_interval_stats,
+                )
+                if torch.is_tensor(value)
+            )
+        return total
+
+    def _record_admitted_raw_evidence(
+        self,
+        result: Mapping[str, Any],
+        key: Tensor,
+        delta_theta: Tensor,
+        window,
+    ) -> None:
+        if result.get("action") not in {"append", "refresh"}:
+            return
+        self.cumulative_admitted_raw_bytes += self._raw_evidence_bytes(
+            key, delta_theta, window
+        )
+        self.cumulative_admitted_residuals += 1
 
     def read_nodes(
         self,
@@ -1677,7 +1729,7 @@ class TreeEpisodicMemory(nn.Module):
         """Save effective ages and adaptive admission state."""
         for bank in self.banks.values():
             bank._ensure_prototype_state()
-        return {
+        bank_states = {
             node_id: {
                 "keys": bank.keys.detach().cpu(),
                 "context_keys": bank.context_keys.detach().cpu(),
@@ -1747,8 +1799,27 @@ class TreeEpisodicMemory(nn.Module):
             }
             for node_id, bank in self.banks.items()
         }
+        return {
+            "__persistent_accounting__": {
+                "cumulative_admitted_raw_bytes": int(
+                    self.cumulative_admitted_raw_bytes
+                ),
+                "cumulative_admitted_residuals": int(
+                    self.cumulative_admitted_residuals
+                ),
+            },
+            **bank_states,
+        }
 
     def set_extra_state(self, state) -> None:
+        state = dict(state) if isinstance(state, Mapping) else {}
+        accounting = state.pop("__persistent_accounting__", {})
+        self.cumulative_admitted_raw_bytes = int(
+            accounting.get("cumulative_admitted_raw_bytes", 0)
+        )
+        self.cumulative_admitted_residuals = int(
+            accounting.get("cumulative_admitted_residuals", 0)
+        )
         self.banks = {}
         # Stored ages are already effective at checkpoint time; rebasing the
         # logical clock to zero preserves all future age differences.

@@ -64,6 +64,9 @@ def _event_prediction_scope(args: argparse.Namespace) -> str:
 # ``semantic_only`` is a mechanism ablation and is not a fourth protocol.
 MEMORY_VIEWS = {
     "full": dict(episodic=True, working_override=None),
+    # Episodic retrieval is isolated from Working Memory for lifecycle
+    # diagnostics that attribute the two terms independently.
+    "episodic_only": dict(episodic=True, working_override=False),
     "no_episodic": dict(episodic=False, working_override=None),
     "semantic_only": dict(episodic=False, working_override=False),
 }

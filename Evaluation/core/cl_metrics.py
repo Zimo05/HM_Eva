@@ -66,6 +66,12 @@ class HMStateRecord:
     merge_count: int | None
     prune_count: int | None
     nise: float | None
+    total_memory_bytes: int | None = None
+    cumulative_admitted_raw_bytes: int | None = None
+    cumulative_admitted_residuals: int | None = None
+    compression_ratio_bytes: float | None = None
+    bytes_per_retained_regime: float | None = None
+    episodic_reduction: float | None = None
 
 
 @dataclass(frozen=True)

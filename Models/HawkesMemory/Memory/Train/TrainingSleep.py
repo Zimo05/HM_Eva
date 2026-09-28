@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import inspect
+import csv
 from dataclasses import replace
+from pathlib import Path
 
 from Train.TrainingComponents import *  # noqa: F403
 from Train.TrainingComponents import (
     _differentiable_merge_settings,
     _topology_prune_settings,
 )
+from MemoryResiduals.Accounting import project_episodic_memory_budget
 
 
 class TrainingSleepMixin:
@@ -932,6 +935,48 @@ class TrainingSleepMixin:
             start_indices,
         ]
 
+    @torch.no_grad()
+    def _seed_split_router_prototypes(self, actions) -> None:
+        """Initialize newly split leaves from their assigned episodic z states."""
+        prototype_store = getattr(
+            getattr(self.tree, "frontier_routing", None), "prototypes", None
+        )
+        if prototype_store is None:
+            return
+        for action in actions:
+            if action.get("action") != "split":
+                continue
+            parent_id = action["node"]
+            for child_id in action["children"]:
+                bank = self.tree.episodic_memory.get_bank(child_id)
+                bank._ensure_prototype_state()
+                rows = [
+                    index
+                    for index, window in enumerate(bank.windows[: len(bank)])
+                    if window is not None
+                ]
+                if rows:
+                    windows = [bank.windows[index] for index in rows]
+                    contexts = self._encode_topology_prune_windows(windows)
+                    row_indices = torch.tensor(
+                        rows, dtype=torch.long, device=bank.device
+                    )
+                    weights = bank.support.index_select(0, row_indices).to(
+                        device=contexts.device,
+                        dtype=contexts.dtype,
+                    ).clamp_min(0.0)
+                else:
+                    contexts = prototype_store.mean.new_empty(
+                        0, prototype_store.feature_dim
+                    )
+                    weights = contexts.new_empty(0)
+                prototype_store.initialize_from_contexts(
+                    child_id,
+                    contexts,
+                    weights,
+                    fallback_node_id=parent_id,
+                )
+
     def _evaluate_topology_prune(
         self,
         *,
@@ -1160,6 +1205,41 @@ class TrainingSleepMixin:
                 state=self.sleep_state.setdefault("light_index", {}),
                 protected_leaf_ids=protected_probes.keys(),
             )
+            consistency_rows = light_result.get(
+                "consolidation_consistency", []
+            )
+            if consistency_rows:
+                checkpoint_path = Path(
+                    self.training_config.checkpoint_path
+                )
+                consistency_path = checkpoint_path.parent / (
+                    "consolidation_consistency.csv"
+                )
+                fields = (
+                    "task", "epoch", "leaf_id", "absorbed", "bank_rows",
+                    "semantic_shift_norm", "D_cons_mean", "D_cons_max",
+                    "delta_replay_nll", "coherence", "alpha",
+                )
+                consistency_path.parent.mkdir(parents=True, exist_ok=True)
+                write_header = not consistency_path.exists()
+                with consistency_path.open(
+                    "a", newline="", encoding="utf-8"
+                ) as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fields)
+                    if write_header:
+                        writer.writeheader()
+                    for row in consistency_rows:
+                        writer.writerow({
+                            "task": getattr(
+                                self.training_config, "cl_task_id", None
+                            ),
+                            "epoch": epoch_label,
+                            **{
+                                key: row.get(key)
+                                for key in fields
+                                if key not in {"task", "epoch"}
+                            },
+                        })
             self.sleep_state["last_light_epoch"] = epoch_label
             sleep_progress.set_postfix(
                 phase="light",
@@ -1465,6 +1545,9 @@ class TrainingSleepMixin:
                     statistics_prepared=True,
                     protected_leaf_ids=protected_probes,
                 )
+                self._seed_split_router_prototypes(
+                    transaction["actions"]
+                )
                 topology_settings = _topology_prune_settings(
                     self.structure_config.topology_prune_kwargs
                 )
@@ -1538,6 +1621,16 @@ class TrainingSleepMixin:
             )
             sleep_progress.update(1)
 
+            persistent_budget = getattr(
+                self.training_config,
+                "persistent_memory_budget_bytes",
+                None,
+            )
+            memory_budget_projection = None
+            if persistent_budget is not None:
+                memory_budget_projection = project_episodic_memory_budget(
+                    self.tree, int(persistent_budget)
+                )
             residual_energy = float(light_result["residual_energy"])
             memory_count = sum(
                 len(bank)
@@ -1558,6 +1651,7 @@ class TrainingSleepMixin:
             "predictive_residual_utility": float(residual_energy),
             "new_memories": int(new_memories),
             "light": light_result,
+            "memory_budget_projection": memory_budget_projection,
             "deep_pressure": pressure,
             "deep_gate": {
                 "probability": pressure["value"],

@@ -162,6 +162,15 @@ def continual_args(*, replay: bool = False) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--persistent-memory-budget-bytes",
+        type=int,
+        default=None,
+        help=(
+            "optional global cap for persistent semantic plus episodic tensor "
+            "bytes, enforced after each Sleep transaction"
+        ),
+    )
+    parser.add_argument(
         "--task-end",
         type=int,
         default=None,
@@ -193,6 +202,11 @@ def continual_args(*, replay: bool = False) -> argparse.Namespace:
     args = _parse(parser)
     if args.memory_capacity_per_node is not None and args.memory_capacity_per_node <= 0:
         parser.error("--memory-capacity-per-node must be positive")
+    if (
+        args.persistent_memory_budget_bytes is not None
+        and args.persistent_memory_budget_bytes <= 0
+    ):
+        parser.error("--persistent-memory-budget-bytes must be positive")
     if args.event_prediction_scope is None:
         args.event_prediction_scope = (
             "all" if args.save_event_predictions else "none"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -44,6 +43,8 @@ class PackedFrontierBatch:
     expanded_semantic_score: Tensor
     expanded_mask: Tensor
     expansion_utility: Tensor
+    # Full all-leaf gate, computed before the sparse Top-K selection.
+    dense_leaf_probabilities: Tensor
 
     def slice(self, start: int, end: int) -> "PackedFrontierBatch":
         """Return a view over a contiguous prefix-row interval."""
@@ -335,7 +336,12 @@ class FrontierRoutingRetrieval(nn.Module):
         node_ids = tuple(self.tree.all_node_ids)
         if node_ids == self._topology_signature:
             return
+        old_ids = set(self._topology_signature)
         self.prototypes.sync_nodes(node_ids)
+        for leaf_id in set(self.tree.leaf_ids).difference(old_ids):
+            parent_id = self.tree.nodes[leaf_id].parent
+            if parent_id is not None:
+                self.prototypes.initialize_from_parent(leaf_id, parent_id)
         active = set(node_ids)
         active_leaves = set(self.tree.leaf_ids)
         self.probe_leaf_visits = {
@@ -376,15 +382,11 @@ class FrontierRoutingRetrieval(nn.Module):
             dtype=torch.long,
             device=device,
         )
-        cold_start = []
-        for leaf_id in leaf_ids:
-            seed = int.from_bytes(
-                hashlib.sha256(leaf_id.encode()).digest()[:8], "big"
-            ) % (2**63 - 1)
-            generator = torch.Generator(device="cpu").manual_seed(seed)
-            cold_start.append(torch.randn(self.tree.z_dim, generator=generator))
-        cold_start_table = F.normalize(
-            torch.stack(cold_start).to(device=device), dim=-1
+        # An unseen node has no empirical direction. A zero prototype gives a
+        # deterministic tie until its parent context or its own assignments
+        # provide evidence; ID-derived random directions can starve new leaves.
+        cold_start_table = torch.zeros(
+            len(leaf_ids), self.tree.z_dim, device=device
         )
         if set(self._target_leaf_mass_by_id) != set(leaf_ids):
             raise RuntimeError(
@@ -502,13 +504,11 @@ class FrontierRoutingRetrieval(nn.Module):
         leaf_count = leaf_index.numel()
         selected_count = min(width, leaf_count)
         leaf_mean = self.prototypes.mean.index_select(0, leaf_index).to(z_t)
-        leaf_count_seen = self.prototypes.count.index_select(0, leaf_index)
-        # A fixed, ID-derived direction breaks the all-zero prototype tie.
-        # It is replaced by the empirical mean at the first assignment.
+        # An inherited parent mean is a deterministic fallback even though it
+        # is not counted as child evidence yet. Otherwise the all-zero vector
+        # remains a deterministic tie until this leaf receives assignments.
         cold_start = topology["cold_start_leaf_prototype"].to(z_t)
-        has_prototype = (leaf_count_seen > 0) & (
-            leaf_mean.norm(dim=-1) > 1e-12
-        )
+        has_prototype = leaf_mean.norm(dim=-1) > 1e-12
         prototype = torch.where(
             has_prototype.unsqueeze(-1), leaf_mean, cold_start
         )
@@ -518,6 +518,7 @@ class FrontierRoutingRetrieval(nn.Module):
             + self.config.prior_weight
             * topology["leaf_mass"].to(z_t).clamp_min(1e-12).log()
         )
+        dense_leaf_probabilities = F.softmax(score, dim=-1)
         selected_score, selected_leaf = score.topk(selected_count, dim=-1)
         node_indices = leaf_index[selected_leaf]
         mass = F.softmax(selected_score, dim=-1)
@@ -571,6 +572,7 @@ class FrontierRoutingRetrieval(nn.Module):
             expanded_semantic_score=z_t.new_empty(batch, 0, 2),
             expanded_mask=torch.empty(batch, 0, dtype=torch.bool, device=device),
             expansion_utility=z_t.new_empty(batch, 0),
+            dense_leaf_probabilities=dense_leaf_probabilities,
         )
 
     def route(

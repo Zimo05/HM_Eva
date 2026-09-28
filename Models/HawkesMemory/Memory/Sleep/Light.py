@@ -858,6 +858,7 @@ def run_light_sleep(
         reconciliation["raw_energy_denominator"]
     )
     absorbed = 0
+    consolidation_consistency: list[dict[str, object]] = []
     probe_results: Dict[str, Dict[str, Any]] = {}
     probe_protected: set[str] = set()
     probed_leaves: set[str] = set()
@@ -955,10 +956,66 @@ def run_light_sleep(
             chosen = proposal.selected_direction
             if not protected_by_probe:
                 theta_new = proposal.theta_h0
+                delta_before = bank.deltas.detach().clone()
+                effective_before = theta_old.unsqueeze(0) + delta_before
+                replay_nll_before: list[float] = []
+                for memory_index, window in enumerate(bank.windows):
+                    if window is None:
+                        continue
+                    replay_nll_before.append(
+                        -float(replay_log_likelihood(
+                            window=window,
+                            theta=effective_before[memory_index],
+                            hawkes_ll=hawkes_ll,
+                            decays=hawkes_ll.decays,
+                            normalize_by_events=True,
+                        ).detach().cpu())
+                    )
                 tree.set_semantic_theta(leaf_id, theta_new)
                 # Exact rebasing:
                 # theta_new + delta_new == theta_old + delta_old.
                 bank.deltas.add_(theta_old - theta_new)
+                effective_after = theta_new.unsqueeze(0) + bank.deltas
+                relative_drift = (
+                    (effective_after - effective_before).norm(dim=-1)
+                    / (effective_before.norm(dim=-1) + settings.eps)
+                )
+                replay_nll_after: list[float] = []
+                for memory_index, window in enumerate(bank.windows):
+                    if window is None:
+                        continue
+                    replay_nll_after.append(
+                        -float(replay_log_likelihood(
+                            window=window,
+                            theta=effective_after[memory_index],
+                            hawkes_ll=hawkes_ll,
+                            decays=hawkes_ll.decays,
+                            normalize_by_events=True,
+                        ).detach().cpu())
+                    )
+                replay_nll_delta = (
+                    sum(after - before for before, after in zip(
+                        replay_nll_before, replay_nll_after
+                    )) / max(len(replay_nll_before), 1)
+                    if len(replay_nll_before) == len(replay_nll_after)
+                    else float("nan")
+                )
+                consistency = {
+                    "leaf_id": leaf_id,
+                    "absorbed": True,
+                    "bank_rows": len(bank),
+                    "semantic_shift_norm": float(
+                        (theta_new - theta_old).norm().item()
+                    ),
+                    "D_cons_mean": float(relative_drift.mean().item())
+                    if relative_drift.numel() else 0.0,
+                    "D_cons_max": float(relative_drift.max().item())
+                    if relative_drift.numel() else 0.0,
+                    "delta_replay_nll": replay_nll_delta,
+                    "coherence": float(chosen.coherence.item()),
+                    "alpha": float(proposal.alpha),
+                }
+                consolidation_consistency.append(consistency)
                 _clear_optimizer_state(
                     optimizer,
                     tree.semantic_offset[leaf_id],
@@ -976,6 +1033,7 @@ def run_light_sleep(
                     "semantic_shift_norm": float(
                         (theta_new - theta_old).norm().item()
                     ),
+                    "consolidation_consistency": consistency,
                 })
             elif probe_result is not None:
                 record.update({
@@ -1092,6 +1150,7 @@ def run_light_sleep(
         ),
         "bank_mode_probes": probe_results,
         "absorbed_leaves": absorbed,
+        "consolidation_consistency": consolidation_consistency,
         "memory_reconciliation": reconciliation,
         "leaf_records": leaf_records,
     }

@@ -302,8 +302,12 @@ mean event prediction NLL
 + route_posterior_weight * KL(q+ || m-)
 + route_distill_weight * local branch posterior distillation
 - route_mi_weight * local branch MI
-+ route_balance_weight * KL(local marginal || neutral structural prior).
++ route_balance_weight * KL(mean all-leaf gate || target leaf prior).
 ```
+
+The balance term uses dense leaf probabilities computed before Top-K and
+averages them across all event rows in the batch. It therefore sends a weak
+anti-collapse gradient to leaves omitted from the sparse prediction frontier.
 
 The local MI term rewards high branch marginal entropy and low conditional
 entropy without comparing heterogeneous frontier slots, so it does not make every sequence uniformly
@@ -557,6 +561,91 @@ python -m Train.Inference \
 ```
 
 Use `--no-write` for evaluation that must not mutate episodic memory.
+
+## Persistent memory accounting and continual diagnostics
+
+`--persistent-memory-budget-bytes B` sets one global cap over serialized
+persistent semantic-tree tensors (node embeddings and Hawkes offsets) and
+episodic tensors. Encoder, Hawkes backbone, shared router, controller,
+optimizer state, and rebuildable append caches are outside this budget. After
+each Sleep transaction, the trainer ranks residual rows
+across every node using write quality, support, retrieval usage, staleness, and
+age, then evicts the lowest-retention rows until the byte cap is met. The
+projection is recorded in the Sleep result; a cap smaller than semantic state
+fails with the required byte counts. The `no_sleep` ablation applies the same
+projection at each epoch boundary, so disabling consolidation does not disable
+the fixed-budget constraint.
+
+For compression, first run a separate full-HMT pilot and freeze its typical
+final persistent-byte count as `B*`. Run every method and seed with the same
+fixed budgets `{0.5B*, 0.75B*, 1.0B*, 1.5B*}`; do not retune budgets per seed.
+Use at least three seeds and compare `full`, `flat_memory`, `no_sleep`, and
+`no_merge_prune`. After runs finish, aggregate observed final bytes, CL-NLL,
+and average forgetting and draw the memory Pareto figure:
+
+```bash
+python Evaluation/compare_memory_budgets.py \
+  --conditions full flat_memory no_sleep no_merge_prune \
+  --seeds 7 17 27 \
+  --budget-run 0.5B=budget_0_5B \
+  --budget-run 0.75B=budget_0_75B \
+  --budget-run 1.0B=budget_1_0B \
+  --budget-run 1.5B=budget_1_5B
+```
+
+Each budget run directory must use the given run ID under every condition and
+seed. The script writes per-seed and mean/std CSVs plus a two-panel
+CL-NLL/forgetting versus measured persistent-memory figure.
+
+Light Sleep writes `consolidation_consistency.csv` beside the checkpoint. For
+each absorbed leaf it reports semantic shift, normalized effective-law drift
+before/after rebase (`D_cons_mean` and `D_cons_max`), and the NLL change on the
+same stored replay windows (`delta_replay_nll`). Exact bookkeeping should keep
+both consistency values near zero while semantic parameters move.
+
+Existing CL checkpoints can be post-processed without invoking training:
+
+```bash
+python Evaluation/evaluate_continual_HM_timescales.py \
+  --data-root Datasets/CL/hm_continual_v2 \
+  --checkpoint-dir path/to/checkpoint \
+  --output-dir path/to/memory_lifecycle
+```
+
+The entry point selects a recurrent anchor from `benchmark_manifest.json` and
+records semantic-only, semantic-plus-episodic, and full fast-adaptation NLL,
+memory gains, parameter migration, and manifest-defined recurrence boundaries.
+
+## Real chronological Taobao stream
+
+The cached Taobao `train.json`, `dev.json`, and `test.json` contain user-local
+relative clocks and cannot recover global chronology. Build the real stream
+from an event-level source with absolute timestamps and user/event columns:
+
+```bash
+python Evaluation/prepare_taobao_chronological_cl.py \
+  --raw-events path/to/taobao_events.csv \
+  --user-column user_id --timestamp-column timestamp \
+  --event-type-column event_type \
+  --output-dir path/to/taobao_chronological
+```
+
+The builder orders events on one UTC clock, groups sparse adjacent days into
+contiguous windows, and creates chronological 70/10/20 splits without random
+shuffling. Train one checkpoint per window in order:
+
+```bash
+python Evaluation/train_continual_HM_taobao_chronological.py \
+  --data-dir path/to/taobao_chronological \
+  --output-dir path/to/taobao_hm_run \
+  --seed 7 --epochs 60 --device cuda:0
+```
+
+The runner resumes each window from the immediately previous best checkpoint
+and supports `--persistent-memory-budget-bytes`. Then
+`evaluate_continual_HM_taobao_chronological.py` produces the
+checkpoint-by-past-window NLL matrix, CL-NLL, BWT, forgetting, and current-window
+adaptation gain. It uses no synthetic law labels or ground-truth regimes.
 
 ## Tests
 

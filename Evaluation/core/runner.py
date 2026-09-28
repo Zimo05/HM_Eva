@@ -1478,6 +1478,17 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
 
 
 def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> Path:
+    if (
+        model == "HM"
+        and strategy == "flat_memory"
+        and getattr(args, "memory_capacity_per_node", None) is None
+    ):
+        raise ValueError(
+            "flat_memory requires an explicit storage-matched "
+            "--memory-capacity-per-node; first run "
+            "Evaluation/compare_hierarchy_flat.py --recommend-capacity "
+            "for the Stage A HMT results."
+        )
     spec = JobSpec(dataset="continual", model=model, condition=strategy, kind="continual", script=script)
     data_root = continual_root(args.data_root)
     protocol = continual_protocol(data_root)

@@ -1122,20 +1122,29 @@ class TrainingSleepMixin:
                     "bank_mode_probe_release_once", ()
                 )
             )
+            flat_memory = (
+                getattr(
+                    self.training_config,
+                    "evaluation_ablation",
+                    "full",
+                )
+                == "flat_memory"
+            )
             self._sync_split_modules()
 
             all_structural_probes: Dict[str, Dict[str, Any]] = {}
-            for leaf_id in self.tree.leaf_ids:
-                if leaf_id in released_once:
-                    continue
-                bank = self.tree.episodic_memory.get_bank(leaf_id)
-                probe = self._probe_bank_modes_for_split(
-                    leaf_id,
-                    bank,
-                    max_evidence=self.sleep_config.deep_evidence_budget,
-                )
-                if probe is not None:
-                    all_structural_probes[leaf_id] = probe
+            if not flat_memory:
+                for leaf_id in self.tree.leaf_ids:
+                    if leaf_id in released_once:
+                        continue
+                    bank = self.tree.episodic_memory.get_bank(leaf_id)
+                    probe = self._probe_bank_modes_for_split(
+                        leaf_id,
+                        bank,
+                        max_evidence=self.sleep_config.deep_evidence_budget,
+                    )
+                    if probe is not None:
+                        all_structural_probes[leaf_id] = probe
             bank_mode_probes = all_structural_probes
             protected_probes = {
                 leaf_id: probe
@@ -1181,10 +1190,11 @@ class TrainingSleepMixin:
                 cycle_count % self.sleep_config.deep_probe_interval == 0
             )
             evaluation_needed = bool(
-                deep_triggered or probe_due or protected_probes
+                not flat_memory
+                and (deep_triggered or probe_due or protected_probes)
             )
             deep_execution_requested = bool(
-                deep_triggered or protected_probes
+                not flat_memory and (deep_triggered or protected_probes)
             )
             pressure.pop("tensor")
             pressure["value"] = float(

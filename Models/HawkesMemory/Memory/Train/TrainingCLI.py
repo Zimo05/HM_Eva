@@ -1612,13 +1612,9 @@ def _apply_evaluation_ablation(trainer, name: str) -> None:
         # Keep Light Sleep active so the root's semantic parameters continue
         # to consolidate.  Only mechanisms that change the semantic topology
         # are disabled for this baseline.
-        trainer.sleep_config.deep_probe_interval = (
-            trainer.training_config.epochs + 1
-        )
+        trainer.sleep_config.deep_probe_interval = 10**12
         trainer.controller.split_enabled.fill_(False)
-        trainer.structure_config.prune_warmup_epochs = (
-            trainer.training_config.epochs + 1
-        )
+        trainer.structure_config.prune_warmup_epochs = 10**12
         trainer.structure_config.merge_kwargs["min_replay"] = 10**12
     elif name == "heuristic_controller":
         trainer.controller.set_calibration_thresholds(0.5, 0.5, 0.75)

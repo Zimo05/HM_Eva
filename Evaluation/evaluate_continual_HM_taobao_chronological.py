@@ -1,8 +1,8 @@
 """Evaluate saved HM checkpoints on current and past Taobao time windows.
 
 This is a checkpoint-evaluation utility, not a trainer. It expects the output
-of ``prepare_taobao_chronological_cl.py`` and evaluates each checkpoint only
-on windows that have already occurred at that checkpoint boundary.
+of ``prepare_taobao_chronological_cl.py`` and evaluates each checkpoint on all
+past/current windows plus one next-window test-only adaptation probe.
 """
 
 from __future__ import annotations
@@ -116,6 +116,23 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _evaluation_windows(
+    checkpoint_task: int,
+    available_window_ids: set[int],
+) -> list[int]:
+    """Return seen test windows plus one next-window adaptation probe."""
+
+    windows = sorted(
+        window_id
+        for window_id in available_window_ids
+        if window_id <= checkpoint_task
+    )
+    next_window = checkpoint_task + 1
+    if next_window in available_window_ids:
+        windows.append(next_window)
+    return windows
 
 
 def _summaries(
@@ -240,7 +257,7 @@ def main() -> None:
         _canonical, _protocol, _view, _settings, inference, static_cache = (
             _load_variant_inference(checkpoint, "frozen/full", args.device)
         )
-        for window_id in sorted(window for window in windows if window <= checkpoint_task):
+        for window_id in _evaluation_windows(checkpoint_task, set(windows)):
             test_path = data_dir / f"window_{window_id:03d}" / "test.csv"
             sequences = _read_sequences(test_path, args.max_sequences)
             result = _evaluate(
@@ -251,6 +268,11 @@ def main() -> None:
                 "checkpoint_task": checkpoint_task,
                 "evaluation_window": window_id,
                 "window_label": label,
+                "evaluation_role": (
+                    "pre_update_adaptation_probe"
+                    if window_id > checkpoint_task
+                    else "post_update_test"
+                ),
                 "checkpoint": str(checkpoint.resolve()),
                 **result,
             }
@@ -274,13 +296,20 @@ def main() -> None:
         "window_count": len(windows),
         "training_invoked": False,
         "ground_truth_regimes_used": False,
-        "evaluation": "frozen/full NLL on each current and past chronological test window",
+        "evaluation": (
+            "frozen/full NLL on each past/current chronological test window, "
+            "plus one next-window pre-update adaptation probe"
+        ),
         "metrics": {
             "cl_nll": "scored-event-weighted mean NLL over windows r <= checkpoint t",
             "average_bwt": "mean(NLL(C_r,D_r) - NLL(C_t,D_r)); positive means later checkpoint improved",
             "average_forgetting": "mean(NLL(C_t,D_r) - best prior post-learning NLL on D_r)",
             "adaptation_gain_nll": "NLL(C_(t-1),D_t) - NLL(C_t,D_t); positive means adaptation improved",
         },
+        "adaptation_probe": (
+            "The upper-diagonal C_t on D_(t+1) matrix row is a pre-update "
+            "probe only and is excluded from CL-NLL, BWT, and Forgetting."
+        ),
         "note": "No synthetic regime labels, ground-truth laws, or synthetic RRR are used.",
     }
     (output_dir / "summary.json").write_text(

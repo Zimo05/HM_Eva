@@ -39,6 +39,19 @@ def _number(row: dict[str, Any], name: str) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _semantic_structural_bytes(row: dict[str, Any]) -> float | None:
+    """Read semantic bytes across the legacy and prototype-aware schemas."""
+
+    semantic = _number(row, "semantic_bytes")
+    if semantic is None:
+        return None
+    if _number(row, "semantic_tree_tensor_bytes") is None:
+        # The initial prototype-aware schema reported prototype bytes beside,
+        # rather than inside, semantic_bytes.
+        semantic += _number(row, "router_prototype_bytes") or 0.0
+    return semantic
+
+
 def _ordered_checkpoint_rows(path: Path) -> list[dict[str, str]]:
     rows = _read_csv(path)
     rows = [
@@ -68,7 +81,9 @@ def _final_metrics(result_dir: Path) -> dict[str, float | None]:
     summary = summary_rows[-1]
     tree = tree_rows[-1]
     episodic = _number(tree, "episodic_bytes")
-    semantic = _number(tree, "semantic_bytes")
+    semantic = _semantic_structural_bytes(tree)
+    router_prototype = _number(tree, "router_prototype_bytes")
+    persistent_total = _number(tree, "total_memory_bytes")
     nodes = _number(tree, "node_count")
     leaves = _number(tree, "leaf_count")
     memory_capacity = None
@@ -86,10 +101,16 @@ def _final_metrics(result_dir: Path) -> dict[str, float | None]:
         "bwt": _number(summary, "average_bwt"),
         "episodic_bytes": episodic,
         "semantic_bytes": semantic,
+        "semantic_tree_tensor_bytes": _number(tree, "semantic_tree_tensor_bytes"),
+        "router_prototype_bytes": router_prototype,
         "persistent_bytes": (
-            episodic + semantic
-            if episodic is not None and semantic is not None
-            else None
+            persistent_total
+            if persistent_total is not None
+            else (
+                episodic + semantic
+                if episodic is not None and semantic is not None
+                else None
+            )
         ),
         "node_count": nodes,
         "leaf_count": leaves,
@@ -140,16 +161,19 @@ def _recommended_capacity(
             "checkpoint to estimate the flat semantic storage."
         )
     row_bytes = _row_bytes_per_episode(rows)
-    first_semantic = _number(first, "semantic_bytes")
+    first_semantic = _semantic_structural_bytes(first)
     if first_semantic is None:
         raise ValueError(
             f"missing initial root semantic bytes in {result_dir / 'checkpoint_tree.csv'}"
         )
     budgets = []
     for row in rows:
+        total = _number(row, "total_memory_bytes")
         episodic = _number(row, "episodic_bytes")
-        semantic = _number(row, "semantic_bytes")
-        if episodic is not None and semantic is not None:
+        semantic = _semantic_structural_bytes(row)
+        if total is not None:
+            budgets.append(total)
+        elif episodic is not None and semantic is not None:
             budgets.append(episodic + semantic)
     if not budgets:
         raise ValueError(f"missing persistent-byte metrics in {result_dir}")
@@ -198,7 +222,8 @@ def _aggregate_rows(
     }
     for metric in (
         "clnll", "forgetting", "bwt", "episodic_bytes", "semantic_bytes",
-        "persistent_bytes", "node_count", "leaf_count",
+        "semantic_tree_tensor_bytes", "router_prototype_bytes", "persistent_bytes",
+        "node_count", "leaf_count",
         "memory_capacity_per_node",
     ):
         mean, std = _mean_std([values[metric] for _, values in seed_rows])

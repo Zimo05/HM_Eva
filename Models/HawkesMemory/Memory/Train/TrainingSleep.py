@@ -12,7 +12,10 @@ from Train.TrainingComponents import (
     _differentiable_merge_settings,
     _topology_prune_settings,
 )
-from MemoryResiduals.Accounting import project_episodic_memory_budget
+from MemoryResiduals.Accounting import (
+    project_episodic_memory_budget,
+    projected_non_episodic_bytes_after_split,
+)
 
 
 class TrainingSleepMixin:
@@ -608,19 +611,51 @@ class TrainingSleepMixin:
         revision = int(self.sleep_state.get("topology_revision", 0))
         candidates = []
         for leaf_id, (module, output) in split_proposals.items():
-            candidates.append(build_split_candidate(
+            candidate = build_split_candidate(
                 leaf_id,
                 module,
                 output,
                 topology_revision=revision,
-                lambda_T=float(self.merge_lambda_T),
+                # Split commits on predictive gain; Merge's complexity price
+                # must not become an implicit Split budget. The optional
+                # persistent-byte cap is checked explicitly before commit.
+                lambda_T=0.0,
                 uncertainty_kappa=self.sleep_config.action_uncertainty_kappa,
                 # Retained by the public builder signature for checkpoint/API
                 # compatibility; production Split no longer gates on them.
                 min_child_effective_mass=0.0,
                 min_structural_strength=0.0,
                 min_effective_sample_size=0.0,
-            ))
+            )
+            training_config = getattr(self, "training_config", None)
+            persistent_budget = getattr(
+                training_config,
+                "persistent_memory_budget_bytes",
+                None,
+            )
+            if persistent_budget is not None and candidate.eligible:
+                persistent_budget = int(persistent_budget)
+                if persistent_budget <= 0:
+                    raise ValueError("persistent memory budget must be positive")
+                projection = projected_non_episodic_bytes_after_split(
+                    self.tree,
+                    leaf_id,
+                )
+                if projection["projected_semantic_bytes"] > persistent_budget:
+                    diagnostics = dict(candidate.diagnostics)
+                    diagnostics.update(projection)
+                    diagnostics.update({
+                        "reason": "persistent_memory_budget_split_infeasible",
+                        "split_status": "budget-infeasible",
+                        "budget_bytes": persistent_budget,
+                    })
+                    candidate = replace(
+                        candidate,
+                        eligible=False,
+                        ready=False,
+                        diagnostics=diagnostics,
+                    )
+            candidates.append(candidate)
         merge_pairs = tuple(merge_objective.get("pairs", ()))
         current_cycle = int(self.sleep_state.get("deep_cycle_count", 0))
         merge_settings = _differentiable_merge_settings(
@@ -727,7 +762,9 @@ class TrainingSleepMixin:
             if candidate.kind.value != "split":
                 annotated_candidates.append(candidate)
                 continue
-            if not candidate.eligible or not candidate.ready:
+            if candidate.diagnostics.get("split_status") == "budget-infeasible":
+                status = "budget-infeasible"
+            elif not candidate.eligible or not candidate.ready:
                 status = "rejected"
             elif candidate.action_id == selected_action_id:
                 status = "accepted"
@@ -1533,6 +1570,11 @@ class TrainingSleepMixin:
                     ),
                     split_memory_hard_threshold=(
                         self.structure_config.split_memory_hard_threshold
+                    ),
+                    persistent_memory_budget_bytes=getattr(
+                        self.training_config,
+                        "persistent_memory_budget_bytes",
+                        None,
                     ),
                     split_init_steps=self.sleep_config.split_init_steps,
                     split_init_lr=self.sleep_config.split_init_lr,

@@ -1379,6 +1379,8 @@ def _hm_state_records(
             ),
             nise=None,
             total_memory_bytes=memory_bytes,
+            semantic_tree_tensor_bytes=tree.get("semantic_tree_tensor_bytes"),
+            router_prototype_bytes=tree.get("router_prototype_bytes"),
             cumulative_admitted_raw_bytes=tree.get(
                 "cumulative_admitted_raw_bytes"
             ),
@@ -3065,15 +3067,18 @@ def _write_report(
                 "## HM-specific state",
                 "",
                 "Topology action counts come from committed transaction events; no leaf-count difference is inferred.",
+                "Semantic/structural bytes include node-routing prototypes; the prototype column below is a breakdown of that total.",
                 "",
-                "| task | nodes | leaves | episodic rows | episodic bytes | semantic bytes | total bytes | raw admitted bytes | byte CR | bytes/regime | split | merge | prune | NISE |",
-                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+                "| task | nodes | leaves | episodic rows | episodic bytes | semantic/structural bytes | node + offset bytes | router prototype bytes (subset) | total bytes | raw admitted bytes | byte CR | bytes/regime | split | merge | prune | NISE |",
+                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
             ])
             for row in hm_state:
                 lines.append(
                     f"| {row.get('task_id')} | {row.get('node_count')} | "
                     f"{row.get('leaf_count')} | {row.get('episodic_rows')} | "
                     f"{row.get('episodic_bytes')} | {row.get('semantic_bytes')} | "
+                    f"{row.get('semantic_tree_tensor_bytes')} | "
+                    f"{row.get('router_prototype_bytes')} | "
                     f"{row.get('total_memory_bytes')} | "
                     f"{row.get('cumulative_admitted_raw_bytes')} | "
                     f"{fmt(row.get('compression_ratio_bytes'), 3)} | "
@@ -3974,6 +3979,10 @@ def main() -> None:
             "episodic_rows": hm_state.get("episodic_rows"),
             "episodic_bytes": hm_state.get("episodic_bytes"),
             "semantic_bytes": hm_state.get("semantic_bytes"),
+            "semantic_tree_tensor_bytes": hm_state.get(
+                "semantic_tree_tensor_bytes"
+            ),
+            "router_prototype_bytes": hm_state.get("router_prototype_bytes"),
             "total_memory_bytes": hm_state.get("total_memory_bytes"),
             "cumulative_admitted_raw_bytes": hm_state.get(
                 "cumulative_admitted_raw_bytes"

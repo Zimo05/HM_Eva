@@ -447,8 +447,7 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
     for option, expected in expected_stationary_hm.items():
         assert command[command.index(option) + 1] == expected
     h_tree = Path(command[command.index("--h-tree") + 1])
-    original_root = (ROOT / "Datasets" / "DWS" / "../../../HawkesMemory_wfy").resolve()
-    assert h_tree == (original_root / "Data" / "tree_13" / "h_tree_13.pt").resolve()
+    assert h_tree == (ROOT / "Datasets" / "DWS" / "tree_13" / "h_tree_13.pt").resolve()
     sequence_summary = Path(
         command[command.index("--sequence-summary") + 1]
     )
@@ -469,7 +468,9 @@ def test_stationary_dws_hm_uses_variant_h_tree_and_depth_zero():
     assert "--sequence-summary" not in smoke_command
 
     resolved, metadata = resolve_hm_upstream_h_tree("20")
-    assert resolved == (original_root / "Data" / "tree_20" / "h_tree_one_circle.pt").resolve()
+    assert resolved == (
+        ROOT / "Datasets" / "DWS" / "tree_20" / "h_tree_one_circle.pt"
+    ).resolve()
     assert metadata["node_dim"] == 128
 
 

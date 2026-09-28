@@ -1,10 +1,11 @@
 """Persistent-memory tensor accounting and global episodic budget projection.
 
 The byte count deliberately excludes the encoder, Hawkes backbone, controller,
-shared router, optimizers, and rebuildable Bank append caches. It measures the
-semantic tree's node embeddings and Hawkes offsets plus the tensors that would
-be serialized for episodic memory, including tensors retained inside replay
-windows.
+shared router network, optimizers, and rebuildable Bank append caches. It
+measures semantic-tree tensors, persistent node-routing prototypes, and the
+tensors that would be serialized for episodic memory, including tensors
+retained inside replay windows. A budget is optional: measurement is always
+available, while projection/eviction only runs when a caller supplies a cap.
 """
 
 from __future__ import annotations
@@ -44,14 +45,44 @@ def _bank_row_tensor_bytes(bank: Any, index: int) -> int:
     return total
 
 
-def persistent_memory_nbytes(tree: Any) -> dict[str, int]:
-    """Return serialized persistent semantic, episodic, and total tensor bytes."""
+def _router_prototype_bytes(tree: Any) -> int:
+    """Count only serialized per-node routing prototype tensors.
 
-    semantic = sum(
+    ``ancestor_matrix`` and the routing network are topology/computation state,
+    not persistent evidence. The Welford ``count``, ``mean``, and ``m2``
+    buffers are included because they are saved with the tree checkpoint.
+    """
+
+    frontier = getattr(tree, "frontier_routing", None)
+    prototypes = getattr(frontier, "prototypes", None)
+    if prototypes is None:
+        return 0
+    return sum(
+        _tensor_bytes(getattr(prototypes, name, None))
+        for name in ("count", "mean", "m2")
+    )
+
+
+def _semantic_tree_tensor_bytes(tree: Any) -> int:
+    return sum(
         _tensor_bytes(value)
         for parameter_group in (tree.node_emb, tree.semantic_offset)
         for value in parameter_group.values()
     )
+
+
+def persistent_memory_nbytes(tree: Any) -> dict[str, int]:
+    """Return structural, episodic, prototype-breakdown, and total bytes.
+
+    ``semantic_bytes`` is the full non-episodic structural cost: node
+    embeddings, semantic offsets, and persistent node-routing prototypes.
+    ``router_prototype_bytes`` is a subset of ``semantic_bytes`` provided as a
+    diagnostic breakdown, so it must not be added to that field a second time.
+    """
+
+    semantic_tree = _semantic_tree_tensor_bytes(tree)
+    router_prototype = _router_prototype_bytes(tree)
+    semantic = semantic_tree + router_prototype
     episodic = 0
     for bank in tree.episodic_memory.banks.values():
         bank._ensure_prototype_state()
@@ -69,8 +100,60 @@ def persistent_memory_nbytes(tree: Any) -> dict[str, int]:
         )
     return {
         "semantic_bytes": int(semantic),
+        "semantic_tree_tensor_bytes": int(semantic_tree),
         "episodic_bytes": int(episodic),
+        "router_prototype_bytes": int(router_prototype),
         "total_memory_bytes": int(semantic + episodic),
+    }
+
+
+def projected_non_episodic_bytes_after_split(
+    tree: Any,
+    leaf_id: str,
+) -> dict[str, int]:
+    """Estimate fixed persistent bytes after splitting ``leaf_id``.
+
+    A split adds two semantic nodes and two rows to the per-node routing
+    prototype store. Episodic rows are omitted here because the budget
+    projection can evict them after the Sleep transaction.
+    """
+
+    node = tree.nodes.get(leaf_id)
+    if node is None or not node.is_leaf:
+        raise ValueError(f"Split target is not an active leaf: {leaf_id!r}")
+
+    semantic_tree_growth = 2 * (
+        _tensor_bytes(tree.node_emb[leaf_id])
+        + _tensor_bytes(tree.semantic_offset[leaf_id])
+    )
+
+    prototype_growth = 0
+    frontier = getattr(tree, "frontier_routing", None)
+    prototypes = getattr(frontier, "prototypes", None)
+    if prototypes is not None:
+        for name in ("count", "mean", "m2"):
+            value = getattr(prototypes, name, None)
+            if not torch.is_tensor(value):
+                continue
+            row_numel = 1
+            for dimension in value.shape[1:]:
+                row_numel *= int(dimension)
+            # A Split keeps the former leaf as an internal node and adds two
+            # child rows to the store.
+            prototype_growth += 2 * row_numel * int(value.element_size())
+
+    semantic_tree_after = (
+        _semantic_tree_tensor_bytes(tree) + semantic_tree_growth
+    )
+    prototype_after = _router_prototype_bytes(tree) + prototype_growth
+    semantic_after = semantic_tree_after + prototype_after
+    return {
+        "projected_semantic_bytes": int(semantic_after),
+        "projected_semantic_tree_tensor_bytes": int(semantic_tree_after),
+        "projected_router_prototype_bytes": int(prototype_after),
+        "projected_non_episodic_bytes": int(semantic_after),
+        "semantic_tree_growth_bytes": int(semantic_tree_growth),
+        "router_prototype_growth_bytes": int(prototype_growth),
     }
 
 
@@ -87,10 +170,14 @@ def project_episodic_memory_budget(tree: Any, budget_bytes: int) -> dict[str, in
     if budget_bytes <= 0:
         raise ValueError("persistent memory budget must be positive")
     before = persistent_memory_nbytes(tree)
-    if before["semantic_bytes"] > budget_bytes:
+    non_evictable_before = before["semantic_bytes"]
+    if non_evictable_before > budget_bytes:
         raise ValueError(
-            "persistent memory budget is smaller than the semantic tree: "
-            f"{budget_bytes} < {before['semantic_bytes']} bytes"
+            "persistent memory budget is smaller than non-evictable persistent "
+            "state (semantic tree plus router prototypes): "
+            f"{budget_bytes} < {non_evictable_before} bytes "
+            f"(semantic={before['semantic_bytes']}, "
+            f"router_prototype={before['router_prototype_bytes']})"
         )
 
     candidates: list[tuple[float, str, int, int]] = []
@@ -142,9 +229,15 @@ def project_episodic_memory_budget(tree: Any, budget_bytes: int) -> dict[str, in
         "before_bytes": before["total_memory_bytes"],
         "after_bytes": after["total_memory_bytes"],
         "semantic_bytes": after["semantic_bytes"],
+        "semantic_tree_tensor_bytes": after["semantic_tree_tensor_bytes"],
         "episodic_bytes": after["episodic_bytes"],
+        "router_prototype_bytes": after["router_prototype_bytes"],
         "evicted_rows": int(sum(len(value) for value in removals.values())),
     }
 
 
-__all__ = ["persistent_memory_nbytes", "project_episodic_memory_budget"]
+__all__ = [
+    "persistent_memory_nbytes",
+    "project_episodic_memory_budget",
+    "projected_non_episodic_bytes_after_split",
+]

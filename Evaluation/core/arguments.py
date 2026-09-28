@@ -166,8 +166,9 @@ def continual_args(*, replay: bool = False) -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "optional global cap for persistent semantic plus episodic tensor "
-            "bytes, enforced after each Sleep transaction"
+            "optional global cap for persistent semantic/structural bytes "
+            "(including node-router prototypes) plus episodic bytes; defaults "
+            "to None (measurement only)"
         ),
     )
     parser.add_argument(

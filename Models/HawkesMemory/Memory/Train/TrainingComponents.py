@@ -427,8 +427,8 @@ class TrainingConfig:
     sleep_every: int = 1
     evaluation_ablation: str = "full"
     seed: int = 0
-    # Optional global cap over serialized semantic offsets plus persistent
-    # episodic rows.  This is separate from the per-node safety capacity.
+    # Optional global cap over serialized semantic, episodic, and node-router
+    # prototype tensors. None keeps default HM memory unconstrained.
     persistent_memory_budget_bytes: Optional[int] = None
     checkpoint_path: str = "checkpoints/memory_tree.pt"
     best_checkpoint_path: Optional[str] = None

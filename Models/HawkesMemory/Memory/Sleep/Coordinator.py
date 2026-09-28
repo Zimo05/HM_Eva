@@ -9,6 +9,7 @@ import torch
 from torch import Tensor
 
 from HawkesBackbone import HawkesFamily
+from MemoryResiduals.Accounting import projected_non_episodic_bytes_after_split
 from Sleep.Merge import commit_merge, leaf_sibling_pairs, promote_shared_memories
 from Sleep.Split import commit_split
 from Sleep.TopologyPrune import (
@@ -57,6 +58,7 @@ def run_sleep_cycle(
     allow_topology_prune: bool = True,
     statistics_prepared: bool = False,
     protected_leaf_ids: Iterable[str] = (),
+    persistent_memory_budget_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Commit at most one topology edit selected on a frozen snapshot.
 
@@ -113,6 +115,35 @@ def run_sleep_cycle(
                 "eligible": bool(selected.eligible),
                 "ready": bool(selected.ready),
                 "reason": "physical_gain_must_be_strictly_positive",
+            }
+            selected = None
+    split_budget_projection: Optional[Dict[str, int]] = None
+    if (
+        selected is not None
+        and selected.kind is TopologyActionKind.SPLIT
+        and persistent_memory_budget_bytes is not None
+    ):
+        budget_bytes = int(persistent_memory_budget_bytes)
+        if budget_bytes <= 0:
+            raise ValueError("persistent memory budget must be positive")
+        leaf_id = selected.target
+        if (
+            leaf_id is None
+            or leaf_id not in tree.nodes
+            or not tree.nodes[leaf_id].is_leaf
+        ):
+            raise RuntimeError("selected Split target is stale")
+        split_budget_projection = projected_non_episodic_bytes_after_split(
+            tree, leaf_id
+        )
+        if split_budget_projection["projected_non_episodic_bytes"] > budget_bytes:
+            physical_rejection = {
+                "action_id": selected.action_id,
+                "kind": selected.kind.value,
+                "reason": "persistent_memory_budget_split_infeasible",
+                "split_status": "budget-infeasible",
+                "budget_bytes": budget_bytes,
+                **split_budget_projection,
             }
             selected = None
     actions: list[Dict[str, Any]] = []
@@ -251,6 +282,7 @@ def run_sleep_cycle(
             if selected is None else selected.action_id
         ),
         "physical_rejection": physical_rejection,
+        "split_budget_projection": split_budget_projection,
         "topology_prune_enabled": bool(allow_topology_prune),
     }
 

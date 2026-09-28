@@ -67,6 +67,8 @@ class HMStateRecord:
     prune_count: int | None
     nise: float | None
     total_memory_bytes: int | None = None
+    semantic_tree_tensor_bytes: int | None = None
+    router_prototype_bytes: int | None = None
     cumulative_admitted_raw_bytes: int | None = None
     cumulative_admitted_residuals: int | None = None
     compression_ratio_bytes: float | None = None

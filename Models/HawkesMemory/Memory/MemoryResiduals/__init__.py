@@ -14,7 +14,11 @@ from .MemoryBank import (
 from .WorkingMemory import WorkingMemoryAdapter
 from .SimilarityFeatures import local_recurrence_count
 from .ProbationMemory import ProbationCandidate, WriteProbationBuffer
-from .Accounting import persistent_memory_nbytes, project_episodic_memory_budget
+from .Accounting import (
+    persistent_memory_nbytes,
+    project_episodic_memory_budget,
+    projected_non_episodic_bytes_after_split,
+)
 
 __all__ = [
     "EffectiveHawkesParameters",
@@ -35,4 +39,5 @@ __all__ = [
     "local_recurrence_count",
     "persistent_memory_nbytes",
     "project_episodic_memory_budget",
+    "projected_non_episodic_bytes_after_split",
 ]

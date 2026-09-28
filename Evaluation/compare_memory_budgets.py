@@ -47,13 +47,21 @@ def _final_row(path: Path) -> dict[str, str]:
 def _metrics(result_dir: Path) -> dict[str, float]:
     summary = _final_row(result_dir / "continual_summary.csv")
     tree = _final_row(result_dir / "checkpoint_tree.csv")
-    total = _number(tree, "total_memory_bytes")
-    if total is None:
-        episodic = _number(tree, "episodic_bytes")
-        semantic = _number(tree, "semantic_bytes")
-        if episodic is None or semantic is None:
-            raise ValueError(f"missing persistent-memory bytes in {result_dir}")
+    canonical_total = _number(tree, "total_memory_bytes")
+    episodic = _number(tree, "episodic_bytes")
+    semantic = _number(tree, "semantic_bytes")
+    if canonical_total is not None:
+        total = canonical_total
+    elif episodic is not None and semantic is not None:
+        semantic_tree = _number(tree, "semantic_tree_tensor_bytes")
+        router_prototype = _number(tree, "router_prototype_bytes")
+        if semantic_tree is None and router_prototype is not None:
+            # Compatibility with the first prototype-aware output schema,
+            # where semantic_bytes omitted prototypes and total was absent.
+            semantic += router_prototype
         total = episodic + semantic
+    else:
+        raise ValueError(f"missing persistent-memory bytes in {result_dir}")
     result = {
         "persistent_memory_bytes": total,
         "persistent_memory_mb": total / 1_000_000.0,

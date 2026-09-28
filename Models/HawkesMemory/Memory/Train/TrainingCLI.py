@@ -1355,8 +1355,11 @@ def _parse_args(argv=None):
         type=int,
         default=None,
         help=(
-            "Optional global byte cap over persistent semantic and episodic "
-            "memory; after Sleep, the lowest-retention episodic rows are evicted."
+            "Optional global byte cap over persistent semantic/structural "
+            "tensors (including node-router prototypes) plus episodic tensors. "
+            "Defaults to None (measurement only); "
+            "when set, low-retention episodic rows may be evicted and infeasible "
+            "Splits are rejected."
         ),
     )
     parser.add_argument(

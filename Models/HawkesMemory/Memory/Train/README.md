@@ -564,17 +564,23 @@ Use `--no-write` for evaluation that must not mutate episodic memory.
 
 ## Persistent memory accounting and continual diagnostics
 
-`--persistent-memory-budget-bytes B` sets one global cap over serialized
-persistent semantic-tree tensors (node embeddings and Hawkes offsets) and
-episodic tensors. Encoder, Hawkes backbone, shared router, controller,
-optimizer state, and rebuildable append caches are outside this budget. After
-each Sleep transaction, the trainer ranks residual rows
-across every node using write quality, support, retrieval usage, staleness, and
-age, then evicts the lowest-retention rows until the byte cap is met. The
-projection is recorded in the Sleep result; a cap smaller than semantic state
-fails with the required byte counts. The `no_sleep` ablation applies the same
-projection at each epoch boundary, so disabling consolidation does not disable
-the fixed-budget constraint.
+`--persistent-memory-budget-bytes` defaults to `None`. Memory accounting is
+always reported. `semantic_bytes` includes node embeddings, semantic offsets,
+and persistent per-node router prototypes; `router_prototype_bytes` reports
+that subset separately and is not added twice. `ancestor_matrix` is a
+rebuildable topology cache and is excluded. The default HM run preserves memory
+and does not reject Splits because of a byte cap. Passing
+`--persistent-memory-budget-bytes B`
+enables the global cap: after each Sleep transaction, the trainer ranks
+episodic residual rows across every node using write quality, support,
+retrieval usage, staleness, and age, then evicts the lowest-retention rows
+until the cap is met. Split candidates are marked `budget-infeasible` before
+topology arbitration when their projected semantic/structural state would
+exceed the cap. Encoder, Hawkes backbone, shared router network, controller, optimizer
+state, and rebuildable append caches are outside this budget. The projection
+is recorded in the Sleep result; a cap smaller than non-evictable state fails
+with the required byte counts. The `no_sleep` ablation applies the same
+projection at each epoch boundary when a cap was explicitly supplied.
 
 For compression, first run a separate full-HMT pilot and freeze its typical
 final persistent-byte count as `B*`. Run every method and seed with the same

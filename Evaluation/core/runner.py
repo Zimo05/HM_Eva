@@ -458,8 +458,10 @@ def _hm_state_bytes(checkpoint: Path) -> dict[str, int]:
         # Keep the field consumed by the existing replay-buffer selector,
         # while giving it the same canonical persistent-memory budget.
         result["tree_and_episodic_bytes"] = sizes["total_memory_bytes"]
+        result["persistent_memory_bytes"] = sizes["total_memory_bytes"]
     except Exception as error:
         result["tree_and_episodic_bytes"] = checkpoint.stat().st_size
+        result["persistent_memory_bytes"] = checkpoint.stat().st_size
         result["measurement_warning"] = str(error)
     return result
 
@@ -1285,7 +1287,11 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
                 manifest_path = args.hm_resource_root / "resource_manifest.json"
                 resources = json.loads(manifest_path.read_text(encoding="utf-8"))
                 previous_task = protocol.task_ids[task_index - 1]
-                budget = int(resources["stages"][str(previous_task)]["tree_and_episodic_bytes"])
+                previous_resources = resources["stages"][str(previous_task)]
+                budget_value = previous_resources.get("persistent_memory_bytes")
+                if budget_value is None:
+                    budget_value = previous_resources["tree_and_episodic_bytes"]
+                budget = int(budget_value)
                 replay_selection: dict[str, Any] = {}
                 replay_path, actual = _make_replay_buffer(
                     data_root,
@@ -1607,11 +1613,11 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
                 stage_manifest, protocol, config_path
             )
             resource_manifest = {
-                "format_version": 3,
+                "format_version": 5,
                 "measurement": (
-                    "persistent semantic-tree (node embeddings and Hawkes offsets) "
-                    "plus episodic tensor bytes; encoder/backbone/shared router/"
-                    "controller excluded"
+                    "persistent semantic/structural bytes (node embeddings, Hawkes "
+                    "offsets, and per-node routing prototypes) plus episodic tensor bytes; "
+                    "encoder/backbone/shared router network/controller excluded"
                 ),
                 "stages": {},
             }
@@ -1622,14 +1628,14 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
                 )
                 saved_version = int(saved_resource.get("format_version", 1))
                 resource_manifest.update(saved_resource)
-                resource_manifest["format_version"] = 3
+                resource_manifest["format_version"] = 5
                 resource_manifest["measurement"] = (
-                    "persistent semantic-tree (node embeddings and Hawkes offsets) "
-                    "plus episodic tensor bytes; encoder/backbone/shared router/"
-                    "controller excluded"
+                    "persistent semantic/structural bytes (node embeddings, Hawkes "
+                    "offsets, and per-node routing prototypes) plus episodic tensor bytes; "
+                    "encoder/backbone/shared router network/controller excluded"
                 )
                 resource_manifest.setdefault("stages", {})
-                if saved_version < 3:
+                if saved_version < 5:
                     for prior_task in protocol.task_ids:
                         prior_checkpoint = (
                             target / "checkpoint"

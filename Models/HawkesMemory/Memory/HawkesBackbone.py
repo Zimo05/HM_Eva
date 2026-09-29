@@ -400,6 +400,7 @@ class HawkesFamily(nn.Module):
         *,
         grid_size: int = 256,
         tail_survival: float = 1e-8,
+        _compute_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         """Integrate the causal Hawkes next-mark distribution.
 
@@ -421,7 +422,8 @@ class HawkesFamily(nn.Module):
             raise ValueError("tail_survival must be in (0, 1)")
 
         device = parameters.raw_mu.device
-        dtype = parameters.raw_mu.dtype
+        output_dtype = parameters.raw_mu.dtype
+        dtype = output_dtype if _compute_dtype is None else _compute_dtype
         stats = history_stats.to(device=device, dtype=dtype)
         mu = self._positive_parameter(parameters, "mu").to(device=device, dtype=dtype)
         W = self._positive_parameter(parameters, "W").to(device=device, dtype=dtype)
@@ -496,7 +498,25 @@ class HawkesFamily(nn.Module):
                 * widths.unsqueeze(-1)
                 * 0.5
             ).sum(dim=1).clamp_min(0.0)
-        return probabilities / probabilities.sum(dim=-1, keepdim=True).clamp_min(EPS)
+        total = probabilities.sum(dim=-1, keepdim=True)
+        normalized = probabilities / total.clamp_min(EPS)
+        if bool(torch.isfinite(normalized).all() and (total > EPS).all()):
+            return normalized.to(dtype=output_dtype)
+        if dtype != torch.float64:
+            # Large excitation can overflow the float32 quadrature even when
+            # the Hawkes parameters and event-time intensities are finite.
+            # Recompute this forecast call in double precision.
+            return self.next_mark_probabilities_from_statistics(
+                history_stats,
+                parameters,
+                grid_size=grid_size,
+                tail_survival=tail_survival,
+                _compute_dtype=torch.float64,
+            )
+        raise FloatingPointError(
+            "Hawkes next-mark integration produced invalid probabilities "
+            "even in float64"
+        )
 
     def interval_integral(self, t_prev, t, history, parameters):
         """

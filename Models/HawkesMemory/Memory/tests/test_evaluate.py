@@ -8,6 +8,7 @@ import json
 import hashlib
 
 from Evaluate import (
+    _cached_forecast_error,
     ablation_metrics,
     aggregate_metrics,
     load_dataset,
@@ -52,6 +53,33 @@ class EvaluationMetricTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["error_rate"], 0.5)
         self.assertAlmostEqual(metrics["local_time_mae"], 0.75)
         self.assertTrue(math.isfinite(metrics["ece_10bin"]))
+
+    def test_nonfinite_forecast_probabilities_identify_event(self):
+        row = {
+            "variant": "frozen/full",
+            "source_index": 17,
+            "event_index": 3,
+            "true_type": 0,
+            "type_probabilities": [float("nan"), 0.2],
+            "nll": 1.0,
+            "predicted_time": 2.0,
+            "true_time": 1.0,
+        }
+        for invalid in (float("nan"), None):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                FloatingPointError,
+                r"non-finite forecast type probabilities.*source_index=17.*event_index=3",
+            ):
+                aggregate_metrics(
+                    [{**row, "type_probabilities": [invalid, 0.2]}],
+                    num_types=2,
+                    seed=0,
+                )
+            self.assertIsNotNone(
+                _cached_forecast_error(
+                    [{**row, "type_probabilities": [invalid, 0.2]}]
+                )
+            )
 
     def test_memory_diagnostics_and_write_funnel_are_aggregated(self):
         row = {

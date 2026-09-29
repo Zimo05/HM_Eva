@@ -47,6 +47,7 @@ if torch is not None:
         _batched_law_evaluation,
         _event_prediction_set_names,
     )
+    from Evaluate import persistent_state_hash
     from Wake.HawkesParams import HawkesParams
 
 
@@ -72,7 +73,11 @@ def _tied_sequence(source_index: int) -> dict:
     }
 
 
-def _make_inference(protocol: EvaluationProtocol) -> MemoryTreeInference:
+def _make_inference(
+    protocol: EvaluationProtocol,
+    *,
+    working_update_until_event: int | None = None,
+) -> MemoryTreeInference:
     """Create two-identical-node synthetic HM inference for fast CPU tests."""
 
     torch.manual_seed(1729)
@@ -100,7 +105,10 @@ def _make_inference(protocol: EvaluationProtocol) -> MemoryTreeInference:
         tree,
         hawkes,
         encoder,
-        inference_config=inference_config_for_protocol(protocol),
+        inference_config=inference_config_for_protocol(
+            protocol,
+            working_update_until_event=working_update_until_event,
+        ),
         device="cpu",
     )
     # Keep a resident row in both leaves so routing/retrieval parity exercises
@@ -244,6 +252,69 @@ def _assert_event_parity(test: unittest.TestCase, scalar, packed, source_index):
 
 @unittest.skipUnless(torch is not None, "requires the HM PyTorch dependencies")
 class BatchedInferenceParityTests(unittest.TestCase):
+    def test_persistent_hash_excludes_working_memory_but_covers_bank_state(self):
+        inference = _make_inference(EvaluationProtocol.FAST_ADAPT)
+        initial_hash = persistent_state_hash(inference)
+        _scalar_run(inference, _sequence(4, 22))
+        self.assertEqual(persistent_state_hash(inference), initial_hash)
+
+        frozen = _make_inference(EvaluationProtocol.FROZEN)
+        frozen_hash = persistent_state_hash(frozen)
+        _scalar_run(frozen, _sequence(4, 21))
+        self.assertEqual(persistent_state_hash(frozen), frozen_hash)
+
+        inference.tree.working_memory.delta.fill_(0.75)
+        self.assertEqual(persistent_state_hash(inference), initial_hash)
+
+        nonempty_bank = next(
+            bank for bank in inference.tree.episodic_memory.banks.values()
+            if len(bank)
+        )
+        nonempty_bank.usage[0] += 1.0
+        self.assertNotEqual(persistent_state_hash(inference), initial_hash)
+
+    def test_working_update_limit_stops_scalar_and_batched_updates(self):
+        support_limit = 2
+        sequence = _sequence(6, 31)
+
+        scalar_inference = _make_inference(
+            EvaluationProtocol.FAST_ADAPT,
+            working_update_until_event=support_limit,
+        )
+        scalar_updates = 0
+        scalar_update = scalar_inference.tree.working_memory.update_from_gradient
+
+        def count_scalar_update(*args, **kwargs):
+            nonlocal scalar_updates
+            scalar_updates += 1
+            return scalar_update(*args, **kwargs)
+
+        scalar_inference.tree.working_memory.update_from_gradient = count_scalar_update
+        scalar_result = _scalar_run(scalar_inference, dict(sequence))
+        self.assertEqual(len(scalar_result["events"]), len(sequence["times"]))
+        self.assertEqual(scalar_updates, support_limit)
+
+        batch_inference = _make_inference(
+            EvaluationProtocol.FAST_ADAPT,
+            working_update_until_event=support_limit,
+        )
+        batch_updates = 0
+        batch_update = batch_inference.tree.working_memory.update_batch_rows
+
+        def count_batch_update(*args, **kwargs):
+            nonlocal batch_updates
+            batch_updates += 1
+            return batch_update(*args, **kwargs)
+
+        batch_inference.tree.working_memory.update_batch_rows = count_batch_update
+        _batch_run(
+            batch_inference,
+            [dict(sequence)],
+            batch_size=1,
+            capture_event_predictions=True,
+        )
+        self.assertEqual(batch_updates, support_limit)
+
     def test_law_grid_and_snapshot_selection_are_strict_causal(self):
         law = GroundTruthLaw(
             regime_id="A",

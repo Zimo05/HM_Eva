@@ -371,6 +371,47 @@ def _benchmark_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]
     return [row for row in rows if int(row.get("event_index", 1)) >= 1]
 
 
+def _require_finite_type_probabilities(
+    probs: Sequence[Any], row: Mapping[str, Any]
+) -> None:
+    try:
+        finite = all(math.isfinite(float(value)) for value in probs)
+    except (TypeError, ValueError):
+        finite = False
+    if finite:
+        return
+    location = ", ".join(
+        f"{key}={row[key]!r}"
+        for key in ("variant", "source_index", "event_index")
+        if key in row
+    )
+    at_event = row.get("type_probabilities_at_event_time")
+    at_event_detail = (
+        f" at-event probabilities={at_event!r};" if at_event is not None else ""
+    )
+    raise FloatingPointError(
+        "non-finite forecast type probabilities"
+        f" at {location or 'unknown event'}: {list(probs)!r}; "
+        f"event NLL={row.get('nll')!r};{at_event_detail} "
+        "Check the checkpoint and Hawkes forecast calculation for this event."
+    )
+
+
+def _cached_forecast_error(
+    rows: Sequence[Mapping[str, Any]],
+) -> FloatingPointError | None:
+    for row in _benchmark_rows(rows):
+        raw_probs = row.get("type_probabilities")
+        if raw_probs in (None, ""):
+            raw_probs = row.get("prefix_type_probabilities")
+        if raw_probs not in (None, ""):
+            try:
+                _require_finite_type_probabilities(raw_probs, row)
+            except FloatingPointError as error:
+                return error
+    return None
+
+
 def classification_metrics(rows: Sequence[Mapping[str, Any]], num_types: int) -> dict:
     rows = _benchmark_rows(rows)
     if not rows:
@@ -397,6 +438,7 @@ def classification_metrics(rows: Sequence[Mapping[str, Any]], num_types: int) ->
             if 0 <= prediction < num_types:
                 probs[prediction] = 1.0
         else:
+            _require_finite_type_probabilities(raw_probs, row)
             probs = [float(v) for v in raw_probs]
             if len(probs) != num_types:
                 raise ValueError(
@@ -609,6 +651,183 @@ def clear_episodic_memory(inference: MemoryTreeInference) -> None:
     inference.tree.episodic_memory._packed_mirror_signature = None
 
 
+def _hash_state_value(digest: Any, value: Any) -> None:
+    """Feed nested persistent state into a stable streaming SHA-256 digest."""
+
+    if torch.is_tensor(value):
+        tensor = value.detach()
+        if tensor.layout != torch.strided:
+            tensor = tensor.to_dense()
+        tensor = tensor.cpu().contiguous()
+        digest.update(b"tensor\0")
+        digest.update(str(tensor.dtype).encode("utf-8"))
+        digest.update(repr(tuple(tensor.shape)).encode("utf-8"))
+        if tensor.numel():
+            digest.update(
+                tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
+            )
+        return
+    if isinstance(value, Mapping):
+        digest.update(b"mapping\0")
+        for key in sorted(value, key=lambda item: repr(item)):
+            _hash_state_value(digest, key)
+            _hash_state_value(digest, value[key])
+        return
+    if isinstance(value, (list, tuple)):
+        digest.update(b"tuple\0" if isinstance(value, tuple) else b"list\0")
+        digest.update(str(len(value)).encode("ascii"))
+        for item in value:
+            _hash_state_value(digest, item)
+        return
+    if isinstance(value, set):
+        digest.update(b"set\0")
+        for item in sorted(value, key=lambda item: repr(item)):
+            _hash_state_value(digest, item)
+        return
+    if hasattr(value, "__dict__") and not isinstance(value, type):
+        digest.update(type(value).__qualname__.encode("utf-8"))
+        state = {
+            key: item
+            for key, item in vars(value).items()
+            # Append backing arrays are derived caches rather than saved state.
+            if not key.startswith("_storage_")
+            and key != "_storage_capacity"
+        }
+        _hash_state_value(digest, state)
+        return
+    digest.update(type(value).__qualname__.encode("utf-8"))
+    digest.update(repr(value).encode("utf-8", errors="backslashreplace"))
+
+
+def persistent_state_hash(inference: MemoryTreeInference) -> str:
+    """Hash learned state while deliberately excluding transient Working Memory.
+
+    The module parameters and buffers cover semantic parameters, encoder,
+    Hawkes parameters, controller parameters, and registered routing
+    prototypes. Episodic banks and Python-owned topology/accounting state are
+    hashed separately because they are intentionally not all registered as
+    PyTorch buffers.
+    """
+
+    digest = hashlib.sha256()
+    modules = (
+        ("tree", inference.tree),
+        ("hawkes", inference.hawkes),
+        ("encoder", inference.encoder),
+        ("controller", inference.controller),
+    )
+    for module_name, module in modules:
+        for kind, values in (
+            ("parameter", module.named_parameters()),
+            ("buffer", module.named_buffers()),
+        ):
+            for name, value in sorted(values, key=lambda item: item[0]):
+                if "working_memory.delta" in name:
+                    continue
+                _hash_state_value(digest, (module_name, kind, name, value))
+
+    tree = inference.tree
+    topology = [
+        {
+            "node_id": node.node_id,
+            "parent": node.parent,
+            "left": node.left,
+            "right": node.right,
+            "depth": int(node.depth),
+        }
+        for node in sorted(tree.nodes.values(), key=lambda item: item.node_id)
+    ]
+    _hash_state_value(digest, ("tree_topology", topology))
+    for name in (
+        "initialization_metadata",
+        "mass_ema",
+        "low_mass_streak",
+        "topology_prune_streak",
+        "topology_prune_near_zero_streak",
+        "memory_reconciliation",
+        "residual_probe_leaf_ids",
+        "residual_probe_prototypes",
+        "residual_probe_target_mass",
+    ):
+        _hash_state_value(digest, ("tree_state", name, getattr(tree, name, None)))
+
+    memory = tree.episodic_memory
+    _hash_state_value(digest, (
+        "episodic_memory_metadata",
+        {
+            "age_clock": getattr(memory, "_age_clock", None),
+            "cumulative_admitted_raw_bytes": getattr(
+                memory, "cumulative_admitted_raw_bytes", None
+            ),
+            "cumulative_admitted_residuals": getattr(
+                memory, "cumulative_admitted_residuals", None
+            ),
+            "prototype_policy": getattr(memory, "_prototype_policy", None),
+        },
+    ))
+    for node_id, bank in sorted(memory.banks.items()):
+        _hash_state_value(digest, ("episodic_bank", node_id, bank))
+
+    prototypes = getattr(getattr(tree, "frontier_routing", None), "prototypes", None)
+    if prototypes is not None:
+        _hash_state_value(digest, ("router_prototype_node_ids", prototypes.node_ids))
+    return digest.hexdigest()
+
+
+def _finish_protocol_audit(
+    inference: MemoryTreeInference,
+    *,
+    canonical: str,
+    protocol: EvaluationProtocol,
+    memory_view: str,
+    sequence_count: int,
+    hash_before: str | None,
+    working_update_until_event: int | None = None,
+    audit_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Record and enforce the persistent-state contract for read-only runs."""
+
+    expected_unchanged = protocol in {
+        EvaluationProtocol.FROZEN,
+        EvaluationProtocol.FAST_ADAPT,
+    }
+    hash_after = persistent_state_hash(inference) if expected_unchanged else None
+    unchanged = (
+        hash_before == hash_after
+        if hash_before is not None and hash_after is not None
+        else None
+    )
+    row = {
+        "variant": canonical,
+        "protocol": protocol.value,
+        "memory_view": memory_view,
+        "sequences": int(sequence_count),
+        "working_memory_adapt": bool(inference.config.adapt_working_memory),
+        "persistent_writes_allowed": bool(inference.config.allow_memory_writes),
+        "usage_updates_allowed": bool(inference.config.update_memory_usage),
+        "working_update_until_event": working_update_until_event,
+        "working_memory_reset": "per_sequence",
+        "persistent_state_hash_before": hash_before,
+        "persistent_state_hash_after": hash_after,
+        "persistent_state_unchanged": unchanged,
+        "expected_unchanged": expected_unchanged,
+        "audit_status": (
+            "passed" if unchanged is True
+            else "failed" if unchanged is False
+            else "not_applicable_mutable_protocol"
+        ),
+    }
+    inference._protocol_audit = row
+    if expected_unchanged and unchanged is not True:
+        raise RuntimeError(
+            f"{canonical} changed persistent state during read-only evaluation: "
+            f"before={hash_before}, after={hash_after}"
+        )
+    if audit_rows is not None:
+        audit_rows.append(dict(row))
+    return row
+
+
 def _load_variant_inference(
     checkpoint: Path,
     variant: str,
@@ -617,6 +836,7 @@ def _load_variant_inference(
     prototype_duplicate_threshold: float | None = None,
     prototype_mode_threshold: float | None = None,
     prototype_context_alias_capacity: int | None = None,
+    working_update_until_event: int | None = None,
 ) -> tuple[
     str,
     EvaluationProtocol,
@@ -649,6 +869,7 @@ def _load_variant_inference(
             prototype_duplicate_threshold=prototype_duplicate_threshold,
             prototype_mode_threshold=prototype_mode_threshold,
             prototype_context_alias_capacity=prototype_context_alias_capacity,
+            working_update_until_event=working_update_until_event,
         ),
     )
     inference = _configure_evaluation_frontier(inference)
@@ -673,6 +894,8 @@ def run_variant(
     prototype_mode_threshold: float | None = None,
     prototype_context_alias_capacity: int | None = None,
     verbose: bool = True,
+    *,
+    audit_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict], MemoryTreeInference, float]:
     (
         canonical,
@@ -688,6 +911,11 @@ def run_variant(
         prototype_duplicate_threshold=prototype_duplicate_threshold,
         prototype_mode_threshold=prototype_mode_threshold,
         prototype_context_alias_capacity=prototype_context_alias_capacity,
+    )
+    persistent_hash_before = (
+        persistent_state_hash(inference)
+        if protocol in {EvaluationProtocol.FROZEN, EvaluationProtocol.FAST_ADAPT}
+        else None
     )
     protocol_name = protocol.value
     # The online-write protocol mutates only the episodic bank.  Router and
@@ -705,9 +933,14 @@ def run_variant(
         and partial_path.is_file()
     ):
         partial = json.loads(partial_path.read_text(encoding="utf-8"))
-        rows = list(partial.get("rows", ()))
-        start_position = int(partial.get("completed_sequences", 0))
-        print(f"[Resume] {canonical} continuing at sequence {start_position + 1}")
+        candidate_rows = list(partial.get("rows", ()))
+        cached_error = _cached_forecast_error(candidate_rows)
+        if cached_error is None:
+            rows = candidate_rows
+            start_position = int(partial.get("completed_sequences", 0))
+            print(f"[Resume] {canonical} continuing at sequence {start_position + 1}")
+        else:
+            print(f"[Resume] ignoring invalid partial rows: {cached_error}", flush=True)
     start = time.perf_counter()
     for sequence_position, sequence in enumerate(sequences[start_position:], start=start_position):
         # Keep sequence order for ONLINE_WRITE because the bank after S_i is
@@ -754,6 +987,13 @@ def run_variant(
                 float(v)
                 for v in event["forecast_type_probabilities"]
             ]
+            _require_finite_type_probabilities(forecast_probs, {
+                "variant": canonical,
+                "source_index": sequence["source_index"],
+                "event_index": event["event_index"],
+                "nll": event["nll"],
+                "type_probabilities_at_event_time": at_event_probs,
+            })
             predicted_type = int(
                 event.get(
                     "forecast_predicted_type",
@@ -904,6 +1144,15 @@ def run_variant(
                     "rows": _jsonable(rows),
                 }), encoding="utf-8")
     elapsed = time.perf_counter() - start
+    _finish_protocol_audit(
+        inference,
+        canonical=canonical,
+        protocol=protocol,
+        memory_view=memory_view,
+        sequence_count=len(sequences),
+        hash_before=persistent_hash_before,
+        audit_rows=audit_rows,
+    )
     return rows, inference, elapsed
 
 
@@ -917,6 +1166,8 @@ def run_variant_scalar(
     prototype_mode_threshold: float | None = None,
     prototype_context_alias_capacity: int | None = None,
     verbose: bool = True,
+    *,
+    audit_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], MemoryTreeInference, float]:
     """Run a causal variant while retaining only scalar metrics.
 
@@ -929,8 +1180,8 @@ def run_variant_scalar(
         raise ValueError("scalar evaluation requires at least one sequence")
     (
         canonical,
-        _protocol,
-        _memory_view,
+        protocol,
+        memory_view,
         _settings,
         inference,
         static_cache,
@@ -941,6 +1192,11 @@ def run_variant_scalar(
         prototype_duplicate_threshold=prototype_duplicate_threshold,
         prototype_mode_threshold=prototype_mode_threshold,
         prototype_context_alias_capacity=prototype_context_alias_capacity,
+    )
+    persistent_hash_before = (
+        persistent_state_hash(inference)
+        if protocol in {EvaluationProtocol.FROZEN, EvaluationProtocol.FAST_ADAPT}
+        else None
     )
     accumulators: dict[str, dict[str, Any]] = {}
     start = time.perf_counter()
@@ -1034,6 +1290,15 @@ def run_variant_scalar(
             "accuracy": float(group["correct"]) / denominator,
             "local_time_mae": float(group["time_abs_sum"]) / denominator,
         }
+    _finish_protocol_audit(
+        inference,
+        canonical=canonical,
+        protocol=protocol,
+        memory_view=memory_view,
+        sequence_count=len(sequences),
+        hash_before=persistent_hash_before,
+        audit_rows=audit_rows,
+    )
     return metrics_by_group, inference, time.perf_counter() - start
 
 
@@ -1050,6 +1315,8 @@ def run_variant_compact(
     prototype_context_alias_capacity: int | None = None,
     capture_event_predictions: bool = False,
     verbose: bool = True,
+    working_update_until_event: int | None = None,
+    audit_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], MemoryTreeInference, float]:
     """Evaluate read-only-persistent sequences with scalar accumulation.
 
@@ -1105,11 +1372,17 @@ def run_variant_compact(
             prototype_duplicate_threshold=prototype_duplicate_threshold,
             prototype_mode_threshold=prototype_mode_threshold,
             prototype_context_alias_capacity=prototype_context_alias_capacity,
+            working_update_until_event=working_update_until_event,
         ),
     )
     inference = _configure_evaluation_frontier(inference)
     if not settings["episodic"]:
         clear_episodic_memory(inference)
+    persistent_hash_before = (
+        persistent_state_hash(inference)
+        if protocol in {EvaluationProtocol.FROZEN, EvaluationProtocol.FAST_ADAPT}
+        else None
+    )
 
     static_cache = inference.tree.frontier_routing.build_static_cache(
         detach=True
@@ -1182,6 +1455,15 @@ def run_variant_compact(
                         float(value)
                         for value in event["forecast_type_probabilities"]
                     ]
+                    _require_finite_type_probabilities(forecast_probs, {
+                        "variant": canonical,
+                        "source_index": source_sequence["source_index"],
+                        "event_index": event["event_index"],
+                        "nll": event["nll"],
+                        "type_probabilities_at_event_time": event[
+                            "type_probabilities_at_event_time"
+                        ],
+                    })
                     predicted_type = int(
                         event.get(
                             "forecast_predicted_type",
@@ -1312,6 +1594,16 @@ def run_variant_compact(
                 int(row.get("event_index", 0)),
             )
         )
+    _finish_protocol_audit(
+        inference,
+        canonical=canonical,
+        protocol=protocol,
+        memory_view=memory_view,
+        sequence_count=len(sequences),
+        hash_before=persistent_hash_before,
+        working_update_until_event=working_update_until_event,
+        audit_rows=audit_rows,
+    )
     return metrics_by_group, event_rows, inference, elapsed
 
 
@@ -2540,6 +2832,7 @@ def main() -> None:
 
     all_rows: dict[str, list[dict]] = {}
     variant_metrics = {}
+    protocol_audit_rows: list[dict[str, Any]] = []
     final_inference = None
     for variant in variants:
         canonical, protocol, memory_view, settings = _evaluation_spec(variant)
@@ -2554,8 +2847,17 @@ def main() -> None:
         # Compact/scalar runs intentionally do not use an event-row cache: an
         # old row file must not silently turn the default no-event-output path
         # back into a large Python-object evaluation.
+        cached_rows = None
         if args.resume and completed_path.is_file() and capture_event_predictions:
-            rows = json.loads(completed_path.read_text(encoding="utf-8"))
+            candidate_rows = json.loads(completed_path.read_text(encoding="utf-8"))
+            error = _cached_forecast_error(candidate_rows)
+            if error is not None:
+                print(f"[Resume] {error}; recomputing {canonical}", flush=True)
+            else:
+                cached_rows = candidate_rows
+        fresh_event_rows = False
+        if cached_rows is not None:
+            rows = cached_rows
             inference = MemoryTreeInference.from_checkpoint(
                 args.checkpoint,
                 device=args.device,
@@ -2576,6 +2878,24 @@ def main() -> None:
             inference = _configure_evaluation_frontier(inference)
             if not settings["episodic"]:
                 clear_episodic_memory(inference)
+            protocol_audit_rows.append({
+                "variant": canonical,
+                "protocol": protocol.value,
+                "memory_view": memory_view,
+                "sequences": len(sequences),
+                "working_memory_adapt": bool(settings["working"]),
+                "persistent_writes_allowed": bool(settings["writes"]),
+                "usage_updates_allowed": bool(settings["online"]),
+                "working_memory_reset": "per_sequence",
+                "persistent_state_hash_before": None,
+                "persistent_state_hash_after": None,
+                "persistent_state_unchanged": None,
+                "expected_unchanged": protocol in {
+                    EvaluationProtocol.FROZEN,
+                    EvaluationProtocol.FAST_ADAPT,
+                },
+                "audit_status": "cached_not_executed",
+            })
             elapsed = 0.0
             print(f"[Resume] reused completed variant {canonical}")
         elif not capture_event_predictions and args.resume and scalar_completed_path.is_file():
@@ -2597,6 +2917,24 @@ def main() -> None:
                 prototype_mode_threshold=args.prototype_mode_threshold,
                 prototype_context_alias_capacity=args.prototype_context_alias_capacity,
             )
+            protocol_audit_rows.append({
+                "variant": canonical,
+                "protocol": protocol.value,
+                "memory_view": memory_view,
+                "sequences": len(sequences),
+                "working_memory_adapt": bool(settings["working"]),
+                "persistent_writes_allowed": bool(settings["writes"]),
+                "usage_updates_allowed": bool(settings["online"]),
+                "working_memory_reset": "per_sequence",
+                "persistent_state_hash_before": None,
+                "persistent_state_hash_after": None,
+                "persistent_state_unchanged": None,
+                "expected_unchanged": protocol in {
+                    EvaluationProtocol.FROZEN,
+                    EvaluationProtocol.FAST_ADAPT,
+                },
+                "audit_status": "cached_not_executed",
+            })
             rows = []
             elapsed = 0.0
             print(f"[Resume] reused scalar metrics for {canonical}")
@@ -2619,6 +2957,7 @@ def main() -> None:
                     prototype_mode_threshold=args.prototype_mode_threshold,
                     prototype_context_alias_capacity=args.prototype_context_alias_capacity,
                     capture_event_predictions=False,
+                    audit_rows=protocol_audit_rows,
                 )
             )
             metrics = compact_by_group.get("all")
@@ -2649,6 +2988,7 @@ def main() -> None:
                 prototype_duplicate_threshold=args.prototype_duplicate_threshold,
                 prototype_mode_threshold=args.prototype_mode_threshold,
                 prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+                audit_rows=protocol_audit_rows,
             )
             metrics = scalar_by_group.get("all")
             if metrics is None and len(scalar_by_group) == 1:
@@ -2675,8 +3015,9 @@ def main() -> None:
                 prototype_duplicate_threshold=args.prototype_duplicate_threshold,
                 prototype_mode_threshold=args.prototype_mode_threshold,
                 prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+                audit_rows=protocol_audit_rows,
             )
-            completed_path.write_text(json.dumps(_jsonable(rows)), encoding="utf-8")
+            fresh_event_rows = True
         all_rows[canonical] = rows
         if capture_event_predictions or metrics is None:
             metrics = aggregate_metrics(
@@ -2685,6 +3026,8 @@ def main() -> None:
                 args.seed,
                 args.bootstrap_samples,
             )
+        if fresh_event_rows:
+            completed_path.write_text(json.dumps(_jsonable(rows)), encoding="utf-8")
         metrics.update({
             "elapsed_seconds": elapsed,
             "events_per_second": int(metrics.get("events", len(rows)))
@@ -2728,6 +3071,7 @@ def main() -> None:
         "primary_protocol": "frozen",
         "event_prediction_scope": event_scope,
         "variants": variant_metrics,
+        "protocol_audit_file": str((args.output_dir / "protocol_audit.csv").resolve()),
         "ablations": ablations,
         "controller": controller,
         "retrieval_counterfactual": retrieval_counterfactual,
@@ -2785,6 +3129,7 @@ def main() -> None:
             prototype_duplicate_threshold=args.prototype_duplicate_threshold,
             prototype_mode_threshold=args.prototype_mode_threshold,
             prototype_context_alias_capacity=args.prototype_context_alias_capacity,
+            audit_rows=protocol_audit_rows,
         )
         expected_frozen_sha = frozen_event_sha256(base_rows)
         expected_frozen_sources = actual_frozen_sources
@@ -3025,6 +3370,7 @@ def main() -> None:
         for row in metrics.get("utility_deciles", [])
     ]
     write_csv(args.output_dir / "controller_utility_deciles.csv", decile_rows)
+    write_csv(args.output_dir / "protocol_audit.csv", protocol_audit_rows)
     history_rows = []
     for epoch_row in checkpoint_meta.get("history", []):
         history_rows.append({

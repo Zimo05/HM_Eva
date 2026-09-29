@@ -560,6 +560,7 @@ def _load_or_run_batch(
     data_sha_cache: Mapping[Path, str],
     checkpoint_sha256: str,
     args: argparse.Namespace,
+    protocol_audit_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], float, bool]:
     """Evaluate one checkpoint/variant with protocol-correct state scope.
 
@@ -635,6 +636,30 @@ def _load_or_run_batch(
             json.loads(events_path.read_text(encoding="utf-8"))
             if capture_event_rows else []
         )
+        if protocol_audit_rows is not None:
+            protocol_audit_rows.append({
+                "variant": variant,
+                "protocol": variant.split("/", 1)[0],
+                "memory_view": variant.split("/", 1)[1],
+                "checkpoint_task": int(checkpoint_task),
+                "checkpoint": str(checkpoint.resolve()),
+                "checkpoint_sha256": checkpoint_sha256,
+                "evaluation_sets": ",".join(
+                    item.name for item in evaluation_sets
+                ),
+                "sequences": sum(
+                    len(evaluation_cache[item.path]) for item in evaluation_sets
+                ),
+                "working_memory_adapt": variant.startswith(("fast_adapt/", "online_write/")),
+                "persistent_writes_allowed": variant.startswith("online_write/"),
+                "usage_updates_allowed": variant.startswith("online_write/"),
+                "working_memory_reset": "per_sequence",
+                "persistent_state_hash_before": None,
+                "persistent_state_hash_after": None,
+                "persistent_state_unchanged": None,
+                "expected_unchanged": variant.startswith(("frozen/", "fast_adapt/")),
+                "audit_status": "cached_not_executed",
+            })
         return metrics, events, 0.0, True
 
     progress_dir = None
@@ -676,6 +701,7 @@ def _load_or_run_batch(
     metrics: dict[str, dict[str, Any]] = {}
     event_rows: list[dict[str, Any]] = []
     elapsed = 0.0
+    audit_start = len(protocol_audit_rows) if protocol_audit_rows is not None else 0
     if not evaluation_sets:
         raise ValueError(
             f"no evaluation sets available for checkpoint task_{checkpoint_task:02d}"
@@ -722,6 +748,7 @@ def _load_or_run_batch(
                 prototype_context_alias_capacity=args.prototype_context_alias_capacity,
                 capture_event_predictions=capture_event_rows,
                 verbose=args.verbose,
+                audit_rows=protocol_audit_rows,
             )
         else:
             metrics = {}
@@ -783,6 +810,7 @@ def _load_or_run_batch(
                 prototype_mode_threshold=args.prototype_mode_threshold,
                 prototype_context_alias_capacity=args.prototype_context_alias_capacity,
                 verbose=args.verbose,
+                audit_rows=protocol_audit_rows,
             )
             set_metrics = aggregate_event_rows(rows)
         else:
@@ -800,6 +828,7 @@ def _load_or_run_batch(
                 prototype_mode_threshold=args.prototype_mode_threshold,
                 prototype_context_alias_capacity=args.prototype_context_alias_capacity,
                 verbose=args.verbose,
+                audit_rows=protocol_audit_rows,
             )
             set_metrics = set_metrics_by_group.get(
                 evaluation_set.name,
@@ -814,6 +843,16 @@ def _load_or_run_batch(
             event_rows.extend(rows)
         metrics[evaluation_set.name] = set_metrics
         elapsed += float(set_elapsed)
+    if protocol_audit_rows is not None:
+        for audit_row in protocol_audit_rows[audit_start:]:
+            audit_row.update({
+                "checkpoint_task": int(checkpoint_task),
+                "checkpoint": str(checkpoint.resolve()),
+                "checkpoint_sha256": checkpoint_sha256,
+                "evaluation_sets": ",".join(
+                    item.name for item in evaluation_sets
+                ),
+            })
     if args.resume:
         metrics_path.write_text(
             json.dumps(_jsonable(metrics), ensure_ascii=False),
@@ -1440,6 +1479,7 @@ def _adaptation_records(
     args: argparse.Namespace,
     *,
     variant: str = "fast_adapt/full",
+    protocol_audit_rows: list[dict[str, Any]] | None = None,
 ) -> list[AdaptationRecord]:
     """Run independent K-indexed support/query evaluations from fresh clones."""
 
@@ -1451,13 +1491,42 @@ def _adaptation_records(
         spec = protocol.adaptation(task_id)
         if spec is None:
             continue
+        task_spec = protocol.task(task_id)
         previous_tasks = [
             candidate for candidate in protocol.task_ids
             if candidate < task_id and candidate in checkpoint_paths
         ]
-        if not previous_tasks:
+        if previous_tasks:
+            checkpoint = checkpoint_paths[max(previous_tasks)]
+        elif (
+            task_id == min(protocol.task_ids)
+            and getattr(args, "fwt_scratch_checkpoint", None) is not None
+        ):
+            checkpoint = Path(args.fwt_scratch_checkpoint).expanduser().resolve()
+            if not checkpoint.is_file():
+                raise FileNotFoundError(
+                    f"C_init checkpoint does not exist: {checkpoint}"
+                )
+        else:
             continue
-        checkpoint = checkpoint_paths[max(previous_tasks)]
+        recurrence_laws = [
+            law.strip()
+            for law in str(task_spec.recurrence_of or "").split("|")
+            if law.strip()
+        ]
+        first_exposure_laws = [
+            regime_id
+            for regime_id, weight in task_spec.regime_weights.items()
+            if float(weight) > 0.0
+            and protocol.first_seen.get(regime_id) == int(task_id)
+        ]
+        law_id = (
+            recurrence_laws[0]
+            if len(recurrence_laws) == 1
+            else first_exposure_laws[0]
+            if len(first_exposure_laws) == 1
+            else None
+        )
         support = _load_cl_dataset(
             spec["support"], expected_types, args.max_sequences
         )
@@ -1473,6 +1542,10 @@ def _adaptation_records(
                     pre_nll=None,
                     adapted_nll=None,
                     protocol=variant.split("/", 1)[0],
+                    law_id=law_id,
+                    shift_type=task_spec.shift_type,
+                    recurrence_of=task_spec.recurrence_of,
+                    query_frozen=variant.startswith("fast_adapt/"),
                 ))
                 continue
             support_times, support_types = prefix
@@ -1498,6 +1571,10 @@ def _adaptation_records(
                     ),
                 })
             if variant.startswith("fast_adapt/"):
+                audit_start = (
+                    len(protocol_audit_rows)
+                    if protocol_audit_rows is not None else 0
+                )
                 _, event_rows, _inference, _elapsed = run_variant_compact(
                     checkpoint,
                     combined,
@@ -1506,17 +1583,35 @@ def _adaptation_records(
                     sequence_batch_size=getattr(args, "eval_batch_size", 64),
                     capture_event_predictions=True,
                     verbose=args.verbose,
+                    working_update_until_event=int(K),
+                    audit_rows=protocol_audit_rows,
                 )
             else:
                 # ONLINE_WRITE must preserve sequence order because the bank
                 # after one combined sequence is the state seen by the next.
+                audit_start = (
+                    len(protocol_audit_rows)
+                    if protocol_audit_rows is not None else 0
+                )
                 event_rows, _inference, _elapsed = run_variant(
                     checkpoint,
                     combined,
                     variant,
                     args.device,
                     verbose=args.verbose,
+                    audit_rows=protocol_audit_rows,
                 )
+            if protocol_audit_rows is not None:
+                for audit_row in protocol_audit_rows[audit_start:]:
+                    audit_row.update({
+                        "audit_scope": "adaptation_support_query",
+                        "task_id": int(task_id),
+                        "K": int(K),
+                        "law_id": law_id,
+                        "shift_type": task_spec.shift_type,
+                        "recurrence_of": task_spec.recurrence_of,
+                        "checkpoint": str(checkpoint.resolve()),
+                    })
             query_rows = [
                 row for row in event_rows
                 if int(row.get("event_index", -1)) >= int(K)
@@ -1528,6 +1623,10 @@ def _adaptation_records(
                 pre_nll=None,
                 adapted_nll=adapted_nll,
                 protocol=variant.split("/", 1)[0],
+                law_id=law_id,
+                shift_type=task_spec.shift_type,
+                recurrence_of=task_spec.recurrence_of,
+                query_frozen=variant.startswith("fast_adapt/"),
             ))
     return records
 
@@ -2584,6 +2683,7 @@ def _plot_summary_figures(
     special_rows: Sequence[Mapping[str, Any]],
     intensity_summary_rows: Sequence[Mapping[str, Any]],
     checkpoint_rows: Sequence[Mapping[str, Any]],
+    adaptation_points: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
     """Plot the compact CL figures most useful for diagnosis and a paper."""
 
@@ -2883,6 +2983,80 @@ def _plot_summary_figures(
         else:
             plt.close(figure)
 
+    # Keep recurrence evidence at the law level. Each task gets its own curve;
+    # averaging first exposures with returns would hide whether prior memory
+    # reduced the causal support needed for the same law.
+    recurrence_points: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in adaptation_points:
+        law_id = row.get("law_id")
+        if (
+            row.get("protocol") == "fast_adapt"
+            and row.get("query_frozen") is not False
+            and law_id not in (None, "")
+        ):
+            recurrence_points[str(law_id)].append(row)
+    for law_id, law_rows in sorted(recurrence_points.items()):
+        if not any(
+            row.get("shift_type") in {"exact_recurrence", "long_gap_recurrence"}
+            for row in law_rows
+        ):
+            continue
+        task_groups: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+        for row in law_rows:
+            try:
+                task_groups[int(row["task_id"])].append(row)
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not task_groups:
+            continue
+        figure, axes = plt.subplots(1, 2, figsize=(12, 4.7), squeeze=False)
+        plotted = False
+        for task_id, task_rows in sorted(task_groups.items()):
+            ordered = sorted(task_rows, key=lambda row: int(row.get("K", 0)))
+            ks = [int(row.get("K", 0)) for row in ordered]
+            losses = [finite(row.get("nll", row.get("adapted_nll"))) for row in ordered]
+            burdens = [finite(row.get("burden_nll")) for row in ordered]
+            valid_loss = [(k, value) for k, value in zip(ks, losses) if value is not None]
+            valid_burden = [
+                (k, value) for k, value in zip(ks, burdens) if value is not None
+            ]
+            if not valid_loss:
+                continue
+            shift = next(
+                (str(row.get("shift_type")) for row in ordered if row.get("shift_type")),
+                "task",
+            )
+            label = f"task {task_id}: {shift}"
+            axes[0, 0].plot(
+                [item[0] for item in valid_loss],
+                [item[1] for item in valid_loss],
+                marker="o",
+                linewidth=1.8,
+                label=label,
+            )
+            if valid_burden:
+                axes[0, 1].plot(
+                    [item[0] for item in valid_burden],
+                    [item[1] for item in valid_burden],
+                    marker="o",
+                    linewidth=1.8,
+                    label=label,
+                )
+            plotted = True
+        if plotted:
+            axes[0, 0].set_title(f"{law_id}: fixed-query NLL(k)")
+            axes[0, 0].set_ylabel("query NLL/event (lower is better)")
+            axes[0, 1].set_title(f"{law_id}: burden relative to Kmax")
+            axes[0, 1].set_ylabel("burden NLL (lower is better)")
+            for axis in axes[0]:
+                axis.set_xlabel("causal support events, K")
+                axis.grid(alpha=0.25)
+                axis.legend(fontsize=7)
+            safe_law_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", law_id)
+            save(figure, f"adaptation_recurrence_{safe_law_id}.png")
+        else:
+            plt.close(figure)
+
     # Dataset-specific recurrence/specialization diagnostics become available gradually.
     special_points = [
         (str(row.get("metric")), value)
@@ -3038,14 +3212,19 @@ def _write_report(
             f"- Average FWT: `{fmt(fwt.get('average_fwt'), 6)}` "
             f"({fwt.get('status', 'not_available')}).",
             "",
-            "| protocol | task | K min | K max | adaptation AUC | status |",
-            "|---|---:|---:|---:|---:|---|",
+            "| protocol | task | K min | K max | L(0) | L(Kmax) | total gain | gain AUC | burden AUC | status |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ])
         for row in adaptation.get("summary", ()):
             lines.append(
                 f"| {row.get('protocol') or 'default'} | {row.get('task_id')} | "
                 f"{fmt(row.get('K_min'), 0)} | {fmt(row.get('K_max'), 0)} | "
-                f"{fmt(row.get('adaptation_auc'), 6)} | {row.get('status')} |"
+                f"{fmt(row.get('initial_nll'), 6)} | "
+                f"{fmt(row.get('reference_nll'), 6)} | "
+                f"{fmt(row.get('total_adaptation_gain'), 6)} | "
+                f"{fmt(row.get('adaptation_gain_auc'), 6)} | "
+                f"{fmt(row.get('adaptation_burden_auc'), 6)} | "
+                f"{row.get('status')} / {row.get('burden_status')} |"
             )
         if rrr.get("rows"):
             lines.extend([
@@ -3183,7 +3362,8 @@ def _write_report(
         "- `law_metrics.csv`: per-law CLNLL support, forgetting, and BWT terms.",
         "- `stage_metrics.csv`: pre/post task-test adaptation gains.",
         "- `fwt_metrics.csv`: protocol-scoped forward transfer with fixed scratch baseline when supplied.",
-        "- `adaptation_points.csv` / `adaptation_summary.csv`: fixed-query K-indexed adaptation curves and normalized AUC.",
+        "- `adaptation_points.csv` / `adaptation_summary.csv`: fixed-query K-indexed NLL, gain, burden, and normalized AUC metrics.",
+        "- `protocol_audit.csv`: persistent-state hashes for executed frozen/fast-adapt runs; cache reuse is marked as not executed.",
         "- `rrr_metrics.csv`: protocol-driven exact/long-gap recurrence retention ratios.",
         "- `hm_state.csv`: HM-only memory, topology transaction counts, and NISE.",
         "- `cl_metrics.json`: canonical CL metric contract shared with baseline runners.",
@@ -3235,11 +3415,16 @@ def _write_protocol_outputs(
         "time_MAE", "retrieval_hit", "working_norm", "write_count",
     )
     adaptation_fields = (
-        "protocol", "task_id", "K", "pre_nll", "adapted_nll", "gain_nll",
+        "protocol", "task_id", "law_id", "shift_type", "recurrence_of",
+        "query_frozen", "K", "nll", "pre_nll", "adapted_nll",
+        "reference_nll", "gain_nll", "gain_from_K0", "burden_nll",
     )
     adaptation_summary_fields = (
-        "protocol", "task_id", "K_min", "K_max", "K_count",
-        "adaptation_auc", "status",
+        "protocol", "task_id", "law_id", "shift_type", "recurrence_of",
+        "query_frozen", "K_min", "K_max", "K_count", "initial_nll",
+        "reference_nll", "total_adaptation_gain", "adaptation_auc",
+        "adaptation_gain_auc", "adaptation_burden_auc", "status",
+        "burden_status",
     )
     anchor_matrix_fields = (
         "checkpoint_task", "variant",
@@ -3672,6 +3857,7 @@ def main() -> None:
     anchor_matrix_rows: list[dict[str, Any]] = []
     control_matrix_rows: list[dict[str, Any]] = []
     protocol_event_rows: list[dict[str, Any]] = []
+    protocol_audit_rows: list[dict[str, Any]] = []
     event_scope = _event_prediction_scope(args)
     event_writer = (
         _EventPredictionWriter(args.output_dir / "event_predictions.csv")
@@ -3737,6 +3923,7 @@ def main() -> None:
             data_sha_cache=data_sha_cache,
             checkpoint_sha256=initial_sha256,
             args=args,
+            protocol_audit_rows=protocol_audit_rows,
         )
         initial_metric_row = _metric_row(
             checkpoint_task=INITIAL_CHECKPOINT_TASK,
@@ -3819,6 +4006,7 @@ def main() -> None:
                     data_sha_cache=data_sha_cache,
                     checkpoint_sha256=checkpoint_sha[checkpoint_task],
                     args=args,
+                    protocol_audit_rows=protocol_audit_rows,
                 )
             )
             for evaluation_set in evaluation_sets:
@@ -3884,6 +4072,7 @@ def main() -> None:
             expected_types,
             args,
             variant=adaptation_variant,
+            protocol_audit_rows=protocol_audit_rows,
         ))
     topology_events = _read_topology_events(args.checkpoint_dir)
     hm_state_records = _hm_state_records(
@@ -4068,15 +4257,20 @@ def main() -> None:
         args.output_dir / "adaptation_points.csv",
         metric_report["adaptation"]["points"],
         fieldnames=(
-            "protocol", "task_id", "K", "pre_nll", "adapted_nll", "gain_nll",
+            "protocol", "task_id", "law_id", "shift_type", "recurrence_of",
+            "query_frozen", "K", "nll", "pre_nll", "adapted_nll",
+            "reference_nll", "gain_nll", "gain_from_K0", "burden_nll",
         ),
     )
     write_csv(
         args.output_dir / "adaptation_summary.csv",
         metric_report["adaptation"]["summary"],
         fieldnames=(
-            "protocol", "task_id", "K_min", "K_max", "K_count",
-            "adaptation_auc", "status",
+            "protocol", "task_id", "law_id", "shift_type", "recurrence_of",
+            "query_frozen", "K_min", "K_max", "K_count", "initial_nll",
+            "reference_nll", "total_adaptation_gain", "adaptation_auc",
+            "adaptation_gain_auc", "adaptation_burden_auc", "status",
+            "burden_status",
         ),
     )
     write_csv(
@@ -4089,6 +4283,7 @@ def main() -> None:
         ),
     )
     write_csv(args.output_dir / "hm_state.csv", hm_state_rows)
+    write_csv(args.output_dir / "protocol_audit.csv", protocol_audit_rows)
     (args.output_dir / "cl_metrics.json").write_text(
         json.dumps(_jsonable(metric_report), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -4115,6 +4310,7 @@ def main() -> None:
             special_rows=special_rows,
             intensity_summary_rows=intensity_summary_rows,
             checkpoint_rows=checkpoint_rows,
+            adaptation_points=metric_report["adaptation"]["points"],
         )
     )
 

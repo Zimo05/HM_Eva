@@ -86,3 +86,41 @@ def test_adaptation_auc_uses_k_span_and_requires_zero():
     assert task_three["adaptation_auc"] == 2.5
     task_one = next(row for row in report["summary"] if row["task_id"] == 1)
     assert task_one["status"] == "not_available_missing_K0"
+
+
+def test_adaptation_burden_auc_uses_nonuniform_k_trapezoids():
+    k_values = (0, 1, 2, 4, 8, 16, 32)
+    nll_values = (10.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0)
+    report = CLMetricEngine(FakeProtocol()).adaptation([
+        AdaptationRecord(
+            task_id=4,
+            K=k,
+            pre_nll=10.0,
+            adapted_nll=nll,
+            protocol="fast_adapt",
+            law_id="A_1",
+            shift_type="exact_recurrence",
+            recurrence_of="A_1",
+            query_frozen=True,
+        )
+        for k, nll in zip(k_values, nll_values)
+    ])
+
+    summary = report["summary"][0]
+    assert summary["reference_nll"] == 3.0
+    assert summary["total_adaptation_gain"] == 7.0
+    assert summary["adaptation_burden_auc"] == 47.5 / 32.0
+    assert summary["law_id"] == "A_1"
+    point_zero = next(row for row in report["points"] if row["K"] == 0)
+    assert point_zero["nll"] == 10.0
+    assert point_zero["gain_from_K0"] == 0.0
+    assert point_zero["burden_nll"] == 7.0
+
+
+def test_adaptation_burden_is_not_reported_when_query_keeps_mutating():
+    report = CLMetricEngine(FakeProtocol()).adaptation([
+        AdaptationRecord(4, 0, 10.0, 10.0, protocol="online_write", query_frozen=False),
+        AdaptationRecord(4, 2, 10.0, 6.0, protocol="online_write", query_frozen=False),
+    ])
+    assert report["summary"][0]["adaptation_burden_auc"] is None
+    assert report["summary"][0]["burden_status"] == "not_applicable_query_not_frozen"

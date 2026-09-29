@@ -50,6 +50,12 @@ class AdaptationRecord:
     # record contract; callers that do not provide a protocol get one curve
     # per task as before.
     protocol: str | None = None
+    # Optional schedule metadata used to plot first exposure and recurrence
+    # curves for the same law without averaging unrelated tasks together.
+    law_id: str | None = None
+    shift_type: str | None = None
+    recurrence_of: str | None = None
+    query_frozen: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -447,7 +453,7 @@ def _normalised_auc(points: Mapping[int, float]) -> float | None:
 def compute_adaptation_metrics(
     records: Sequence[AdaptationRecord | Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Compute gain/AUC by K, with K=0 as the pre-adaptation baseline."""
+    """Compute gain and burden curves by K using each task's fixed query set."""
 
     grouped: dict[tuple[str | None, int], dict[int, dict[str, Any]]] = {}
     for record in records:
@@ -471,6 +477,10 @@ def compute_adaptation_metrics(
             "pre_nll": pre_nll,
             "adapted_nll": adapted_nll,
             "protocol": protocol,
+            "law_id": _value(record, "law_id"),
+            "shift_type": _value(record, "shift_type"),
+            "recurrence_of": _value(record, "recurrence_of"),
+            "query_frozen": _value(record, "query_frozen"),
         }
 
     point_rows: list[dict[str, Any]] = []
@@ -487,6 +497,15 @@ def compute_adaptation_metrics(
                 None,
             )
         gains: dict[int, float] = {}
+        max_k = max(points) if points else None
+        reference_nll = (
+            points[max_k].get("adapted_nll") if max_k is not None else None
+        )
+        query_frozen = next(
+            (row.get("query_frozen") for row in ordered if row.get("query_frozen") is not None),
+            None,
+        )
+        burdens: dict[int, float] = {}
         for row in ordered:
             pre_nll = row["pre_nll"] if row["pre_nll"] is not None else baseline
             gain = (
@@ -494,14 +513,29 @@ def compute_adaptation_metrics(
                 if pre_nll is not None and row["adapted_nll"] is not None
                 else None
             )
+            burden = (
+                row["adapted_nll"] - reference_nll
+                if (
+                    query_frozen is not False
+                    and row["adapted_nll"] is not None
+                    and reference_nll is not None
+                )
+                else None
+            )
             output_row = {
                 **row,
+                "nll": row["adapted_nll"],
                 "pre_nll": pre_nll,
                 "gain_nll": gain,
+                "gain_from_K0": gain,
+                "reference_nll": reference_nll,
+                "burden_nll": burden,
             }
             point_rows.append(output_row)
             if gain is not None:
                 gains[row["K"]] = gain
+            if burden is not None:
+                burdens[row["K"]] = burden
         # A K=0 row is only a valid baseline when it contains an actual
         # measured value.  A placeholder row must not make a later K-only
         # curve look like a normalized adaptation curve.
@@ -511,27 +545,70 @@ def compute_adaptation_metrics(
             and 0 in gains
         )
         auc = _normalised_auc(gains) if has_zero else None
+        burden_auc = (
+            _normalised_auc(burdens)
+            if (
+                query_frozen is not False
+                and has_zero
+                and reference_nll is not None
+                and max_k != 0
+            )
+            else None
+        )
         if not has_zero:
             status = "not_available_missing_K0"
         elif auc is None:
             status = "not_available_insufficient_span"
         else:
             status = "available"
+        if query_frozen is False:
+            burden_status = "not_applicable_query_not_frozen"
+        elif reference_nll is None:
+            burden_status = "not_available_missing_Kmax"
+        elif not has_zero:
+            burden_status = "not_available_missing_K0"
+        elif burden_auc is None:
+            burden_status = "not_available_insufficient_span"
+        else:
+            burden_status = "available"
+        total_adaptation_gain = (
+            baseline - reference_nll
+            if baseline is not None and reference_nll is not None
+            else None
+        )
         summary_rows.append({
             "protocol": protocol,
             "task_id": task_id,
             "K_min": min(points) if points else None,
             "K_max": max(points) if points else None,
             "K_count": len(points),
+            "initial_nll": baseline,
+            "reference_nll": reference_nll,
+            "total_adaptation_gain": total_adaptation_gain,
             "adaptation_auc": auc,
+            "adaptation_gain_auc": auc,
+            "adaptation_burden_auc": burden_auc,
             "status": status,
+            "burden_status": burden_status,
+            "law_id": next((row.get("law_id") for row in ordered if row.get("law_id")), None),
+            "shift_type": next((row.get("shift_type") for row in ordered if row.get("shift_type")), None),
+            "recurrence_of": next((row.get("recurrence_of") for row in ordered if row.get("recurrence_of")), None),
+            "query_frozen": query_frozen,
         })
     values = [row["adaptation_auc"] for row in summary_rows if row["adaptation_auc"] is not None]
+    burden_values = [
+        row["adaptation_burden_auc"]
+        for row in summary_rows
+        if row["adaptation_burden_auc"] is not None
+    ]
     return {
         "points": point_rows,
         "summary": summary_rows,
         "average_adaptation_auc": _mean(values),
+        "average_adaptation_gain_auc": _mean(values),
+        "average_adaptation_burden_auc": _mean(burden_values),
         "status": "available" if values else "not_available",
+        "burden_status": "available" if burden_values else "not_available",
     }
 
 

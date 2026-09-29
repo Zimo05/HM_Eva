@@ -78,6 +78,18 @@ class InferenceConfig:
     # may write; listed events bypass the learned Write threshold but still use
     # the normal candidate construction and virtual retrieval path.
     write_event_allowlist: Optional[tuple[int, ...]] = None
+    # Optional exclusive event-index limit for causal Working Memory updates.
+    # When set to K, events [0, K) may adapt WM and the rest of the sequence
+    # is scored with the resulting state held fixed. Normal inference keeps
+    # the historical unbounded behavior when this is None.
+    working_update_until_event: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.working_update_until_event is not None:
+            limit = int(self.working_update_until_event)
+            if limit < 0:
+                raise ValueError("working_update_until_event must be non-negative")
+            self.working_update_until_event = limit
 
 
 class EvaluationProtocol(str, Enum):
@@ -429,13 +441,11 @@ class MemoryTreeInference:
         """Cache prefix statistics at the causal forecast origin.
 
         ``event_NLL`` uses the strict-time history cache.  Forecasting in
-        ``run_sequence`` evaluates the local rate at ``t[k - 1] + 1e-6`` and
-        integrates the corresponding Hawkes next-mark probability from the
-        same prefix.  For the next event, every prefix event is at or before
-        ``t[k - 1]``, so the cached history at ``t[k]`` can be rescaled to
-        that forecast origin; tied events are then added explicitly.  This
-        keeps the batched path algebraically identical to the scalar path
-        without putting a Python event loop around ``intensity_at_event``.
+        ``run_sequence`` starts at ``t[k - 1] + 1e-6``.  Start from the
+        cached statistics at ``t[k - 1]``, add every prefix event tied at
+        that timestamp, and decay forward by only ``1e-6``.  Rescaling the
+        cache at ``t[k]`` backward across a long gap would multiply an
+        underflowed exponential by an overflowed one (``0 * inf``).
         """
         times = sequence["times"]
         types = sequence["types"].long()
@@ -463,13 +473,10 @@ class MemoryTreeInference:
             dtype=times.dtype,
         )
 
-        # ``event_NLL``'s history cache is evaluated at times[k], while the
-        # scalar forecast is evaluated at times[k - 1] + 1e-6.  Since event k
-        # is the next event in a non-decreasing sequence, the contribution of
-        # every strict-time prefix event is changed by the same per-basis
-        # decay factor.  The remaining tied predecessors are not present in
-        # strict_history and are added from cumulative type counts.  No
-        # [L, L, M] tensor is needed.
+        # The strict cache at the previous event already includes all earlier
+        # timestamps.  Add the events tied at that timestamp (including the
+        # previous event), then decay the whole prefix by the forecast epsilon.
+        # No [L, L, M] tensor or positive exponential is needed.
         if event_count == 1:
             return strict_history
         one_hot_types = F.one_hot(
@@ -489,25 +496,15 @@ class MemoryTreeInference:
         same_timestamp_counts = cumulative[:-1] - run_base.index_select(
             0, run_ids[:-1]
         )
-        tied_with_previous = times[1:] == times[:-1]
         decays = self.hawkes.decays.to(device=times.device, dtype=times.dtype)
         forecast_epsilon = times.new_tensor(1e-6)
-        strict_scale = torch.exp(
-            (
-                times[1:] - times[:-1] - forecast_epsilon
-            ).reshape(-1, 1, 1)
-            * decays.reshape(1, 1, -1)
-        )
-        strict_forecast = strict_history[1:] * strict_scale
         same_timestamp_kernel = torch.exp(-forecast_epsilon * decays)
-        tied_correction = (
-            same_timestamp_counts.unsqueeze(-1)
-            * same_timestamp_kernel.reshape(1, 1, -1)
-            * tied_with_previous.reshape(-1, 1, 1).to(times.dtype)
-        )
+        forecast_stats = (
+            strict_history[:-1] + same_timestamp_counts.unsqueeze(-1)
+        ) * same_timestamp_kernel.reshape(1, 1, -1)
         return torch.cat([
             strict_history[:1],
-            strict_forecast + tied_correction,
+            forecast_stats,
         ], dim=0)
 
     @torch.no_grad()
@@ -1136,6 +1133,7 @@ class MemoryTreeInference:
         all_time_abs_by_sequence = z_flat.new_zeros(batch_size)
         working_state = self.tree.working_memory.new_batch_state(batch_size)
         adapt_working_memory = bool(self.config.adapt_working_memory)
+        working_update_limit = self.config.working_update_until_event
         need_events = bool(
             capture_prediction_theta or any(capture_by_sequence)
         )
@@ -1198,9 +1196,14 @@ class MemoryTreeInference:
         for active_rows in active_row_waves:
             if active_rows.numel() == 0:
                 continue
+            event_position = int(time_index[active_rows[0]].item())
+            adapt_this_event = adapt_working_memory and (
+                working_update_limit is None
+                or event_position < int(working_update_limit)
+            )
             sequence_rows = sequence_index.index_select(0, active_rows)
             state_before = working_state.index_select(0, sequence_rows)
-            if adapt_working_memory:
+            if adapt_this_event:
                 working_used = state_before.detach().clone().requires_grad_(True)
             else:
                 working_used = state_before
@@ -1251,7 +1254,7 @@ class MemoryTreeInference:
                     "raw_probabilities"
                 ]
 
-            with torch.set_grad_enabled(adapt_working_memory):
+            with torch.set_grad_enabled(adapt_this_event):
                 final_params = self._controller_effective_parameters(
                     wave_memory,
                     working_used,
@@ -1265,7 +1268,7 @@ class MemoryTreeInference:
                     active_durations,
                 )
 
-            if adapt_working_memory:
+            if adapt_this_event:
                 working_gradient = torch.autograd.grad(
                     final_nll.sum(),
                     working_used,
@@ -2483,6 +2486,7 @@ class MemoryTreeInference:
         accepted_write_count = 0
         local_accepted_write_count = 0
         accepted_write_requests: list[Dict[str, Any]] = []
+        working_update_limit = self.config.working_update_until_event
 
         for event_index in range(sequence["times"].numel()):
             with torch.no_grad():
@@ -2503,11 +2507,15 @@ class MemoryTreeInference:
                         sequence["types"],
                         event_index,
                     ).reshape(1, -1)
+            adapt_this_event = bool(self.config.adapt_working_memory) and (
+                working_update_limit is None
+                or event_index < int(working_update_limit)
+            )
             working_delta = self.tree.working_memory.make_trainable_delta()
-            if not self.config.adapt_working_memory:
+            if not adapt_this_event:
                 working_delta = working_delta.detach()
 
-            with torch.set_grad_enabled(self.config.adapt_working_memory):
+            with torch.set_grad_enabled(adapt_this_event):
                 memory_output = self.tree(
                     z_t=z_t,
                     working_delta=working_delta,
@@ -2571,7 +2579,7 @@ class MemoryTreeInference:
                 ) = self._action(
                     memory_output, nll, frontier_energy
                 )
-                with torch.set_grad_enabled(self.config.adapt_working_memory):
+                with torch.set_grad_enabled(adapt_this_event):
                     params = self._controller_effective_parameters(
                         memory_output,
                         working_delta,
@@ -2580,7 +2588,7 @@ class MemoryTreeInference:
                     nll = self.hawkes.event_NLL(
                         sequence, params, event_index
                     )
-                    if self.config.adapt_working_memory:
+                    if adapt_this_event:
                         working_grad = torch.autograd.grad(
                             nll, working_delta
                         )[0]
@@ -2611,7 +2619,7 @@ class MemoryTreeInference:
                 predicted_type = int(
                     forecast_type_probabilities.argmax().item()
                 )
-                if self.config.adapt_working_memory:
+                if adapt_this_event:
                     self.tree.working_memory.update_from_gradient(
                         working_grad,
                         adaptation_probability=action_probabilities[0],

@@ -1009,6 +1009,24 @@ def _run_baseline_adaptation(
 
     adapted_nll: dict[int, float | None] = {}
     status_rows: list[dict[str, Any]] = []
+    task_spec = protocol.task(task)
+    recurrence_laws = [
+        law.strip()
+        for law in str(task_spec.recurrence_of or "").split("|")
+        if law.strip()
+    ]
+    first_exposure_laws = [
+        regime_id
+        for regime_id, weight in task_spec.regime_weights.items()
+        if float(weight) > 0.0 and protocol.first_seen.get(regime_id) == int(task)
+    ]
+    law_id = (
+        recurrence_laws[0]
+        if len(recurrence_laws) == 1
+        else first_exposure_laws[0]
+        if len(first_exposure_laws) == 1
+        else None
+    )
     adaptation_root = target / "native" / f"task_{task:02d}" / "adaptation"
     prepared_root = target / "prepared" / f"task_{task:02d}_adaptation"
     query_path = Path(spec["query"])
@@ -1110,6 +1128,10 @@ def _run_baseline_adaptation(
             pre_nll=pre_nll,
             adapted_nll=adapted_nll.get(K),
             protocol="baseline",
+            law_id=law_id,
+            shift_type=task_spec.shift_type,
+            recurrence_of=task_spec.recurrence_of,
+            query_frozen=True,
         )
         for K in sorted(int(value) for value in spec["K"])
     ]
@@ -1191,6 +1213,9 @@ def _baseline_cl_summary(
         # Task-index AUC was never an adaptation curve.  The canonical field
         # is populated only when independent K-indexed records are supplied.
         "adaptation_auc": report["adaptation"]["average_adaptation_auc"],
+        "adaptation_burden_auc": report["adaptation"][
+            "average_adaptation_burden_auc"
+        ],
         "adaptation": report["adaptation"],
         "fwt": report["fwt"],
         "rrr": report["rrr"],
@@ -1466,15 +1491,20 @@ def _run_baseline_continual(model: str, strategy: str, args, target: Path,
         target / "adaptation_points.csv",
         cl_report["adaptation"]["points"],
         fieldnames=(
-            "protocol", "task_id", "K", "pre_nll", "adapted_nll", "gain_nll",
+            "protocol", "task_id", "law_id", "shift_type", "recurrence_of",
+            "query_frozen", "K", "nll", "pre_nll", "adapted_nll",
+            "reference_nll", "gain_nll", "gain_from_K0", "burden_nll",
         ),
     )
     write_csv(
         target / "adaptation_summary.csv",
         cl_report["adaptation"]["summary"],
         fieldnames=(
-            "protocol", "task_id", "K_min", "K_max", "K_count",
-            "adaptation_auc", "status",
+            "protocol", "task_id", "law_id", "shift_type", "recurrence_of",
+            "query_frozen", "K_min", "K_max", "K_count", "initial_nll",
+            "reference_nll", "total_adaptation_gain", "adaptation_auc",
+            "adaptation_gain_auc", "adaptation_burden_auc", "status",
+            "burden_status",
         ),
     )
     write_csv(target / "rrr_metrics.csv", cl_report["rrr"]["rows"])

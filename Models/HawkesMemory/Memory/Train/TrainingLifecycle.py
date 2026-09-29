@@ -6,6 +6,7 @@ from Train.TrainingComponents import *  # noqa: F403
 from Train.TrainingComponents import (
     _differentiable_merge_settings,
     _frontier_config_from_checkpoint,
+    _router_hidden_dim_from_checkpoint,
     _topology_prune_settings,
 )
 from Train.DistributedRuntime import DistributedRuntime
@@ -804,9 +805,7 @@ class TrainingLifecycleMixin:
             init_depth=0,
             temperature=config.get("tree_temperature", 1.0),
             hyper_hidden_dim=config.get("hyper_hidden_dim", 256),
-            router_hidden_dim=config.get(
-                "router_hidden_dim", 2 * int(config["node_dim"])
-            ),
+            router_hidden_dim=_router_hidden_dim_from_checkpoint(checkpoint),
             memory_key_dim=config["memory_key_dim"],
             memory_capacity_per_node=config.get("memory_capacity_per_node", 128),
             working_rho=config.get("working_rho", 0.8),

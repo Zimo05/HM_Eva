@@ -283,6 +283,39 @@ class CausalOnlineEncoderTests(unittest.TestCase):
             self.assertEqual(z_t.shape, (3,))
             self.assertTrue(torch.isfinite(z_t).all())
 
+    def test_checkpoint_router_width_comes_from_saved_weights(self):
+        encoder = CausalPrefixEncoder(2, 3, type_dim=4, hidden_dim=8)
+        tree = HawkesTree(
+            3, 128, 2, 1, init_depth=1,
+            memory_key_dim=3,
+        )
+        hawkes = HawkesFamily(2, 1, decays=torch.tensor([1.0]))
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "router_width.pt"
+            trainer = MemoryTreeTrainer(
+                tree, hawkes, encoder,
+                training=TrainingConfig(epochs=1, checkpoint_path=str(checkpoint)),
+                device="cpu",
+            )
+            payload = trainer.build_checkpoint_payload(checkpoint, epoch=0)
+            for configured_width in (None, 256):
+                with self.subTest(configured_width=configured_width):
+                    altered = {**payload, "model_config": dict(payload["model_config"])}
+                    if configured_width is None:
+                        altered["model_config"].pop("router_hidden_dim")
+                    else:
+                        altered["model_config"]["router_hidden_dim"] = configured_width
+                    inference = MemoryTreeInference.from_checkpoint(
+                        altered, device="cpu"
+                    )
+                    self.assertEqual(inference.tree.router_compat.hidden_dim, 128)
+                    torch.save(altered, checkpoint)
+                    restored = MemoryTreeTrainer.from_checkpoint(
+                        checkpoint, device="cpu"
+                    )
+                    self.assertEqual(restored.tree.router_compat.hidden_dim, 128)
+
 
 if __name__ == "__main__":
     unittest.main()

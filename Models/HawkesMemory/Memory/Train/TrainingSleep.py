@@ -616,10 +616,9 @@ class TrainingSleepMixin:
                 module,
                 output,
                 topology_revision=revision,
-                # Split commits on predictive gain; Merge's complexity price
-                # must not become an implicit Split budget. The optional
-                # persistent-byte cap is checked explicitly before commit.
-                lambda_T=0.0,
+                # Charge the shared topology price when comparing Split to
+                # the Null action, just as other topology edits do.
+                lambda_T=float(self.merge_lambda_T),
                 uncertainty_kappa=self.sleep_config.action_uncertainty_kappa,
                 # Retained by the public builder signature for checkpoint/API
                 # compatibility; production Split no longer gates on them.

@@ -28,7 +28,7 @@ class NodeSemanticCompatibility(nn.Module):
         self,
         z_dim: int,
         node_dim: int,
-        hidden_dim: int = 64,
+        hidden_dim: int = 256,
     ) -> None:
         super().__init__()
         self.z_dim = int(z_dim)

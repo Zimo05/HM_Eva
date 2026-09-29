@@ -117,6 +117,18 @@ def _frontier_config_from_checkpoint(
     return FrontierRoutingConfig(**values)
 
 
+def _router_hidden_dim_from_checkpoint(checkpoint: Mapping[str, Any]) -> int:
+    """Use the saved router weights when older config metadata disagrees."""
+    weight = checkpoint["tree_state_dict"].get(
+        "router_compat.score_mlp.0.weight"
+    )
+    if weight is not None:
+        if weight.ndim != 2 or weight.shape[0] <= 0:
+            raise ValueError("checkpoint router compatibility weight has invalid shape")
+        return int(weight.shape[0])
+    return int(checkpoint["model_config"].get("router_hidden_dim", 128))
+
+
 @dataclass
 class WakeObjectiveConfig:
     lambda_wm: float = 1e-3

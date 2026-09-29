@@ -642,6 +642,17 @@ def stationary_command(
                 "--merge-dual-lr",
                 "0.000001",
             ]
+        if spec.dataset == "dws":
+            command += [
+                "--split-min-replay-per-group",
+                "4",
+                "--split-persistence-cycles",
+                "3",
+                "--merge-dual-initial",
+                "0.03",
+                "--merge-dual-lr",
+                "0.001",
+            ]
         if spec.dataset == "retweet":
             # Retweet-only optimizer/probe tuning from the dedicated sweep.
             command += [

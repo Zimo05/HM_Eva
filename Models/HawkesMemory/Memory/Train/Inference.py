@@ -29,6 +29,7 @@ from Train.TrainingComponents import (
     CausalPrefixEncoder,
     WakeObjectiveConfig,
     _frontier_config_from_checkpoint,
+    _router_hidden_dim_from_checkpoint,
 )
 from Wake.HawkesParams import HawkesParams
 from Wake.SequentialController import Action, Controller
@@ -287,9 +288,7 @@ class MemoryTreeInference:
             init_depth=0,
             temperature=config.get("tree_temperature", 1.0),
             hyper_hidden_dim=config.get("hyper_hidden_dim", 256),
-            router_hidden_dim=config.get(
-                "router_hidden_dim", 2 * int(config["node_dim"])
-            ),
+            router_hidden_dim=_router_hidden_dim_from_checkpoint(checkpoint),
             memory_key_dim=config["memory_key_dim"],
             memory_capacity_per_node=config.get(
                 "memory_capacity_per_node", 128

@@ -71,7 +71,7 @@ class HawkesTree(
         init_depth: int = 1,
         temperature: float = 1.0,
         hyper_hidden_dim: int = 128,
-        router_hidden_dim: int = 64,
+        router_hidden_dim: int = 256,
         memory_key_dim: Optional[int] = None,
         memory_capacity_per_node: int = 128,
         working_rho: float = 0.8,

@@ -309,7 +309,7 @@ python Datasets/CL/generate_continual_hawkes.py --benchmark unified --output Dat
 
 HM 另外在 task 0 的任何 cold-start/optimization 之前保存 `C_init`（`initial_seed*.pt`）。`EvaluateCL` 用 `C_init` 评估 `D_0^test` 作为 task 0 的唯一 `pre` 边界；后续 task 的 `pre` 仍由前一阶段 checkpoint 评估下一 task。RRR 只使用这个 task-0 `C_init` 观测补首次 gain，不把其它 FWT scratch 观测当作 recurrence 的 `pre`。
 
-主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。RMTPP、THP、S2P2 和 AttNHP 也会在每个 checkpoint × frozen anchor 上用各自原生 conditional intensity 生成统一 256 点时间网格的曲线与 NISE；不会把 neural TPP 解码或拟合成 surrogate Hawkes。聚合结果写入 `intensity_metrics.csv`、`intensity_summary.csv`，曲线、原始点和 manifest 位于 `intensity_curves/checkpoint_task_XX/<regime_id>/`。HM 和四个 baseline 使用相同的 post-first-event 网格，并且都只使用严格历史 `t_j < g`。HM continual 默认每个 task 训练 60 epochs；仍可通过 `--epochs` 显式覆盖，smoke 模式仍固定为 1 epoch。
+主要指标包括 CL-NLL、Average Forgetting、BWT、FWT、adaptation gain/AUC 和 RRR；HM 还报告 TSR、树规模、episodic rows、semantic bytes 与 NISE。RMTPP、THP、S2P2 和 AttNHP 也会在每个 checkpoint × frozen anchor 上用各自原生 conditional intensity 生成统一 256 点时间网格的曲线与 NISE；不会把 neural TPP 解码或拟合成 surrogate Hawkes。聚合结果写入 `intensity_metrics.csv`、`intensity_summary.csv`，曲线、原始点和 manifest 位于 `intensity_curves/checkpoint_task_XX/<regime_id>/`。HM 和四个 baseline 使用相同的 post-first-event 网格，并且都只使用严格历史 `t_j < g`。CL 中 HM 和四个 baseline 默认每个 task 训练 30 epochs；仍可通过 `--epochs` 显式覆盖，smoke 模式仍固定为 1 epoch。
 
 HM 的训练期 validation 默认用 `--validation-batch-size 64` 对只读的
 `semantic_only` / `full_frozen` 路径做 compact GPU batch，并共享前缀与路由准备；

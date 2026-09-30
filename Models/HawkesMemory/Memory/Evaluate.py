@@ -59,6 +59,20 @@ def _event_prediction_scope(args: argparse.Namespace) -> str:
         )
     return str(scope)
 
+
+def _scalar_metrics_cache_has_macro_f1(path: Path) -> bool:
+    """Reject pre-Macro-F1 scalar caches when resuming an evaluation."""
+
+    try:
+        metrics = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(metrics, Mapping)
+        and "macro_f1" in metrics
+        and "confusion_matrix" in metrics
+    )
+
 # A memory view is orthogonal to the state transition protocol.  In
 # particular, ``frozen/full`` still retrieves the checkpoint's episodic bank;
 # ``semantic_only`` is a mechanism ablation and is not a fourth protocol.
@@ -371,6 +385,39 @@ def _benchmark_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]
     return [row for row in rows if int(row.get("event_index", 1)) >= 1]
 
 
+def _empty_confusion_matrix(num_types: int) -> torch.Tensor:
+    return torch.zeros((num_types, num_types), dtype=torch.long)
+
+
+def _accumulate_confusion_matrix(
+    target: torch.Tensor,
+    source: Sequence[Sequence[Any]],
+    num_types: int,
+) -> None:
+    source_tensor = torch.as_tensor(source, dtype=torch.long, device="cpu")
+    if tuple(source_tensor.shape) != (num_types, num_types):
+        raise ValueError(
+            "HM benchmark confusion matrix does not match num_types"
+        )
+    if bool((source_tensor < 0).any()):
+        raise ValueError("HM benchmark confusion counts cannot be negative")
+    target.add_(source_tensor)
+
+
+def _macro_f1_from_confusion_matrix(
+    confusion: Sequence[Sequence[int]] | torch.Tensor,
+    num_types: int,
+) -> float:
+    counts = torch.as_tensor(confusion, dtype=torch.float64, device="cpu")
+    if tuple(counts.shape) != (num_types, num_types):
+        raise ValueError("HM benchmark confusion matrix does not match num_types")
+    true_positive = counts.diagonal()
+    precision = true_positive / counts.sum(dim=0).clamp_min(1.0)
+    recall = true_positive / counts.sum(dim=1).clamp_min(1.0)
+    f1 = 2.0 * precision * recall / (precision + recall).clamp_min(1e-12)
+    return float(f1.mean().item())
+
+
 def _require_finite_type_probabilities(
     probs: Sequence[Any], row: Mapping[str, Any]
 ) -> None:
@@ -457,14 +504,6 @@ def classification_metrics(rows: Sequence[Mapping[str, Any]], num_types: int) ->
         brier += sum((p - float(index == truth)) ** 2 for index, p in enumerate(probs))
         confidence = max(probs)
         calibration[min(int(confidence * 10), 9)].append((confidence, prediction == truth))
-    f1_values = []
-    for label in range(num_types):
-        tp = confusion[label][label]
-        fp = sum(confusion[t][label] for t in range(num_types) if t != label)
-        fn = sum(confusion[label][p] for p in range(num_types) if p != label)
-        precision = tp / max(tp + fp, 1)
-        recall = tp / max(tp + fn, 1)
-        f1_values.append(2 * precision * recall / max(precision + recall, 1e-12))
     ece = sum(
         len(bucket) / len(rows)
         * abs(_mean(c for c, _ in bucket) - _mean(float(ok) for _, ok in bucket))
@@ -474,7 +513,7 @@ def classification_metrics(rows: Sequence[Mapping[str, Any]], num_types: int) ->
         "accuracy": correct / len(rows),
         "error_rate": 1.0 - correct / len(rows),
         "top3_accuracy": top3 / len(rows),
-        "macro_f1": _mean(f1_values),
+        "macro_f1": _macro_f1_from_confusion_matrix(confusion, num_types),
         "micro_f1": correct / len(rows),
         "cross_entropy": cross_entropy / len(rows),
         "brier_score": brier / len(rows),
@@ -1198,6 +1237,7 @@ def run_variant_scalar(
         if protocol in {EvaluationProtocol.FROZEN, EvaluationProtocol.FAST_ADAPT}
         else None
     )
+    num_types = int(inference.hawkes.num_types)
     accumulators: dict[str, dict[str, Any]] = {}
     start = time.perf_counter()
 
@@ -1240,6 +1280,7 @@ def run_variant_scalar(
             "nll_sum": 0.0,
             "correct": 0,
             "time_abs_sum": 0.0,
+            "confusion_matrix": _empty_confusion_matrix(num_types),
         })
         group["events"] += int(
             scalar.get("benchmark_events", scalar["events"])
@@ -1253,6 +1294,15 @@ def run_variant_scalar(
         )
         group["time_abs_sum"] += float(
             scalar.get("benchmark_time_abs_sum", scalar["time_abs_sum"])
+        )
+        sequence_confusion = scalar.get("benchmark_confusion")
+        if sequence_confusion is None:
+            raise RuntimeError(
+                f"{canonical} scalar inference did not return a benchmark "
+                "confusion matrix"
+            )
+        _accumulate_confusion_matrix(
+            group["confusion_matrix"], sequence_confusion, num_types
         )
 
         completed = sequence_position + 1
@@ -1289,6 +1339,10 @@ def run_variant_scalar(
             "nll_per_event": float(group["nll_sum"]) / denominator,
             "accuracy": float(group["correct"]) / denominator,
             "local_time_mae": float(group["time_abs_sum"]) / denominator,
+            "macro_f1": _macro_f1_from_confusion_matrix(
+                group["confusion_matrix"], num_types
+            ),
+            "confusion_matrix": group["confusion_matrix"].tolist(),
         }
     _finish_protocol_audit(
         inference,
@@ -1383,6 +1437,7 @@ def run_variant_compact(
         if protocol in {EvaluationProtocol.FROZEN, EvaluationProtocol.FAST_ADAPT}
         else None
     )
+    num_types = int(inference.hawkes.num_types)
 
     static_cache = inference.tree.frontier_routing.build_static_cache(
         detach=True
@@ -1434,6 +1489,7 @@ def run_variant_compact(
                 "nll_sum": 0.0,
                 "correct": 0,
                 "time_abs_sum": 0.0,
+                "confusion_matrix": _empty_confusion_matrix(num_types),
             })
             group["events"] += int(
                 scalar.get("benchmark_events", scalar["events"])
@@ -1447,6 +1503,15 @@ def run_variant_compact(
             )
             group["time_abs_sum"] += float(
                 scalar.get("benchmark_time_abs_sum", scalar["time_abs_sum"])
+            )
+            sequence_confusion = scalar.get("benchmark_confusion")
+            if sequence_confusion is None:
+                raise RuntimeError(
+                    f"{canonical} compact inference did not return a "
+                    "benchmark confusion matrix"
+                )
+            _accumulate_confusion_matrix(
+                group["confusion_matrix"], sequence_confusion, num_types
             )
 
             if capture_by_sequence[offset]:
@@ -1586,6 +1651,10 @@ def run_variant_compact(
             "nll_per_event": float(group["nll_sum"]) / denominator,
             "accuracy": float(group["correct"]) / denominator,
             "local_time_mae": float(group["time_abs_sum"]) / denominator,
+            "macro_f1": _macro_f1_from_confusion_matrix(
+                group["confusion_matrix"], num_types
+            ),
+            "confusion_matrix": group["confusion_matrix"].tolist(),
         }
     if capture_event_predictions:
         event_rows.sort(
@@ -2848,6 +2917,23 @@ def main() -> None:
         # old row file must not silently turn the default no-event-output path
         # back into a large Python-object evaluation.
         cached_rows = None
+        reuse_scalar_metrics = (
+            not capture_event_predictions
+            and args.resume
+            and scalar_completed_path.is_file()
+            and _scalar_metrics_cache_has_macro_f1(scalar_completed_path)
+        )
+        if (
+            not capture_event_predictions
+            and args.resume
+            and scalar_completed_path.is_file()
+            and not reuse_scalar_metrics
+        ):
+            print(
+                f"[Resume] cached scalar metrics lack Macro-F1; "
+                f"recomputing {canonical}",
+                flush=True,
+            )
         if args.resume and completed_path.is_file() and capture_event_predictions:
             candidate_rows = json.loads(completed_path.read_text(encoding="utf-8"))
             error = _cached_forecast_error(candidate_rows)
@@ -2898,7 +2984,7 @@ def main() -> None:
             })
             elapsed = 0.0
             print(f"[Resume] reused completed variant {canonical}")
-        elif not capture_event_predictions and args.resume and scalar_completed_path.is_file():
+        elif reuse_scalar_metrics:
             metrics = json.loads(
                 scalar_completed_path.read_text(encoding="utf-8")
             )

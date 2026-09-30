@@ -26,6 +26,7 @@ from Train.AlignmentInitialization import (
     run_membership_alignment,
     semantic_branch_logits,
 )
+from Train.TrainingCLI import _leaf_spectral_radius_summary
 from Train.ResidualInitialization import (
     aggregate_leaf_residual_prototypes,
     compute_sequence_residual_signatures,
@@ -1037,6 +1038,26 @@ class TrainInferenceTests(unittest.TestCase):
             torch.tensor([0.5, 0.5]),
         ))
         self.assertEqual(stats["gradient_clipped_fraction"], 0.0)
+
+    def test_exact_initialization_preserves_near_critical_taobao_stability(self):
+        torch.manual_seed(27)
+        hawkes = HawkesFamily(
+            17, 2, decays=torch.tensor([0.00005, 0.00015]),
+        )
+        hawkes.project_hawkes_stability(0.997291)
+        for depth in (0, 2):
+            tree = HawkesTree(3, 4, 17, 2, init_depth=depth, memory_key_dim=3)
+            # A zero raw excitation proposal still increases physical W when
+            # blended with the strongly negative logits needed by tiny decays.
+            with torch.no_grad():
+                for parameter in tree.hyper.parameters():
+                    parameter.zero_()
+            tree.initialize_semantics_from_hawkes(hawkes, semantic_blend=0.0)
+            stable = _leaf_spectral_radius_summary(tree, hawkes)
+            self.assertLess(stable["max"], 1.0)
+            self.assertAlmostEqual(stable["max"], 0.997291, places=5)
+            tree.initialize_semantics_from_hawkes(hawkes, semantic_blend=0.1)
+            self.assertGreater(_leaf_spectral_radius_summary(tree, hawkes)["max"], 1.0)
 
     def test_semantic_blend_preserves_offsets_and_node_differences(self):
         torch.manual_seed(29)

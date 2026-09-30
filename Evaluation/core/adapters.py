@@ -399,6 +399,11 @@ def stationary_command(
         memory = MODELS_ROOT / "HawkesMemory" / "Memory"
         checkpoint = result_dir / "checkpoint" / "model.pt"
         best = result_dir / "checkpoint" / "best.pt"
+        hawkes_decays = (
+            ("0.005", "0.015")
+            if spec.dataset == "taobao"
+            else ("0.5", "1.5")
+        )
         # These values are the shared stationary HM baseline contract.  The
         # Taobao branch below only changes the controls called out in the
         # dataset-specific tuning sheet; keep the other datasets byte-for-
@@ -481,8 +486,7 @@ def stationary_command(
             "--num-basis",
             "2",
             "--decays",
-            "0.5",
-            "1.5",
+            *hawkes_decays,
         ]
         if upstream_h_tree is not None:
             command += [

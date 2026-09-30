@@ -96,7 +96,7 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
     )
     protocol = Namespace(benchmark_id="synthetic", version=1)
     cl_config = _continual_cl_config(args, protocol, "full")
-    assert cl_config["epochs_per_task"] == 60
+    assert cl_config["epochs_per_task"] == 30
     assert cl_config["wake"]["retrieval_visit_chunk_size"] == 256
 
     command, _cwd, _env = _baseline_command(
@@ -107,7 +107,7 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
         None,
         False,
     )
-    assert command[command.index("--epochs") + 1] == "60"
+    assert command[command.index("--epochs") + 1] == "30"
     assert command[command.index("--batch-size") + 1] == "64"
     assert "--learning-rate" not in command
     assert "--d-model" not in command
@@ -127,7 +127,7 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
         rmtpp_command[rmtpp_command.index("--dataset-label") + 1]
         == "CL-core-v2"
     )
-    assert rmtpp_command[rmtpp_command.index("--epochs") + 1] == "60"
+    assert rmtpp_command[rmtpp_command.index("--epochs") + 1] == "30"
     assert rmtpp_command[rmtpp_command.index("--batch-size") + 1] == "64"
     assert rmtpp_command[rmtpp_command.index("--learning-rate") + 1] == "5e-4"
     assert rmtpp_command[rmtpp_command.index("--hidden-size") + 1] == "64"
@@ -149,7 +149,7 @@ def test_hm_and_baseline_runner_defaults_are_training_protocol_stable():
     )
     assert fullynn_cwd == ROOT / "Models" / "FullyNN"
     assert fullynn_command[1].endswith("Models/FullyNN/run_experiment.py")
-    assert fullynn_command[fullynn_command.index("--epochs") + 1] == "60"
+    assert fullynn_command[fullynn_command.index("--epochs") + 1] == "30"
     assert fullynn_command[fullynn_command.index("--batch-size") + 1] == "64"
     assert (
         fullynn_command[fullynn_command.index("--initial-checkpoint") + 1]

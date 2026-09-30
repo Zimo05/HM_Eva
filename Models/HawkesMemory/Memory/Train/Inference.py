@@ -1124,6 +1124,12 @@ class MemoryTreeInference:
             dtype=torch.long,
             device=device,
         )
+        num_types = int(self.hawkes.num_types)
+        benchmark_confusion_by_sequence = torch.zeros(
+            batch_size * num_types * num_types,
+            dtype=torch.long,
+            device=device,
+        )
         all_correct_by_sequence = torch.zeros(
             batch_size,
             dtype=torch.long,
@@ -1323,6 +1329,19 @@ class MemoryTreeInference:
 
                 score_mask = time_index.index_select(0, active_rows).gt(0)
                 scored_nll = final_nll.detach().masked_fill(~score_mask, 0.0)
+                scored_rows = sequence_rows[score_mask]
+                scored_truth = active_types[score_mask]
+                scored_prediction = predicted_type[score_mask]
+                confusion_indices = (
+                    scored_rows * (num_types * num_types)
+                    + scored_truth * num_types
+                    + scored_prediction
+                )
+                benchmark_confusion_by_sequence.index_add_(
+                    0,
+                    confusion_indices,
+                    torch.ones_like(confusion_indices),
+                )
 
                 nll_by_sequence.index_add_(
                     0,
@@ -1499,6 +1518,13 @@ class MemoryTreeInference:
                     "write_virtual_candidate_alpha": None,
                 }
 
+        benchmark_confusion_by_sequence_cpu = (
+            benchmark_confusion_by_sequence.reshape(
+                batch_size, num_types, num_types
+            )
+            .detach()
+            .cpu()
+        )
         results: list[dict[str, Any]] = []
         offset = 0
         for row, length in enumerate(lengths):
@@ -1547,6 +1573,9 @@ class MemoryTreeInference:
                     "benchmark_nll_sum": scored_nll,
                     "benchmark_correct": int(
                         correct_by_sequence[row].detach().cpu()
+                    ),
+                    "benchmark_confusion": (
+                        benchmark_confusion_by_sequence_cpu[row].tolist()
                     ),
                     "benchmark_time_abs_sum": float(
                         time_abs_by_sequence[row].detach().cpu()
@@ -2483,6 +2512,12 @@ class MemoryTreeInference:
         all_scalar_time_abs_sum = 0.0
         scalar_correct = 0
         scalar_time_abs_sum = 0.0
+        num_types = int(self.hawkes.num_types)
+        benchmark_confusion = (
+            [[0 for _ in range(num_types)] for _ in range(num_types)]
+            if compact
+            else None
+        )
         accepted_write_count = 0
         local_accepted_write_count = 0
         accepted_write_requests: list[Dict[str, Any]] = []
@@ -2798,6 +2833,8 @@ class MemoryTreeInference:
                     scalar_time_abs_sum += abs(
                         float(predicted_time.detach().cpu()) - true_time
                     )
+                    if benchmark_confusion is not None:
+                        benchmark_confusion[true_type][predicted_type] += 1
 
             if materialize_events:
                 event_row = {
@@ -3197,6 +3234,7 @@ class MemoryTreeInference:
                 "benchmark_events": max(event_count - 1, 0),
                 "benchmark_nll_sum": scored_nll,
                 "benchmark_correct": scalar_correct,
+                "benchmark_confusion": benchmark_confusion,
                 "benchmark_time_abs_sum": scalar_time_abs_sum,
             }
         return result

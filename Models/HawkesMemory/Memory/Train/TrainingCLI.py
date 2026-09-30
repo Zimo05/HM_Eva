@@ -2476,7 +2476,7 @@ def main() -> None:
         initialization_mode = (
             "legacy_random"
             if args.leaf_symmetry_scale > 0.0
-            else "none"
+            else ("semantic_blend" if effective_semantic_blend > 0.0 else "none")
         )
         initialization_stats = tree.break_initial_leaf_symmetry(
             relative_scale=args.leaf_symmetry_scale,
@@ -2528,10 +2528,18 @@ def main() -> None:
     )
     stability = _leaf_spectral_radius_summary(tree, hawkes)
     if stability["max"] >= 1.0:
+        advice = (
+            "set --semantic-blend 0 to preserve the fitted cold-start Hawkes "
+            "parameters, or reduce --semantic-blend"
+            if effective_semantic_blend > 0.0
+            else "reduce the active residual/leaf initialization scale, or "
+            "stabilize the cold-start Hawkes parameters"
+        )
         raise RuntimeError(
             "semantic initialization produced an unstable Hawkes expert "
-            f"(max spectral radius={stability['max']:.6f}); reduce the active "
-            "semantic/residual initialization scale"
+            f"(max spectral radius={stability['max']:.6f}, "
+            f"mode={initialization_mode}, "
+            f"semantic_blend={effective_semantic_blend:.6f}); {advice}."
         )
     print(
         "[Symmetry] "

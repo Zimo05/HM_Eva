@@ -53,7 +53,7 @@ from .resources import resource_record
 from .specs import JobSpec
 
 
-DEFAULT_HM_CONTINUAL_EPOCHS = 60
+DEFAULT_CONTINUAL_EPOCHS = 30
 BASELINE_INTENSITY_MODELS = frozenset(
     {"RMTPP", "FullyNN", "THP", "S2P2", "AttNHP"}
 )
@@ -374,7 +374,7 @@ def _continual_hm_command(
         "--device",
         resolved_device(args.device),
         "--epochs",
-        str(args.epochs or (1 if args.smoke else DEFAULT_HM_CONTINUAL_EPOCHS)),
+        str(args.epochs or (1 if args.smoke else DEFAULT_CONTINUAL_EPOCHS)),
         "--cold-start-epochs",
         str(cold_start_epochs),
         "--unified-topology-log-path",
@@ -474,7 +474,7 @@ def _continual_cl_config(args, protocol: CLProtocol, strategy: str) -> dict[str,
         "benchmark_id": protocol.benchmark_id,
         "benchmark_version": protocol.version,
         "epochs_per_task": int(
-            args.epochs or (1 if args.smoke else DEFAULT_HM_CONTINUAL_EPOCHS)
+            args.epochs or (1 if args.smoke else DEFAULT_CONTINUAL_EPOCHS)
         ),
         "cold_start_epochs": int(1 if args.smoke else 5),
         "training": {
@@ -663,7 +663,7 @@ def _baseline_command(model: str, args, prepared: Path, output: Path,
     env["PYTHONPATH"] = os.pathsep.join((str(__import__("pathlib").Path(__file__).resolve().parents[2]), env.get("PYTHONPATH", "")))
     if model in {"RMTPP", "FullyNN", "THP", "S2P2", "AttNHP"}:
         epochs = (
-            (1 if args.smoke else 60)
+            (1 if args.smoke else DEFAULT_CONTINUAL_EPOCHS)
             if args.epochs is None
             else args.epochs
         )
@@ -1837,6 +1837,16 @@ def run_continual_job(*, model: str, strategy: str, args, script: str = "") -> P
 
 def run_diagnostic_job(*, kind: str, args, script: str = "") -> Path:
     if kind in {"law_recovery", "frontier", "residual_rank"}:
+        ground_truth = None
+        if kind == "law_recovery" and not args.dry_run:
+            ground_truth = (
+                DATASETS_ROOT
+                / "DWS"
+                / f"tree_{args.variant}"
+                / f"parameters_{args.variant}.json"
+            )
+            if not ground_truth.is_file():
+                raise FileNotFoundError(f"DWS law recovery ground truth is missing: {ground_truth}")
         condition = kind if kind != "residual_rank" else f"residual_rank_{args.rank}"
         target = run_stationary_job(dataset="dws", model="HM", args=args, condition=condition, script=script)
         if kind == "frontier" and not args.dry_run:
@@ -1876,7 +1886,7 @@ def run_diagnostic_job(*, kind: str, args, script: str = "") -> Path:
                 args, target,
             )
             output = target / "law_recovery.json"
-            command = [args.python_executable or __import__("sys").executable, str(EVALUATION_ROOT / "core" / "law_recovery.py"), "--checkpoint", str(checkpoint), "--ground-truth", str(DATASETS_ROOT / "Data" / f"tree_{args.variant}" / f"parameters_{args.variant}.json"), "--output", str(output), "--device", resolved_device(args.device)]
+            command = [args.python_executable or __import__("sys").executable, str(EVALUATION_ROOT / "core" / "law_recovery.py"), "--checkpoint", str(checkpoint), "--ground-truth", str(ground_truth), "--output", str(output), "--device", resolved_device(args.device)]
             run_command(command, MODELS_ROOT / "HawkesMemory" / "Memory", env, target / "logs" / "law_recovery.log")
             recovery = json.loads(output.read_text(encoding="utf-8"))
             summary = json.loads((target / "native" / "summary.json").read_text(encoding="utf-8"))
